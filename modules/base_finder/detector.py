@@ -1,12 +1,15 @@
 """Loading-screen detection for CoC attack VODs.
 
-# NOTE FOR CV ENGINEER:
-# The is_loading_screen() detection thresholds are placeholders.
-# Before deploying, test against 10-20 real CoC YouTuber VODs and tune:
-#   - BRIGHTNESS_THRESHOLD
-#   - PROGRESS_BAR_Y_RANGE
-#   - COLOR_SIGNATURE (HSV ranges)
-# The structural approach (brightness + progress bar detection) is sound.
+Detection strategy:
+The CoC attack loading screen is visually simple — a single dragon icon on a
+uniform white-cloud or dark-cloud background. Gameplay frames are visually
+complex — hundreds of buildings, UI elements, text, troop deployment bar.
+
+This visual complexity gap is most cleanly captured by EDGE DENSITY (Canny
+edge detection). To make measurements resolution-invariant, every frame is
+first resized to REFERENCE_SIZE before signals are computed.
+
+Tuned against TH18 samples covering both bright and dark cloud variants.
 """
 from __future__ import annotations
 
@@ -18,55 +21,91 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-# --- Tunable thresholds (placeholders) -------------------------------------
-BRIGHTNESS_THRESHOLD = 70           # Mean V-channel value below this = "dark overlay"
-PROGRESS_BAR_Y_RANGE = (0.78, 0.88) # Vertical band (fraction of frame height) where the loading bar sits
-PROGRESS_BAR_MIN_BRIGHT_RATIO = 0.15  # Fraction of pixels in the band that must be "bright" (the bar itself)
-PROGRESS_BAR_BRIGHTNESS = 180         # V threshold defining a "bright" pixel within the band
-
-# CoC loading screen has a warm/orange-brown palette; tune empirically.
-COLOR_SIGNATURE_HSV_LOWER = np.array([5, 40, 30], dtype=np.uint8)
-COLOR_SIGNATURE_HSV_UPPER = np.array([30, 220, 200], dtype=np.uint8)
-COLOR_SIGNATURE_MIN_RATIO = 0.25  # At least this fraction of pixels in signature range
+# --- Tuned thresholds (from sample analysis) --------------------------------
+REFERENCE_SIZE = (1280, 720)        # All frames resized to this before measuring
+EDGE_DENSITY_THRESHOLD = 0.03       # Loading: ~0.005, Gameplay: 0.10+
+PIXEL_STD_THRESHOLD = 38.0          # Loading: 14-32, Gameplay: 45+
+CANNY_LOW_THRESHOLD = 50
+CANNY_HIGH_THRESHOLD = 150
 
 
-def _frame_brightness(frame: np.ndarray) -> float:
-    """Mean V-channel brightness of the frame."""
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    return float(hsv[:, :, 2].mean())
+def _crop_black_bars(frame: np.ndarray, threshold: int = 15) -> np.ndarray:
+    """Detect and crop black pillarbox/letterbox bars.
+
+    Scans rows/columns for ones that are >95% near-black pixels and crops them.
+    This avoids fake high-contrast edges between black bars and content.
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
+
+    # Find non-black columns (left-right bars)
+    col_means = gray.mean(axis=0)
+    non_black_cols = np.where(col_means > threshold)[0]
+    if len(non_black_cols) == 0:
+        return frame
+    x0, x1 = non_black_cols[0], non_black_cols[-1] + 1
+
+    # Find non-black rows (top-bottom bars)
+    row_means = gray.mean(axis=1)
+    non_black_rows = np.where(row_means > threshold)[0]
+    if len(non_black_rows) == 0:
+        return frame
+    y0, y1 = non_black_rows[0], non_black_rows[-1] + 1
+
+    return frame[y0:y1, x0:x1]
 
 
-def _has_progress_bar(frame: np.ndarray) -> bool:
-    """Check the lower band of the frame for a horizontal bright streak."""
-    h = frame.shape[0]
-    y0 = int(h * PROGRESS_BAR_Y_RANGE[0])
-    y1 = int(h * PROGRESS_BAR_Y_RANGE[1])
-    band = frame[y0:y1]
-    if band.size == 0:
-        return False
-    hsv = cv2.cvtColor(band, cv2.COLOR_BGR2HSV)
-    bright = hsv[:, :, 2] >= PROGRESS_BAR_BRIGHTNESS
-    return bright.mean() >= PROGRESS_BAR_MIN_BRIGHT_RATIO
+def _normalize(frame: np.ndarray) -> np.ndarray:
+    """Crop black bars and resize to reference size for invariant measurements."""
+    cropped = _crop_black_bars(frame)
+    if cropped.size == 0:
+        return frame
+    if cropped.shape[1] == REFERENCE_SIZE[0] and cropped.shape[0] == REFERENCE_SIZE[1]:
+        return cropped
+    return cv2.resize(cropped, REFERENCE_SIZE, interpolation=cv2.INTER_AREA)
 
 
-def _matches_color_signature(frame: np.ndarray) -> bool:
-    """Check whether the frame's HSV histogram matches the loading screen palette."""
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, COLOR_SIGNATURE_HSV_LOWER, COLOR_SIGNATURE_HSV_UPPER)
-    ratio = float(mask.mean()) / 255.0
-    return ratio >= COLOR_SIGNATURE_MIN_RATIO
+def _edge_density(frame: np.ndarray) -> float:
+    """Fraction of pixels classified as edges by Canny detection.
+
+    Loading screens: ~0.005 (smooth backgrounds, minimal detail)
+    Gameplay: 0.10+ (buildings, UI, text — all produce edges)
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, CANNY_LOW_THRESHOLD, CANNY_HIGH_THRESHOLD)
+    return float(edges.mean()) / 255.0
+
+
+def _pixel_std(frame: np.ndarray) -> float:
+    """Standard deviation of grayscale pixel values.
+
+    Loading screens: ~15-31 (uniform background dominates)
+    Gameplay: 45+ (varied colors and brightness everywhere)
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    return float(gray.std())
 
 
 def is_loading_screen(frame: np.ndarray) -> bool:
-    """Detect whether a frame is a CoC attack loading screen."""
+    """Detect whether a frame is a CoC attack loading screen.
+
+    Frame is resized to REFERENCE_SIZE first so thresholds work across
+    any input resolution. Edge density is the primary signal; pixel std
+    is a confirmation check.
+    """
     if frame is None or frame.size == 0:
         return False
-    if _frame_brightness(frame) >= BRIGHTNESS_THRESHOLD:
+
+    normalized = _normalize(frame)
+
+    edge_d = _edge_density(normalized)
+    if edge_d >= EDGE_DENSITY_THRESHOLD:
         return False
-    if not _has_progress_bar(frame):
+
+    px_std = _pixel_std(normalized)
+    if px_std >= PIXEL_STD_THRESHOLD:
         return False
-    if not _matches_color_signature(frame):
-        return False
+
     return True
 
 
