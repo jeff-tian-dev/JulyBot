@@ -4,18 +4,31 @@ Tracks completed work for the base finder module specifically. Append new dated 
 
 ---
 
-## 2026-05-19 — Phase 2: Pipeline state machine
+## 2026-05-19 — Phase 2: Extraction & storage validated
 
-**File:** [pipeline.py](pipeline.py)
+**Files:** [normalizer.py](normalizer.py), [pipeline.py](pipeline.py), [scripts/run_local_pipeline.py](../../scripts/run_local_pipeline.py)
 
-Replaced the simple `in_loading` flag with an explicit 4-state machine:
+**Pipeline state machine** (replaces simple `in_loading` flag):
 
-- **SCANNING** — samples at `TARGET_SAMPLE_FPS` (default 1fps) looking for loading screens
-- **SWEEPING** — frame-by-frame after detection to find the exact loading-screen end
+- **SCANNING** — samples at `TARGET_SAMPLE_FPS` (1fps) looking for loading screens
+- **SWEEPING** — frame-by-frame after detection to find exact loading-screen end
 - **WAITING** — counts down `POST_LOADING_DELAY_FRAMES` (default 30, ~1s at 30fps) for camera to settle
 - **CAPTURING** — grabs `CAPTURE_FRAMES_COUNT` (default 10) candidates spaced `CAPTURE_FRAME_SPACING` (default 6) raw frames apart, then returns to SCANNING
 
-All four constants are module-level tunables. `POST_LOADING_DELAY_FRAMES` is the main knob to tune — trades "camera settled / transition done" against "player hasn't moved the screen yet."
+`POST_LOADING_DELAY_FRAMES` is the main tuning knob — trades "camera settled / transition animation done" against "player hasn't started moving the screen yet."
+
+**Normalizer crop tuning** (validated against MLAuybQ7qKs):
+
+- `TOP_UI_FRACTION = 0.0` — top overlays (Available Loot panel, resource counters, Legend rank, Battle-ends-in timer) are semi-transparent; base is still visible through/around them. Kept for maximum base coverage.
+- `BOTTOM_UI_FRACTION = 0.33` — troop bar + Surrender/Boost buttons are fully opaque and completely block the base. Must be cropped.
+- `CANONICAL_SIZE = (1080, 490)` — preserves the actual game aspect ratio (~2.20:1 after pillarbox + bottom crop). YouTube delivers 16:9 with side black bars; the underlying game content is ~1.47:1, so the canonical size is derived from the game's natural proportions, not the YouTube frame.
+- Black-bar (pillarbox/letterbox) cropping added — imports `_crop_black_bars` from detector.py for a single source of truth.
+
+**Acknowledged trade-offs:**
+
+- Side UI panels (Available Loot on left, resource counters on right) are still visible in captured frames. A horizontal-band crop can't reach them. Acceptable because (a) the UI is in identical positions across all captures so it acts like consistent background, (b) pHash is largely tolerant of consistent backgrounds. Will revisit if Phase 3 matching is poor.
+
+**Local validation runner:** [scripts/run_local_pipeline.py](../../scripts/run_local_pipeline.py) — runs the full pipeline without any DB, saves PNGs to `data/bases/` + metadata.json. Used for Phase 2 visual inspection.
 
 Tests: 9/9 still passing.
 
