@@ -2,10 +2,13 @@
 
 Flow:
   1. List recent video URLs for each watched channel via yt-dlp.
-  2. Stream each video (no full download) and sample frames at ~2 fps.
-  3. Detect attack loading screens; capture the next 2-3 frames after each.
-  4. Normalize, pHash, and store new bases (skip duplicates).
-  5. Enforce sliding-window cache size limit.
+  2. Stream each video (no full download).
+  3. Sample frames at TARGET_SAMPLE_FPS scanning for loading screens.
+  4. On detection: sweep frame-by-frame to find loading-screen end,
+     wait POST_LOADING_DELAY_FRAMES for the camera to settle, then capture
+     CAPTURE_FRAMES_COUNT candidates spaced CAPTURE_FRAME_SPACING apart.
+  5. Normalize, pHash, and store new bases (skip duplicates).
+  6. Enforce sliding-window cache size limit.
 """
 from __future__ import annotations
 
@@ -27,8 +30,12 @@ logger = logging.getLogger(__name__)
 
 
 # --- Tunable parameters ----------------------------------------------------
-TARGET_SAMPLE_FPS = 2.0       # Approximate frame sample rate.
-FRAMES_AFTER_LOADING = 3      # Frames to capture once a loading screen ends.
+TARGET_SAMPLE_FPS = 1.0          # Initial scan rate when looking for loading screens
+POST_LOADING_DELAY_FRAMES = 30   # Raw frames to wait after loading ends before capturing
+                                 # (~1s at 30fps; tune to balance "camera settled" vs
+                                 # "player hasn't moved screen yet")
+CAPTURE_FRAMES_COUNT = 10        # Number of candidate frames to capture per attack
+CAPTURE_FRAME_SPACING = 6        # Raw frames between captured candidates (~0.2s at 30fps)
 MAX_VIDEOS_PER_CHANNEL = 10
 YTDLP_LIST_OPTS = {
     "extract_flat": True,
@@ -68,7 +75,14 @@ def _get_direct_stream_url(video_url: str) -> str | None:
 
 
 def _process_video_sync(video_url: str, channel_id: str) -> list[dict]:
-    """Synchronous frame-sampling. Returns list of candidate base records."""
+    """Synchronous frame-sampling with state machine for capture phases.
+
+    State machine:
+      SCANNING  -> sample at TARGET_SAMPLE_FPS, look for loading screen
+      SWEEPING  -> frame-by-frame after loading detected, find exact end
+      WAITING   -> count POST_LOADING_DELAY_FRAMES to skip transition
+      CAPTURING -> grab CAPTURE_FRAMES_COUNT candidates at CAPTURE_FRAME_SPACING
+    """
     stream_url = _get_direct_stream_url(video_url)
     if not stream_url:
         logger.warning("Could not resolve stream URL for %s", video_url)
@@ -79,38 +93,59 @@ def _process_video_sync(video_url: str, channel_id: str) -> list[dict]:
         logger.warning("OpenCV failed to open stream for %s", video_url)
         return []
 
+    SCANNING, SWEEPING, WAITING, CAPTURING = "scanning", "sweeping", "waiting", "capturing"
+
     try:
         source_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        step = max(1, int(round(source_fps / TARGET_SAMPLE_FPS)))
+        scan_step = max(1, int(round(source_fps / TARGET_SAMPLE_FPS)))
 
         candidates: list[dict] = []
         frame_idx = 0
-        in_loading = False
-        captured_after_loading = 0
+        state = SCANNING
+        wait_remaining = 0
+        capture_remaining = 0
+        spacing_counter = 0
 
         while True:
             ok, frame = cap.read()
             if not ok:
                 break
-            if frame_idx % step != 0:
-                frame_idx += 1
-                continue
 
-            if is_loading_screen(frame):
-                in_loading = True
-                captured_after_loading = 0
-            elif in_loading and captured_after_loading < FRAMES_AFTER_LOADING:
-                normalized = normalize_base(frame)
-                if normalized is not None:
-                    candidates.append({
-                        "image": normalized,
-                        "phash": compute_phash(normalized),
-                        "source_url": video_url,
-                        "source_channel": channel_id,
-                    })
-                captured_after_loading += 1
-                if captured_after_loading >= FRAMES_AFTER_LOADING:
-                    in_loading = False
+            if state == SCANNING:
+                # Only check every Nth frame to save compute
+                if frame_idx % scan_step == 0 and is_loading_screen(frame):
+                    state = SWEEPING
+
+            elif state == SWEEPING:
+                # Frame-by-frame until loading screen ends
+                if not is_loading_screen(frame):
+                    state = WAITING
+                    wait_remaining = POST_LOADING_DELAY_FRAMES
+
+            elif state == WAITING:
+                wait_remaining -= 1
+                if wait_remaining <= 0:
+                    state = CAPTURING
+                    capture_remaining = CAPTURE_FRAMES_COUNT
+                    spacing_counter = 0
+
+            elif state == CAPTURING:
+                if spacing_counter == 0:
+                    normalized = normalize_base(frame)
+                    if normalized is not None:
+                        candidates.append({
+                            "image": normalized,
+                            "phash": compute_phash(normalized),
+                            "source_url": video_url,
+                            "source_channel": channel_id,
+                        })
+                    capture_remaining -= 1
+                    if capture_remaining <= 0:
+                        state = SCANNING
+                    else:
+                        spacing_counter = CAPTURE_FRAME_SPACING
+                else:
+                    spacing_counter -= 1
 
             frame_idx += 1
     finally:
