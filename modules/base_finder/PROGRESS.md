@@ -4,6 +4,26 @@ Tracks completed work for the base finder module specifically. Append new dated 
 
 ---
 
+## 2026-05-19 — Phase 2.5: `looks_like_base()` filter (partial)
+
+**Files:** [detector.py](detector.py), [pipeline.py](pipeline.py)
+
+**Problem identified during Phase 2 multi-video validation:** running the pipeline against `YPIKri8-fMY` produced one capture per attack PLUS a menu screen capture. The detector's `is_loading_screen()` flags any visually simple frame as loading, which also catches main menus, donation popups, account switchers, and other low-detail UI states. After SWEEPING ends on such a state, the WAIT/CAPTURE phase would otherwise cache the menu instead of a base.
+
+**Fix:** added `looks_like_base(frame)` to detector.py as the inverse signal check. Real gameplay has edge density ~0.10–0.17; anything below `BASE_VIEW_MIN_EDGE_DENSITY = 0.08` is rejected. Wired into pipeline.py's CAPTURING state as a final gate before `candidates.append(...)`.
+
+**Result:** caught the simpler main-menu false positive (Battle / Ranked Battle / Practice screen). Still lets through busier-looking menus — observed an army composition screen pass the 0.08 threshold. The threshold was set from gameplay-only sample data; needs proper menu samples for clean tuning.
+
+**Open work (carry into Phase 1.5):**
+
+1. Bump `data/samples/loading/` and `data/samples/gameplay/` from ~5-6 each to 15-20 each, across 5+ creators.
+2. Create `data/samples/menus/` (army composition, donation popup, account switcher, clan castle, main menu, settings) with 15+ samples.
+3. Re-run `scripts/compare_signals.py` on the 3-category dataset and re-tune `BASE_VIEW_MIN_EDGE_DENSITY` (currently 0.08) to sit above all menu samples but below all gameplay samples.
+
+Tests: 9/9 still passing.
+
+---
+
 ## 2026-05-19 — Phase 2: Extraction & storage validated
 
 **Files:** [normalizer.py](normalizer.py), [pipeline.py](pipeline.py), [scripts/run_local_pipeline.py](../../scripts/run_local_pipeline.py)

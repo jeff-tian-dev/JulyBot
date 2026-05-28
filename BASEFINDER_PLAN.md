@@ -14,6 +14,50 @@ conditional on Phase 3 results.
 
 ---
 
+## Current status (2026-05-19)
+
+**Scope locked to TH18.** All tuning and validation is against TH18 content from YouTube VODs.
+
+**Phase 1 — Detection: COMPLETE.**
+- Detector pivoted from the original brightness + progress bar + color-signature approach to
+  edge density + pixel std (much cleaner signal separation).
+- Resolution-invariant: every frame resized to 1280×720 and black bars (pillarbox/letterbox)
+  cropped before measuring.
+- Validated against 4 TH18 VODs across multiple creators; all real loading screens detected.
+
+**Phase 2 — Extraction & storage: MOSTLY COMPLETE.**
+- 4-state pipeline machine (SCANNING → SWEEPING → WAITING → CAPTURING) with `POST_LOADING_DELAY_FRAMES`
+  as the main tunable.
+- Normalizer tuned for TH18: black-bar crop, `TOP_UI_FRACTION = 0.0` (top overlays semi-transparent,
+  preserved), `BOTTOM_UI_FRACTION = 0.33` (troop bar fully cropped),
+  `CANONICAL_SIZE = (1080, 490)` (preserves actual game aspect ratio).
+- `looks_like_base()` filter added to detector.py as final gate before caching. Catches
+  *some* menu false positives (main menu, donation popups) but `BASE_VIEW_MIN_EDGE_DENSITY = 0.08`
+  was set from gameplay samples only — it's a guess for the menu side and still lets through
+  busier-looking menus (e.g. army composition screen).
+- Validation done via [scripts/run_local_pipeline.py](scripts/run_local_pipeline.py) — no DB
+  required; saves PNGs + metadata.json to `data/bases/`.
+- See [modules/base_finder/PROGRESS.md](modules/base_finder/PROGRESS.md) for detailed change log.
+
+**Outstanding before Phase 3:**
+
+1. **Expand sample set.** Currently 5 loading + 6 gameplay screenshots from 2 creators. Bump to
+   15–20 per category across 5+ creators.
+2. **Create `data/samples/menus/` category** with 15+ screenshots of false-positive UI states
+   (army composition, donation popup, account switcher, clan castle, main menu, settings).
+3. **Re-tune `BASE_VIEW_MIN_EDGE_DENSITY`** by running [scripts/compare_signals.py](scripts/compare_signals.py)
+   on the 3-category sample set and picking a value above all menus but below gameplay.
+
+**Validation tooling (no DB needed):**
+- [scripts/scan_video.py](scripts/scan_video.py) — detection-only on a YouTube URL, prints timestamps
+- [scripts/run_local_pipeline.py](scripts/run_local_pipeline.py) — full pipeline → PNGs in data/bases/
+- [scripts/compare_crop.py](scripts/compare_crop.py) — extract one frame and visualize crop boundaries
+- [scripts/compare_signals.py](scripts/compare_signals.py) — compare signal values across sample categories
+- [scripts/debug_video.py](scripts/debug_video.py) — sample frames at specific timestamps
+- [scripts/test_detector.py](scripts/test_detector.py) — regression test against `data/samples/`
+
+---
+
 ## Phase 1 — Detection
 
 **Goal:** Make the loading-screen trigger reliable before anything else is built.
@@ -52,6 +96,29 @@ every clip in the test set. Zero false positives on the held-out set.
   the urge to add more signals before testing the three-signal approach first.
 - If the loading screen varies significantly across TH levels (it may), you may need
   per-TH-level thresholds or a wider range that covers all levels. Check this early.
+
+**Follow-up work (carry into Phase 1.5):**
+
+1. **Expand `data/samples/` coverage.** Current set is ~5 loading + 6 gameplay screenshots
+   from 2 creators. Bump to 15-20 per category across 5+ creators to harden thresholds.
+
+2. **Add `data/samples/menus/` category.** The current `is_loading_screen()` detects
+   "visually simple frames" — which is true of loading screens but ALSO of:
+   - Troop donation popups
+   - Account switcher
+   - Main menu (Battle / Practice / Ranked)
+   - Clan castle / clan chat overlays
+   - Settings / shop / season pass panels
+
+   These all get falsely flagged. The pipeline now uses a `looks_like_base()` filter at
+   capture time (edge density >= 0.08) to reject menus from being cached, but the
+   threshold (`BASE_VIEW_MIN_EDGE_DENSITY`) is set from gameplay sample data only.
+   Once a `menus/` sample set exists, re-run `scripts/compare_signals.py` to verify
+   menus sit cleanly below the threshold.
+
+3. **Add new transition-type detectors when needed** (post-attack screens, replay end
+   cards, etc.) as separate detection functions in `detector.py` — same architecture,
+   each gets its own threshold sample set.
 
 ---
 

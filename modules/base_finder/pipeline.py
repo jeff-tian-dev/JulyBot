@@ -22,7 +22,7 @@ import numpy as np
 import yt_dlp
 
 from config.settings import settings
-from modules.base_finder.detector import is_loading_screen
+from modules.base_finder.detector import is_loading_screen, looks_like_base
 from modules.base_finder.matcher import is_duplicate
 from modules.base_finder.normalizer import compute_phash, normalize_base, save_base_image
 
@@ -131,14 +131,18 @@ def _process_video_sync(video_url: str, channel_id: str) -> list[dict]:
 
             elif state == CAPTURING:
                 if spacing_counter == 0:
-                    normalized = normalize_base(frame)
-                    if normalized is not None:
-                        candidates.append({
-                            "image": normalized,
-                            "phash": compute_phash(normalized),
-                            "source_url": video_url,
-                            "source_channel": channel_id,
-                        })
+                    # Final gate: only save if the frame actually looks like
+                    # a base view (rejects menus, popups, account switchers
+                    # that passed is_loading_screen's "too simple" check).
+                    if looks_like_base(frame):
+                        normalized = normalize_base(frame)
+                        if normalized is not None:
+                            candidates.append({
+                                "image": normalized,
+                                "phash": compute_phash(normalized),
+                                "source_url": video_url,
+                                "source_channel": channel_id,
+                            })
                     capture_remaining -= 1
                     if capture_remaining <= 0:
                         state = SCANNING
