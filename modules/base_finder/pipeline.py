@@ -102,6 +102,7 @@ def _process_video_sync(video_url: str, channel_id: str) -> list[dict]:
         candidates: list[dict] = []
         frame_idx = 0
         state = SCANNING
+        attack_id = 0
         wait_remaining = 0
         capture_remaining = 0
         spacing_counter = 0
@@ -115,6 +116,7 @@ def _process_video_sync(video_url: str, channel_id: str) -> list[dict]:
                 # Only check every Nth frame to save compute
                 if frame_idx % scan_step == 0 and is_loading_screen(frame):
                     state = SWEEPING
+                    attack_id += 1
 
             elif state == SWEEPING:
                 # Frame-by-frame until loading screen ends
@@ -142,6 +144,7 @@ def _process_video_sync(video_url: str, channel_id: str) -> list[dict]:
                                 "phash": compute_phash(normalized),
                                 "source_url": video_url,
                                 "source_channel": channel_id,
+                                "attack_id": attack_id,
                             })
                     capture_remaining -= 1
                     if capture_remaining <= 0:
