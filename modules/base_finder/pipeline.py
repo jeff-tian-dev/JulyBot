@@ -34,8 +34,8 @@ TARGET_SAMPLE_FPS = 1.0          # Initial scan rate when looking for loading sc
 POST_LOADING_DELAY_FRAMES = 30   # Raw frames to wait after loading ends before capturing
                                  # (~1s at 30fps; tune to balance "camera settled" vs
                                  # "player hasn't moved screen yet")
-CAPTURE_FRAMES_COUNT = 10        # Number of candidate frames to capture per attack
-CAPTURE_FRAME_SPACING = 6        # Raw frames between captured candidates (~0.2s at 30fps)
+CAPTURE_FRAMES_COUNT = 5         # Number of candidate frames to capture per attack
+CAPTURE_FRAME_SPACING = 3        # Raw frames between captured candidates (~0.1s at 30fps)
 MAX_VIDEOS_PER_CHANNEL = 10
 YTDLP_LIST_OPTS = {
     "extract_flat": True,
@@ -133,19 +133,19 @@ def _process_video_sync(video_url: str, channel_id: str) -> list[dict]:
 
             elif state == CAPTURING:
                 if spacing_counter == 0:
-                    # Final gate: only save if the frame actually looks like
-                    # a base view (rejects menus, popups, account switchers
-                    # that passed is_loading_screen's "too simple" check).
-                    if looks_like_base(frame):
-                        normalized = normalize_base(frame)
-                        if normalized is not None:
-                            candidates.append({
-                                "image": normalized,
-                                "phash": compute_phash(normalized),
-                                "source_url": video_url,
-                                "source_channel": channel_id,
-                                "attack_id": attack_id,
-                            })
+                    # Normalize first, then gate on the canonical image so
+                    # looks_like_base() thresholds are calibrated on the same
+                    # crop/size as what gets saved (raw frames have bottom UI
+                    # that inflates edge density before normalize_base crops it).
+                    normalized = normalize_base(frame)
+                    if normalized is not None and looks_like_base(normalized):
+                        candidates.append({
+                            "image": normalized,
+                            "phash": compute_phash(normalized),
+                            "source_url": video_url,
+                            "source_channel": channel_id,
+                            "attack_id": attack_id,
+                        })
                     capture_remaining -= 1
                     if capture_remaining <= 0:
                         state = SCANNING

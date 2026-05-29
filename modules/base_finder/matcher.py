@@ -35,7 +35,7 @@ async def find_matching_bases(
     pool: asyncpg.Pool,
     query_image: np.ndarray,
     top_n: int = 5,
-    phash_threshold: int = 10,
+    phash_threshold: int = 15,
 ) -> list[dict]:
     """Find the closest matching bases in the cache for a query image."""
     normalized = normalize_base(query_image)

@@ -25,8 +25,10 @@ logger = logging.getLogger(__name__)
 REFERENCE_SIZE = (1280, 720)        # All frames resized to this before measuring
 EDGE_DENSITY_THRESHOLD = 0.03       # Loading: ~0.005, Gameplay: 0.10+
 PIXEL_STD_THRESHOLD = 38.0          # Loading: 14-32, Gameplay: 45+
-BASE_VIEW_MIN_EDGE_DENSITY = 0.08   # Captured frames below this are likely menus
-                                    # or popups, not actual base views
+BASE_VIEW_MIN_EDGE_DENSITY = 0.09   # Frames below this are menus/popups, not bases
+BASE_VIEW_BOUNDARY_MAX_STD = 45.0   # In the 0.09-0.10 edge band, army composition
+BASE_VIEW_BOUNDARY_EDGE_HIGH = 0.10 # screens pass the edge gate but have std 47-49;
+                                    # real bases in that band have std 31-42
 CANNY_LOW_THRESHOLD = 50
 CANNY_HIGH_THRESHOLD = 150
 
@@ -126,7 +128,12 @@ def looks_like_base(frame: np.ndarray) -> bool:
     if frame is None or frame.size == 0:
         return False
     normalized = _normalize(frame)
-    return _edge_density(normalized) >= BASE_VIEW_MIN_EDGE_DENSITY
+    ed = _edge_density(normalized)
+    if ed < BASE_VIEW_MIN_EDGE_DENSITY:
+        return False
+    if ed < BASE_VIEW_BOUNDARY_EDGE_HIGH and _pixel_std(normalized) >= BASE_VIEW_BOUNDARY_MAX_STD:
+        return False
+    return True
 
 
 def find_loading_screen_end(frames: list[np.ndarray]) -> int | None:
