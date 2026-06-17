@@ -1,0 +1,16 @@
+[Unit]
+Description=JulyBot Twitter Stalker
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=opc
+WorkingDirectory=/opt/julybot
+EnvironmentFile=/opt/julybot/.env
+ExecStart=/opt/julybot/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

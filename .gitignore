@@ -13,3 +13,5 @@ dist/
 build/
 .venv/
 venv/
+*.key
+*.pem

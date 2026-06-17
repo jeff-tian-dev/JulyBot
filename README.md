@@ -1,11 +1,12 @@
 # JulyBot — Clash of Clans Discord Bot
 
-A Discord bot for Clash of Clans clans, built around four independent modules:
+A Discord bot for Clash of Clans clans, built around five independent modules:
 
 - **Base finder** — ingests YouTube VODs from watched channels, extracts attack-loading-screen base layouts via OpenCV, and lets users find similar bases by uploading a screenshot.
 - **Legend tracker** — polls the official Clash of Clans API on a schedule, stores daily snapshots of every linked player's legend league stats, and computes day-over-day diffs.
 - **Account linker** — verifies a Discord user owns a given CoC account using the in-game API token flow, and stores the link.
 - **Ping automator** — APScheduler jobs that drive the polls and ingestion, plus role-based notification hooks.
+- **Twitter stalker** — tracks Twitter/X accounts via twitterapi.io webhook filter rules and posts new original tweets to a Discord channel.
 
 The Discord layer (`disnake` Cogs) is a thin shim. Each module is a plain Python package, callable and testable without a running bot.
 
@@ -48,20 +49,27 @@ JulyBot/
 |   |   |-- detector.py       # loading-screen detection (CV stub)
 |   |   |-- normalizer.py     # crop UI, resize, pHash
 |   |   `-- matcher.py        # find_matching_bases / is_duplicate
+|   |-- twitter_stalker/
+|   |   |-- api.py            # twitterapi.io client
+|   |   |-- accounts.py       # stalk list CRUD + alert channel config
+|   |   |-- rules.py          # filter rule sync
+|   |   |-- webhook.py        # incoming webhook handler
+|   |   `-- notifier.py       # Discord embed alerts
 |   `-- ping_automator/
 |       `-- scheduler.py      # APScheduler jobs + ping hook
 |-- discord_bot/
 |   |-- bot.py                # create_bot() — InteractionBot factory
-|   `-- commands/             # one Cog per module (account, legend, base_finder, ping)
+|   `-- commands/             # one Cog per module (account, legend, base_finder, ping, twitter)
 |-- tests/
 |   |-- conftest.py           # stubs env vars before project imports
 |   |-- test_account_linker.py
 |   |-- test_legend_tracker.py
-|   `-- test_base_finder.py
+|   |-- test_base_finder.py
+|   `-- test_twitter_stalker.py
 |-- scripts/
 |   `-- init_db.py            # standalone DB initializer
 |-- data/bases/               # generated base images (gitignored except .gitkeep)
-|-- main.py                   # entry point — pool + scheduler + bot
+|-- main.py                   # entry point — pool + webhook + scheduler + bot
 |-- requirements.txt
 |-- .env.example
 |-- CLAUDE.md                 # project conventions for Claude Code
@@ -109,6 +117,14 @@ cp .env.example .env
 | `YOUTUBE_CHANNEL_IDS`           | no       | empty                                  | Comma-separated list, e.g. `UCabc,UCxyz`           |
 | `LEGEND_POLL_INTERVAL_MINUTES`  | no       | `60`                                   | Legend snapshot cadence                            |
 | `CACHE_REFRESH_INTERVAL_HOURS`  | no       | `24`                                   | Base-finder ingestion cadence                      |
+| `TWITTERAPI_IO_KEY`             | no*      | empty                                  | twitterapi.io API key for Twitter stalker          |
+| `TWITTER_WEBHOOK_HOST`          | no       | `0.0.0.0`                              | Bind address for webhook HTTP server               |
+| `TWITTER_WEBHOOK_PORT`          | no       | `8080`                                 | Port for webhook HTTP server                       |
+| `TWITTER_WEBHOOK_PATH`          | no       | `/webhooks/twitter`                    | Must match URL registered in twitterapi.io dashboard |
+| `TWITTER_FILTER_INTERVAL_SECONDS` | no     | `60`                                   | Filter rule check interval (seconds)               |
+| `TWITTER_FILTER_TAG`            | no       | `julybot-stalk`                        | Tag for the twitterapi.io filter rule              |
+
+\*Required at runtime for `/stalk` and webhook delivery; bot starts without it but Twitter commands will error.
 
 Missing any required variable raises a clear `ValueError` at startup.
 
@@ -126,7 +142,21 @@ This creates the `vector` extension, all four tables, and seeds `watched_channel
 python main.py
 ```
 
-Startup sequence: load settings -> open asyncpg pool -> ensure tables -> start APScheduler -> connect Discord. Ctrl-C triggers an ordered shutdown of all three.
+Startup sequence: load settings -> open asyncpg pool -> ensure tables -> start webhook server -> start APScheduler -> connect Discord. Ctrl-C triggers an ordered shutdown of all services.
+
+### 6. Twitter stalker setup (optional)
+
+Requires a [twitterapi.io](https://twitterapi.io) account and API key (`TWITTERAPI_IO_KEY`).
+
+1. **Register a public webhook URL** in the twitterapi.io dashboard pointing to your bot, e.g. `https://your-domain.com/webhooks/twitter` (path must match `TWITTER_WEBHOOK_PATH`).
+2. **Local dev:** run `ngrok http 8080` and paste the ngrok HTTPS URL + path into the dashboard. Free ngrok URLs change on restart — update the dashboard each time.
+3. **Production:** put a reverse proxy (nginx/Caddy) in front of port `8080` with TLS.
+4. Start the bot, then in Discord:
+   - `/settwitterchannel #alerts` — where tweets are posted
+   - `/stalk username` — add an account (creates/updates the filter rule automatically)
+   - `/stalklist` — view the list
+
+Only **original tweets** are forwarded (retweets and replies are ignored).
 
 ---
 
@@ -138,6 +168,9 @@ Startup sequence: load settings -> open asyncpg pool -> ensure tables -> start A
 | `legend_snapshots` | One row per `(coc_tag, snapshot_date)`; trophies + attack/defense counters |
 | `base_cache`       | Extracted base images: path, pHash, source, town hall, `vector(512)` embedding |
 | `watched_channels` | YouTube channel IDs the base finder pulls from                            |
+| `stalked_twitter_accounts` | Twitter/X handles on the stalk list                                 |
+| `twitter_stalker_config` | Alert channel ID and twitterapi.io filter rule ID (singleton row)     |
+| `seen_tweets`      | Tweet IDs already posted to Discord (dedup)                               |
 
 See [database/models.py](database/models.py) for the exact DDL.
 
@@ -168,8 +201,12 @@ Tests mock `asyncpg.Pool` and patch `aiohttp` calls — no Postgres or network a
 | `/cachestats`                    | base_finder        |
 | `/setpingchannel <channel>`      | ping_automator     |
 | `/togglepings`                   | ping_automator     |
+| `/stalk <username>`              | twitter_stalker    |
+| `/unstalk <username>`            | twitter_stalker    |
+| `/stalklist`                     | twitter_stalker    |
+| `/settwitterchannel <channel>`   | twitter_stalker    |
 
-All currently respond with `[<module>] This command is not yet implemented.` — wire them up in [discord_bot/commands/](discord_bot/commands/) once the underlying module is exercised.
+Most commands still respond with placeholder text except the **twitter stalker** commands above.
 
 ---
 

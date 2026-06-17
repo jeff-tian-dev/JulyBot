@@ -8,6 +8,8 @@ import logging
 
 import asyncpg
 
+from config.settings import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,20 +64,67 @@ CREATE TABLE IF NOT EXISTS watched_channels (
 );
 """
 
-ALL_TABLES = ("users", "legend_snapshots", "base_cache", "watched_channels")
+CREATE_STALKED_TWITTER_ACCOUNTS = """
+CREATE TABLE IF NOT EXISTS stalked_twitter_accounts (
+    id SERIAL PRIMARY KEY,
+    twitter_username VARCHAR(50) NOT NULL UNIQUE,
+    display_name VARCHAR(100),
+    added_by_discord_id BIGINT,
+    added_at TIMESTAMP DEFAULT NOW()
+);
+"""
+
+CREATE_TWITTER_STALKER_CONFIG = """
+CREATE TABLE IF NOT EXISTS twitter_stalker_config (
+    id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    discord_channel_id BIGINT,
+    filter_rule_id VARCHAR(100),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+"""
+
+CREATE_SEEN_TWEETS = """
+CREATE TABLE IF NOT EXISTS seen_tweets (
+    tweet_id VARCHAR(50) PRIMARY KEY,
+    twitter_username VARCHAR(50),
+    seen_at TIMESTAMP DEFAULT NOW()
+);
+"""
+
+ALL_TABLES = (
+    "users",
+    "legend_snapshots",
+    "base_cache",
+    "watched_channels",
+    "stalked_twitter_accounts",
+    "twitter_stalker_config",
+    "seen_tweets",
+)
 
 
 async def create_tables(pool: asyncpg.Pool) -> None:
-    """Create the pgvector extension and all tables if they do not exist."""
+    """Create tables if they do not exist. Twitter mode skips pgvector and CoC tables."""
     async with pool.acquire() as conn:
-        logger.info("Ensuring pgvector extension is installed")
-        await conn.execute(CREATE_VECTOR_EXTENSION)
-        for ddl, name in (
-            (CREATE_USERS, "users"),
-            (CREATE_LEGEND_SNAPSHOTS, "legend_snapshots"),
-            (CREATE_BASE_CACHE, "base_cache"),
-            (CREATE_WATCHED_CHANNELS, "watched_channels"),
-        ):
+        if settings.twitter_only:
+            table_ddls = (
+                (CREATE_STALKED_TWITTER_ACCOUNTS, "stalked_twitter_accounts"),
+                (CREATE_TWITTER_STALKER_CONFIG, "twitter_stalker_config"),
+                (CREATE_SEEN_TWEETS, "seen_tweets"),
+            )
+        else:
+            logger.info("Ensuring pgvector extension is installed")
+            await conn.execute(CREATE_VECTOR_EXTENSION)
+            table_ddls = (
+                (CREATE_USERS, "users"),
+                (CREATE_LEGEND_SNAPSHOTS, "legend_snapshots"),
+                (CREATE_BASE_CACHE, "base_cache"),
+                (CREATE_WATCHED_CHANNELS, "watched_channels"),
+                (CREATE_STALKED_TWITTER_ACCOUNTS, "stalked_twitter_accounts"),
+                (CREATE_TWITTER_STALKER_CONFIG, "twitter_stalker_config"),
+                (CREATE_SEEN_TWEETS, "seen_tweets"),
+            )
+
+        for ddl, name in table_ddls:
             logger.info("Creating table %s if not exists", name)
             await conn.execute(ddl)
 
