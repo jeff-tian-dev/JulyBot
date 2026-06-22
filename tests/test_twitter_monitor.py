@@ -126,6 +126,9 @@ def test_build_tweet_embeds_with_media() -> None:
     assert result[0].image.url == "https://pbs.twimg.com/media/a.jpg"
     assert result[1].image.url == "https://pbs.twimg.com/media/b.jpg"
     assert result[0].author.icon_url == "https://unavatar.io/x/testuser"
+    # Shared url across image embeds makes Discord render them as one gallery.
+    assert result[0].url == "https://x.com/testuser/status/456"
+    assert result[1].url == result[0].url
 
 
 def test_build_tweet_embed_profile_fallback() -> None:

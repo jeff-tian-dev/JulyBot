@@ -164,8 +164,17 @@ def build_tweet_embeds(tweet) -> list[disnake.Embed]:
     embed = disnake.Embed(description=description, colour=0x1D9BF0)
     embed.set_author(name=author_line, url=profile_url, icon_url=icon_url)
 
-    if media_urls:
-        embed.set_image(url=media_urls[0])
+    gallery_urls = media_urls[:MAX_MEDIA_EMBEDS]
+
+    # Discord merges embeds that share the same `url` into a single multi-image
+    # gallery (up to 4 images). Give the image embeds a common url so several
+    # photos render as one grid instead of separate stacked embeds.
+    shared_url = _tweet_url(tweet) if len(gallery_urls) > 1 else None
+
+    if gallery_urls:
+        embed.set_image(url=gallery_urls[0])
+    if shared_url:
+        embed.url = shared_url
 
     embed.set_footer(text=f"@{username}")
 
@@ -174,8 +183,8 @@ def build_tweet_embeds(tweet) -> list[disnake.Embed]:
         embed.timestamp = created_on
 
     embeds = [embed]
-    for image_url in media_urls[1:MAX_MEDIA_EMBEDS]:
-        extra = disnake.Embed()
+    for image_url in gallery_urls[1:]:
+        extra = disnake.Embed(url=shared_url)
         extra.set_image(url=image_url)
         embeds.append(extra)
 
