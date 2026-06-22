@@ -57,7 +57,8 @@ Default workflow:
 
 - **`config.settings` raises at import time.** Tests rely on `conftest.py` to stub vars. Don't move the `_load()` call inside a function — other modules use the eager singleton.
 - **`signal.SIGTERM` isn't supported on Windows.** [main.py](main.py) wraps `loop.add_signal_handler` in a `try/except NotImplementedError`. If you refactor shutdown, preserve that fallback.
-- **`pgvector` requires a Postgres extension.** `init_db.py` runs `CREATE EXTENSION IF NOT EXISTS vector;` at the start of `create_tables`. The DB user must have privileges to create extensions on first run.
+- **`pgvector` requires a Postgres extension.** `init_db.py` runs `CREATE EXTENSION IF NOT EXISTS vector;` at the start of `create_tables`. On Supabase the `postgres` role has this privilege, so it just works on first run.
+- **The DB is Supabase (hosted), not local.** `DATABASE_URL` is a Supabase **Session pooler** string with `?sslmode=require`. asyncpg + Supabase's pooler can't use prepared-statement caching, so [database/connection.py](database/connection.py) creates the pool with `statement_cache_size=0` and strips that param from the DSN — **don't remove either.** `scripts/init_db.py` reuses that same `get_pool()`; don't make it open its own raw pool.
 - **`data/` is gitignored except for `data/bases/.gitkeep`.** Don't add tracked files under `data/` — generated images live there.
 - **APScheduler `create_scheduler(pool)` takes the pool.** The original spec showed a no-arg signature, but jobs need the pool, so it's passed at construction. If you ever need other long-lived deps in jobs, do the same — don't reach for globals.
 
@@ -79,3 +80,29 @@ When you discover a non-obvious convention, an architectural decision, or a work
 - `requirements.txt` versions confirmed installable on Python 3.13 / Windows: disnake 2.12, asyncpg 0.31, opencv-python 4.13, yt-dlp 2026.3, imagehash 4.3, APScheduler 3.11, pgvector 0.4.
 - Decision: `tests/conftest.py` was added (not in the original spec) because eager-loading settings broke test collection. Documented above.
 - Decision: `.gitignore` un-ignores `data/bases/.gitkeep` specifically. The original spec listed `data/` as ignored *and* asked for a tracked `.gitkeep` — resolved by being more specific.
+
+## 2026-06-18 — cleanup pass (foundation tidy-up)
+
+- Removed the abandoned `twitter_stalker` experiment entirely: the module, its Discord cog, helper scripts, `requirements-twitter.txt`, tests, and the `.agents/`/`.cursor/` twitterapi skill dirs. The repo is a Clash of Clans bot only — there is no `BOT_MODE` switch.
+- Deleted stale planning docs (`WORKDISTRIBUTION.md`, `BASEFINDER_PLAN.md`, `modules/base_finder/PROGRESS.md`). **`README.md` (users) and this file (agent conventions) are now the only source-of-truth docs** — don't reintroduce a separate roadmap/ownership doc; append status here instead.
+- Added the `guild_settings` table to [database/models.py](database/models.py) (used by the ping_automator cog: `guild_id` PK, `ping_channel_id`, `pings_enabled`, `updated_at`). It was previously only described in the now-deleted work-split doc.
+- Deploy moved from VM/systemd to local Mac Studio + launchd: `deploy/setup.sh`, `start.sh`, `stop.sh`, `install-service.sh`, `uninstall-service.sh`, `com.julybot.plist.template`. There is a `.venv` in the repo root; run via `.venv/bin/python`.
+- Switched the database from local Docker Postgres to **Supabase** (hosted). Removed `deploy/docker-compose.postgres.yml` and all Docker references from `setup.sh`/`start.sh`/docs. The bot runs on the Mac Studio; the DB is remote. See the Supabase gotcha above for the `statement_cache_size=0` requirement.
+- State of play: module logic is implemented; **all Discord cogs still return placeholder text** — wiring them to the module functions is the next build step (see the per-command table in README).
+
+## 2026-06-18 — twitter_monitor module
+
+- Added `modules/twitter_monitor/` — polls watched X accounts every 5 minutes via `tweety-ns` using burner-account cookies from `TWITTER_COOKIES`. Posts new tweets as Discord embeds (profile pic, name, text, link). Retweets are skipped.
+- New tables: `twitter_watched_accounts`, `seen_tweets`. Extended `guild_settings` with `twitter_channel_id` and `twitter_enabled` (idempotent `ALTER TABLE` in `create_tables`).
+- Admin-only slash commands use `default_member_permissions=disnake.Permissions(administrator=True)` — hidden from and blocked for non-admins at the Discord API level.
+- Twitter is **optional**: leave `TWITTER_COOKIES` empty to disable the scheduler job; cog commands reply that monitoring is not configured.
+- Session files persist under `data/twitter/` (gitignored). Use a dedicated burner X account; re-export cookies when auth fails.
+- `create_scheduler(pool, bot)` now takes the Discord bot so the twitter job can post to channels. `main.py` passes `bot` and calls `close_twitter_client()` on shutdown.
+
+## 2026-06-19 — youtube_feed module
+
+- Added `modules/youtube_feed/` — polls watched YouTube channels every 10 minutes via `feedparser` RSS (`feeds/videos.xml`). Tracks only the latest video ID per channel; posts a Discord embed when it changes. Seeds `last_seen_video_id` on startup, on add, and as a poll safety net when NULL.
+- New table: `youtube_watched_channels`. Extended `guild_settings` with `youtube_channel_id` and `youtube_enabled` (idempotent `ALTER TABLE` in `create_tables`).
+- Admin-only slash commands: `/setyoutubechannel`, `/toggleyoutube`, `/youtube_add`, `/youtube_remove`, `/youtube_list`.
+- `YOUTUBE_FEED_POLL_INTERVAL_MINUTES` env var (default 10). Twitter poll default also changed from 5 → 10 minutes.
+- APScheduler job `poll_youtube_feed` is always registered (no auth gate). `main.py` calls `seed_unseeded_channels(pool)` before starting the scheduler.

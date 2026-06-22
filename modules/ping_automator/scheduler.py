@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 import asyncpg
+import disnake
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -11,6 +12,8 @@ from config.settings import settings
 from modules.base_finder.pipeline import run_pipeline
 from modules.legend_tracker.poller import poll_all_legend_players
 from modules.legend_tracker.snapshots import save_snapshot
+from modules.twitter_monitor.poller import poll_twitter_accounts
+from modules.youtube_feed.poller import poll_youtube_channels
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +51,27 @@ async def send_legend_ping(bot, discord_id: int, message: str) -> None:
     logger.info("send_legend_ping stub: discord_id=%s message=%r", discord_id, message)
 
 
-def create_scheduler(pool: asyncpg.Pool) -> AsyncIOScheduler:
+async def poll_twitter(pool: asyncpg.Pool, bot: disnake.Client) -> None:
+    """Scheduled job: poll watched X accounts and post new tweets to Discord."""
+    try:
+        summary = await poll_twitter_accounts(pool, bot)
+        if summary["accounts_polled"] or summary["tweets_posted"] or summary["errors"]:
+            logger.info("Twitter poll summary: %s", summary)
+    except Exception:
+        logger.exception("poll_twitter_accounts raised")
+
+
+async def poll_youtube(pool: asyncpg.Pool, bot: disnake.Client) -> None:
+    """Scheduled job: poll watched YouTube channels and post new videos to Discord."""
+    try:
+        summary = await poll_youtube_channels(pool, bot)
+        if summary["channels_polled"] or summary["videos_posted"] or summary["errors"]:
+            logger.info("YouTube poll summary: %s", summary)
+    except Exception:
+        logger.exception("poll_youtube_channels raised")
+
+
+def create_scheduler(pool: asyncpg.Pool, bot: disnake.Client) -> AsyncIOScheduler:
     """Build (but do not start) an AsyncIOScheduler with all recurring jobs."""
     scheduler = AsyncIOScheduler()
 
@@ -65,6 +88,23 @@ def create_scheduler(pool: asyncpg.Pool) -> AsyncIOScheduler:
         trigger=IntervalTrigger(hours=settings.CACHE_REFRESH_INTERVAL_HOURS),
         kwargs={"pool": pool},
         id="refresh_base_cache",
+        replace_existing=True,
+    )
+
+    if settings.TWITTER_COOKIES:
+        scheduler.add_job(
+            poll_twitter,
+            trigger=IntervalTrigger(minutes=settings.TWITTER_POLL_INTERVAL_MINUTES),
+            kwargs={"pool": pool, "bot": bot},
+            id="poll_twitter_accounts",
+            replace_existing=True,
+        )
+
+    scheduler.add_job(
+        poll_youtube,
+        trigger=IntervalTrigger(minutes=settings.YOUTUBE_FEED_POLL_INTERVAL_MINUTES),
+        kwargs={"pool": pool, "bot": bot},
+        id="poll_youtube_feed",
         replace_existing=True,
     )
 

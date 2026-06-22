@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncpg  # noqa: E402
 
 from config.settings import settings  # noqa: E402
+from database.connection import close_pool, get_pool  # noqa: E402
 from database.models import create_tables  # noqa: E402
 
 logger = logging.getLogger("init_db")
@@ -42,9 +43,10 @@ async def _seed_watched_channels(pool: asyncpg.Pool) -> int:
 
 async def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    print(f"Connecting to {settings.DATABASE_URL.split('@')[-1]} ...")
+    host = settings.DATABASE_URL.split("@")[-1].split("?")[0]
+    print(f"Connecting to {host} ...")
     try:
-        pool = await asyncpg.create_pool(dsn=settings.DATABASE_URL, min_size=1, max_size=2)
+        pool = await get_pool()
     except Exception as e:
         print(f"FAILED to connect: {e}")
         return 1
@@ -58,7 +60,7 @@ async def main() -> int:
         print(f"FAILED during init: {e}")
         return 1
     finally:
-        await pool.close()
+        await close_pool()
 
 
 if __name__ == "__main__":

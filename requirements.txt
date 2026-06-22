@@ -9,5 +9,7 @@ numpy>=1.26.0
 imagehash>=4.3.1
 APScheduler>=3.10.0
 pgvector>=0.2.4
+tweety-ns>=2.4.0
+feedparser>=6.0.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0

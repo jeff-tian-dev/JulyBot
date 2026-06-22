@@ -16,22 +16,21 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 
-COG_MODULES_FULL = (
-    "discord_bot.commands.account_commands",
-    "discord_bot.commands.legend_commands",
-    "discord_bot.commands.base_finder_commands",
-    "discord_bot.commands.ping_commands",
+COG_MODULES = (
     "discord_bot.commands.twitter_commands",
+    "discord_bot.commands.youtube_commands",
+    "discord_bot.commands.moderation_commands",
 )
 
-COG_MODULES_TWITTER = (
-    "discord_bot.commands.twitter_commands",
-)
+# Disabled until wired up (still under development):
+# "discord_bot.commands.account_commands",
+# "discord_bot.commands.legend_commands",
+# "discord_bot.commands.base_finder_commands",
+# "discord_bot.commands.ping_commands",
 
 
 def create_bot(pool: asyncpg.Pool) -> commands.InteractionBot:
-    """Build a configured InteractionBot with Cogs for the active BOT_MODE."""
-    cog_modules = COG_MODULES_TWITTER if settings.twitter_only else COG_MODULES_FULL
+    """Build a configured InteractionBot with Cogs for all modules."""
     intents = disnake.Intents.default()
     intents.message_content = True
 
@@ -47,7 +46,7 @@ def create_bot(pool: asyncpg.Pool) -> commands.InteractionBot:
     async def on_ready() -> None:
         logger.info("Discord bot ready as %s (id=%s)", bot.user, getattr(bot.user, "id", None))
 
-    for module in cog_modules:
+    for module in COG_MODULES:
         bot.load_extension(module)
         logger.info("Loaded extension %s", module)
 

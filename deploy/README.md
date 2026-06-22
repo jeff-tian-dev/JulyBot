@@ -1,76 +1,62 @@
-# VM deployment — Twitter stalker only
+# Mac Studio deployment
 
-Deploy JulyBot to a Linux VM with `BOT_MODE=twitter` (only `/stalk`, `/unstalk`, `/stalklist`, `/settwitterchannel`).
+JulyBot runs locally on this Mac Studio at `/Users/jefftian/JulyBot`.
 
-## Prerequisites on the VM (Oracle Cloud / etc.)
+## Prerequisites
 
-1. **Open inbound ports** in your cloud security list / firewall:
-   - **TCP 22** — SSH (required to deploy)
-   - **TCP 8080** — webhook server (twitterapi.io must reach this), *or* **443** if you put Caddy/nginx in front
+- **Python 3.11+** — `python3` on PATH (Homebrew or system)
+- **Supabase project** — the hosted Postgres database (pgvector enabled). Grab the **Session pooler** connection string from Project Settings → Database.
+- **Discord bot token** and **CoC API token** — CoC token must be IP-whitelisted to this machine's public IP
 
-2. **SSH access** — default user is often `ubuntu` (Ubuntu) or `opc` (Oracle Linux). Test from your PC:
-   ```bash
-   ssh -i ssh-key-2026-06-10.key ubuntu@40.233.86.65
-   ```
-
-3. **HTTPS for webhooks** — twitterapi.io expects a **public HTTPS** webhook URL. Options:
-   - Point a domain at `40.233.86.65` and use Caddy + Let's Encrypt
-   - Temporary dev: run `ngrok http 8080` *on the VM* and paste the HTTPS URL into the twitterapi.io dashboard
-
-## Deploy from your PC (once SSH works)
-
-```powershell
-cd C:\Projects\JulyBot
-.\deploy\deploy_to_vm.ps1
-```
-
-Or manually copy the repo to `/opt/julybot` and run:
+## First-time setup
 
 ```bash
-chmod +x deploy/vm_setup.sh
-./deploy/vm_setup.sh
+cd /Users/jefftian/JulyBot
+chmod +x deploy/*.sh
+./deploy/setup.sh
 ```
 
-## Configure on the VM
+Edit `.env` with your secrets, then initialize the database:
 
 ```bash
-sudo nano /opt/julybot/.env
+.venv/bin/python scripts/init_db.py
 ```
 
-Use [deploy/env.twitter.example](env.twitter.example) as a template. Required values:
+## Run the bot
 
-| Variable | Where to get it |
-|----------|-----------------|
-| `DISCORD_TOKEN` | [Discord Developer Portal](https://discord.com/developers/applications) → Bot → Token |
-| `DISCORD_GUILD_ID` | Discord → Server Settings → Widget → Server ID |
-| `TWITTERAPI_IO_KEY` | [twitterapi.io dashboard](https://twitterapi.io/dashboard) |
-
-Start the service:
+**Foreground** (good for debugging):
 
 ```bash
-sudo systemctl start julybot-twitter
-sudo journalctl -u julybot-twitter -f
+./deploy/start.sh
 ```
 
-## Register Discord bot (you have not done this yet)
+**Background** (auto-start on login, restart on crash):
 
-1. Go to https://discord.com/developers/applications → **New Application**
-2. **Bot** tab → **Reset Token** → copy into `DISCORD_TOKEN`
-3. Enable **Message Content Intent** if prompted (optional for slash commands)
-4. **OAuth2 → URL Generator** — scopes: `bot`, `applications.commands`; permissions: Send Messages, Embed Links
-5. Open the generated invite URL and add the bot to your server
-6. Copy **Server ID** into `DISCORD_GUILD_ID` (Developer Mode on in Discord → right-click server → Copy Server ID)
+```bash
+./deploy/install-service.sh
+```
 
-## Register twitterapi.io webhook
+Logs go to `logs/julybot.stdout.log` and `logs/julybot.stderr.log`.
 
-1. Dashboard → set webhook URL to e.g. `https://YOUR_DOMAIN/webhooks/twitter` or ngrok URL
-2. In Discord: `/settwitterchannel #alerts` then `/stalk username`
+Stop the background service:
 
-## Troubleshooting SSH timeout
+```bash
+./deploy/stop.sh
+```
 
-If `ssh` times out to `40.233.86.65`:
+Remove the launchd agent entirely:
 
-- VM is stopped in Oracle Cloud console → start it
-- Security list missing ingress rule for **0.0.0.0/0 TCP 22**
-- Wrong username (`ubuntu` vs `opc`)
-- Instance uses a **private** IP only — use the public IP from the console
+```bash
+./deploy/uninstall-service.sh
+```
+
+## Environment
+
+Copy from `.env.example`. Key values for this machine:
+
+| Variable | Value |
+|----------|-------|
+| `DATABASE_URL` | Supabase **Session pooler** string + `?sslmode=require` |
+| `BASE_IMAGE_DIR` | `/Users/jefftian/JulyBot/data/bases` |
+
+The database is hosted on Supabase — there is no local Postgres to start or stop. If you can't reach it, check the project isn't paused (free-tier projects pause after inactivity) and that the connection string is the **Session pooler** (IPv4) variant.
