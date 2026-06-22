@@ -20,10 +20,10 @@ COG_MODULES = (
     "discord_bot.commands.twitter_commands",
     "discord_bot.commands.youtube_commands",
     "discord_bot.commands.moderation_commands",
+    "discord_bot.commands.account_commands",
 )
 
 # Disabled until wired up (still under development):
-# "discord_bot.commands.account_commands",
 # "discord_bot.commands.legend_commands",
 # "discord_bot.commands.base_finder_commands",
 # "discord_bot.commands.ping_commands",
