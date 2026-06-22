@@ -21,10 +21,15 @@ VERIFY_TIMEOUT_SECONDS = 10
 
 
 def _normalize_tag(coc_tag: str) -> str:
-    """Validate CoC tag format and return it uppercased."""
-    if not coc_tag or not coc_tag.startswith("#"):
-        raise ValueError(f"CoC tag must start with '#', got {coc_tag!r}")
-    return coc_tag.upper()
+    """Clean up a user-entered CoC tag.
+
+    Strips whitespace, drops a leading '#', uppercases, and fixes the common
+    O->0 typo (CoC tags never contain the letter O). Re-adds the leading '#'.
+    """
+    cleaned = (coc_tag or "").strip().upper().replace(" ", "").lstrip("#").replace("O", "0")
+    if not cleaned:
+        raise ValueError("Please enter your CoC player tag, e.g. #2PP0JCCL.")
+    return f"#{cleaned}"
 
 
 def _encode_tag(coc_tag: str) -> str:
@@ -32,8 +37,13 @@ def _encode_tag(coc_tag: str) -> str:
     return quote(coc_tag, safe="")
 
 
-async def _verify_token(coc_tag: str, token: str) -> dict:
-    """Call the CoC verifyToken endpoint. Returns parsed JSON or raises."""
+async def _verify_token(coc_tag: str, token: str) -> str:
+    """Call the CoC verifyToken endpoint.
+
+    Returns the verification status: 'ok' (token belongs to this player),
+    'invalid' (wrong/expired token), or 'notfound' (no such player tag).
+    Raises aiohttp.ClientError on a network or credential failure.
+    """
     url = f"{settings.COC_API_BASE_URL}/players/{_encode_tag(coc_tag)}/verifytoken"
     headers = {
         "Authorization": f"Bearer {settings.COC_API_TOKEN}",
@@ -42,8 +52,11 @@ async def _verify_token(coc_tag: str, token: str) -> dict:
     timeout = aiohttp.ClientTimeout(total=VERIFY_TIMEOUT_SECONDS)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(url, headers=headers, json={"token": token}) as resp:
+            if resp.status == 404:
+                return "notfound"
             resp.raise_for_status()
-            return await resp.json()
+            data = await resp.json()
+            return data.get("status", "invalid")
 
 
 async def _fetch_player_name(coc_tag: str) -> str | None:
@@ -75,23 +88,36 @@ async def link_account(
     coc_tag = _normalize_tag(coc_tag)
 
     try:
-        result = await _verify_token(coc_tag, token)
+        status = await _verify_token(coc_tag, token)
     except aiohttp.ClientError as e:
         logger.warning("CoC API unreachable during verifyToken: %s", e)
-        return {"success": False, "error": "CoC API unavailable"}
+        return {"success": False, "error": "CoC API is unavailable right now. Try again in a moment."}
 
-    if result.get("status") != "ok":
-        return {"success": False, "error": "Token verification failed"}
+    if status == "notfound":
+        return {"success": False, "error": f"No player found with tag {coc_tag}. Double-check the tag."}
+    if status != "ok":
+        return {
+            "success": False,
+            "error": (
+                "Token didn't verify. Generate a fresh one in-game "
+                "(Settings -> More Settings -> API Token) and link again right away "
+                "— each token is single-use and expires quickly."
+            ),
+        }
 
     coc_name = await _fetch_player_name(coc_tag)
 
+    # coc_tag is unique; a Discord user may hold several. Re-linking a tag you
+    # already own refreshes the name; a tag passing verification under a new
+    # Discord id is reassigned (only the current in-game owner can produce a
+    # valid token, so this safely handles account transfers).
     async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO users (discord_id, coc_tag, coc_name, verified)
             VALUES ($1, $2, $3, TRUE)
-            ON CONFLICT (discord_id) DO UPDATE
-                SET coc_tag = EXCLUDED.coc_tag,
+            ON CONFLICT (coc_tag) DO UPDATE
+                SET discord_id = EXCLUDED.discord_id,
                     coc_name = EXCLUDED.coc_name,
                     verified = TRUE,
                     linked_at = NOW();
@@ -102,37 +128,49 @@ async def link_account(
         )
 
     logger.info("Linked discord_id=%s to coc_tag=%s (name=%s)", discord_id, coc_tag, coc_name)
-    return {"success": True, "coc_name": coc_name or ""}
+    return {"success": True, "coc_name": coc_name or "", "coc_tag": coc_tag}
 
 
-async def unlink_account(pool: asyncpg.Pool, discord_id: int) -> bool:
-    """Remove a user's linked account. Returns True if a row was deleted."""
+async def unlink_account(pool: asyncpg.Pool, discord_id: int, coc_tag: str) -> bool:
+    """Remove one of a user's linked accounts. Returns True if a row was deleted.
+
+    Scoped to the caller's own discord_id so a user can only unlink their own
+    accounts, even if they pass someone else's tag.
+    """
+    coc_tag = _normalize_tag(coc_tag)
     async with pool.acquire() as conn:
         result = await conn.execute(
-            "DELETE FROM users WHERE discord_id = $1;",
+            "DELETE FROM users WHERE discord_id = $1 AND coc_tag = $2;",
             discord_id,
+            coc_tag,
         )
     deleted = result.endswith(" 1")
     if deleted:
-        logger.info("Unlinked discord_id=%s", discord_id)
+        logger.info("Unlinked discord_id=%s coc_tag=%s", discord_id, coc_tag)
     return deleted
 
 
-async def get_linked_account(pool: asyncpg.Pool, discord_id: int) -> dict | None:
-    """Return the linked CoC account for a Discord user, or None if not linked."""
+async def get_linked_accounts(pool: asyncpg.Pool, discord_id: int) -> list[dict]:
+    """Return all CoC accounts linked to a Discord user, oldest link first."""
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT discord_id, coc_tag, coc_name, verified FROM users WHERE discord_id = $1;",
+        rows = await conn.fetch(
+            """
+            SELECT discord_id, coc_tag, coc_name, verified
+            FROM users
+            WHERE discord_id = $1
+            ORDER BY linked_at ASC;
+            """,
             discord_id,
         )
-    if row is None:
-        return None
-    return {
-        "discord_id": row["discord_id"],
-        "coc_tag": row["coc_tag"],
-        "coc_name": row["coc_name"],
-        "verified": row["verified"],
-    }
+    return [
+        {
+            "discord_id": r["discord_id"],
+            "coc_tag": r["coc_tag"],
+            "coc_name": r["coc_name"],
+            "verified": r["verified"],
+        }
+        for r in rows
+    ]
 
 
 async def get_all_linked_accounts(pool: asyncpg.Pool) -> list[dict]:

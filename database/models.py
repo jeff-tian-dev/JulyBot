@@ -18,12 +18,20 @@ CREATE_VECTOR_EXTENSION = "CREATE EXTENSION IF NOT EXISTS vector;"
 CREATE_USERS = """
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
-    discord_id BIGINT NOT NULL UNIQUE,
+    discord_id BIGINT NOT NULL,
     coc_tag VARCHAR(20) NOT NULL UNIQUE,
     coc_name VARCHAR(100),
     verified BOOLEAN DEFAULT FALSE,
     linked_at TIMESTAMP DEFAULT NOW()
 );
+"""
+
+# A Discord user may link several CoC accounts (alts), so discord_id is NOT
+# unique — only coc_tag is. Older deploys created the table with a UNIQUE
+# constraint on discord_id; drop it idempotently and index for lookups.
+MIGRATE_USERS_MULTI_ACCOUNT = """
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_discord_id_key;
+CREATE INDEX IF NOT EXISTS idx_users_discord_id ON users (discord_id);
 """
 
 CREATE_LEGEND_SNAPSHOTS = """
@@ -127,6 +135,9 @@ async def create_tables(pool: asyncpg.Pool) -> None:
         for ddl, name in table_ddls:
             logger.info("Creating table %s if not exists", name)
             await conn.execute(ddl)
+            if name == "users":
+                logger.info("Applying multi-account migration to users")
+                await conn.execute(MIGRATE_USERS_MULTI_ACCOUNT)
 
 
 async def drop_tables(pool: asyncpg.Pool) -> None:
