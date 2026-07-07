@@ -7,6 +7,7 @@ import logging
 import asyncpg
 import disnake
 
+from config.settings import settings
 from modules.youtube_feed import embeds as embeds_mod
 from modules.youtube_feed import fetcher
 from modules.youtube_feed import storage
@@ -14,6 +15,22 @@ from modules.youtube_feed import storage
 logger = logging.getLogger(__name__)
 
 CHANNEL_POLL_DELAY_SECONDS = 2
+
+
+def _role_ping_content(role_id: int | None = None) -> str | None:
+    """Discord mention string for the configured ping role, or None."""
+    rid = settings.YOUTUBE_PING_ROLE_ID if role_id is None else role_id
+    if rid:
+        return f"<@&{rid}>"
+    return None
+
+
+def _role_ping_allowed_mentions(role_id: int | None = None) -> disnake.AllowedMentions | None:
+    """Allow only the configured role to be pinged."""
+    rid = settings.YOUTUBE_PING_ROLE_ID if role_id is None else role_id
+    if not rid:
+        return None
+    return disnake.AllowedMentions(roles=[disnake.Object(id=rid)])
 
 
 async def poll_youtube_channels(pool: asyncpg.Pool, bot: disnake.Client) -> dict:
@@ -81,9 +98,21 @@ async def poll_youtube_channels(pool: asyncpg.Pool, bot: disnake.Client) -> dict
         if latest.video_id == last_seen:
             continue
 
+        # Only ping the role if one is configured AND we haven't pinged this
+        # guild's YouTube feed within the cooldown window. The post is still sent
+        # either way — just without the mention when muted.
+        mention = _role_ping_content()
+        ping = bool(mention) and await storage.claim_ping_slot(
+            pool, guild_id, settings.YOUTUBE_PING_COOLDOWN_HOURS
+        )
+
         try:
             embed = embeds_mod.build_video_embed(latest)
-            await discord_channel.send(embed=embed)
+            await discord_channel.send(
+                content=mention if ping else None,
+                embed=embed,
+                allowed_mentions=_role_ping_allowed_mentions() if ping else None,
+            )
             summary["videos_posted"] += 1
         except Exception:
             logger.exception(

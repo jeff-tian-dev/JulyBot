@@ -229,6 +229,33 @@ async def toggle_youtube(pool: asyncpg.Pool, guild_id: int) -> bool:
     return enabled
 
 
+async def claim_ping_slot(pool: asyncpg.Pool, guild_id: int, cooldown_hours: int) -> bool:
+    """Atomically claim the role-ping slot for a guild's YouTube feed.
+
+    Returns True (and stamps NOW()) only if no ping has been sent within the last
+    ``cooldown_hours``. Subsequent calls inside the window return False, so bursts of
+    uploads ping once and stay quiet after. The check-and-set is a single UPDATE so
+    concurrent posts can't both claim. A guild_settings row always exists here because
+    a YouTube output channel must be configured before posting.
+    """
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE guild_settings
+            SET youtube_last_ping_at = NOW()
+            WHERE guild_id = $1
+              AND (
+                  youtube_last_ping_at IS NULL
+                  OR youtube_last_ping_at < NOW() - make_interval(hours => $2)
+              )
+            RETURNING youtube_last_ping_at;
+            """,
+            guild_id,
+            cooldown_hours,
+        )
+    return row is not None
+
+
 async def update_last_seen(
     pool: asyncpg.Pool,
     guild_id: int,

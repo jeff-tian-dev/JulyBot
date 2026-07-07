@@ -1,4 +1,4 @@
-"""Unit tests for modules.twitter_monitor."""
+"""Unit tests for modules.x_monitor."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import disnake
 import pytest
 
-from modules.twitter_monitor import client, embeds, poller, storage
+from modules.x_monitor import client, embeds, poller, storage
 
 
 class _FakePoolAcquireCtx:
@@ -85,6 +85,18 @@ def test_build_tweet_embed_strips_media_links_from_text() -> None:
     assert embed.footer.text == "@cynicynic"
     assert components[0].children[0].url == "https://x.com/cynicynic/status/123"
     assert embed.image.url == "https://pbs.twimg.com/media/abc.jpg"
+
+
+def test_build_tweet_embed_preserves_newlines_and_indentation() -> None:
+    tweet = SimpleNamespace(
+        text="Line one\n  indented line\n\nblank line above",
+        url="https://x.com/testuser/status/789",
+        created_on=None,
+        media=[],
+        author=SimpleNamespace(name="Test", username="testuser", profile_image_url_https=None),
+    )
+    embed = embeds.build_tweet_embed(tweet)
+    assert embed.description == "Line one\n  indented line\n\nblank line above"
 
 
 def test_build_tweet_embed_keeps_real_text_strips_tco() -> None:
@@ -171,12 +183,12 @@ async def test_add_watched_account_invalid_username() -> None:
 
 
 @pytest.mark.asyncio
-async def test_poll_twitter_accounts_skips_when_not_configured() -> None:
+async def test_poll_x_accounts_skips_when_not_configured() -> None:
     bot = MagicMock(spec=disnake.Client)
     pool = _fake_pool(MagicMock())
 
     with patch.object(client, "is_configured", return_value=False):
-        summary = await poller.poll_twitter_accounts(pool, bot)
+        summary = await poller.poll_x_accounts(pool, bot)
 
     assert summary == {"accounts_polled": 0, "tweets_posted": 0, "errors": 0}
 
@@ -247,7 +259,7 @@ def test_role_ping_content() -> None:
 
 
 @pytest.mark.asyncio
-async def test_poll_twitter_accounts_posts_new_tweets() -> None:
+async def test_poll_x_accounts_posts_new_tweets() -> None:
     bot = MagicMock(spec=disnake.Client)
     bot.is_ready.return_value = True
 
@@ -301,8 +313,8 @@ async def test_poll_twitter_accounts_posts_new_tweets() -> None:
             "guild_id": 1,
             "username": "testuser",
             "last_seen_tweet_id": 50,
-            "twitter_channel_id": 999,
-            "twitter_enabled": True,
+            "x_channel_id": 999,
+            "x_enabled": True,
         }
     ]
 
@@ -312,11 +324,12 @@ async def test_poll_twitter_accounts_posts_new_tweets() -> None:
         patch.object(storage, "get_all_watched_accounts", AsyncMock(return_value=accounts)),
         patch.object(storage, "mark_tweets_seen", AsyncMock(return_value=[100, 60])),
         patch.object(storage, "update_last_seen", AsyncMock()) as mock_update,
+        patch.object(storage, "claim_ping_slot", AsyncMock(return_value=True)),
         patch.object(poller, "_role_ping_content", return_value="<@&1515021940090474557>"),
         patch.object(poller, "_role_ping_allowed_mentions", return_value=MagicMock()),
-        patch("modules.twitter_monitor.poller.asyncio.sleep", AsyncMock()),
+        patch("modules.x_monitor.poller.asyncio.sleep", AsyncMock()),
     ):
-        summary = await poller.poll_twitter_accounts(pool, bot)
+        summary = await poller.poll_x_accounts(pool, bot)
 
     assert summary["accounts_polled"] == 1
     assert summary["tweets_posted"] == 2
@@ -324,6 +337,97 @@ async def test_poll_twitter_accounts_posts_new_tweets() -> None:
     send_kwargs = channel.send.await_args.kwargs
     assert send_kwargs["content"] == "<@&1515021940090474557>"
     mock_update.assert_awaited_once_with(pool, 1, "testuser", 101)
+
+
+@pytest.mark.asyncio
+async def test_poll_x_mutes_ping_within_cooldown() -> None:
+    """Two new posts in one run: the first pings, the second posts silently."""
+    from config.settings import settings
+
+    bot = MagicMock(spec=disnake.Client)
+    bot.is_ready.return_value = True
+
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    bot.get_channel.return_value = channel
+
+    tweet_new = SimpleNamespace(
+        id=100, text="first", url="https://x.com/u/status/100", is_retweet=False,
+        author=SimpleNamespace(name="U", username="u", profile_image_url_https=None), created_on=None,
+    )
+    tweet_newer = SimpleNamespace(
+        id=101, text="second", url="https://x.com/u/status/101", is_retweet=False,
+        author=SimpleNamespace(name="U", username="u", profile_image_url_https=None), created_on=None,
+    )
+
+    mock_app = MagicMock()
+    mock_app.get_tweets = AsyncMock(return_value=[tweet_newer, tweet_new])
+
+    pool = _fake_pool(MagicMock())
+    accounts = [
+        {"guild_id": 1, "username": "testuser", "last_seen_tweet_id": 50, "x_channel_id": 999, "x_enabled": True}
+    ]
+
+    claim = AsyncMock(side_effect=[True, False])
+    with (
+        patch.object(client, "is_configured", return_value=True),
+        patch.object(client, "get_client", AsyncMock(return_value=mock_app)),
+        patch.object(storage, "get_all_watched_accounts", AsyncMock(return_value=accounts)),
+        patch.object(storage, "mark_tweets_seen", AsyncMock(side_effect=[[100], [101]])),
+        patch.object(storage, "update_last_seen", AsyncMock()),
+        patch.object(storage, "claim_ping_slot", claim),
+        patch.object(poller, "_role_ping_content", return_value="<@&777>"),
+        patch.object(poller, "_role_ping_allowed_mentions", return_value=MagicMock()),
+        patch("modules.x_monitor.poller.asyncio.sleep", AsyncMock()),
+    ):
+        summary = await poller.poll_x_accounts(pool, bot)
+
+    assert summary["tweets_posted"] == 2
+    assert channel.send.await_count == 2
+    # Oldest-first: id=100 sent first (pings), id=101 second (muted).
+    assert channel.send.await_args_list[0].kwargs["content"] == "<@&777>"
+    assert channel.send.await_args_list[1].kwargs["content"] is None
+    claim.assert_awaited_with(pool, 1, settings.X_PING_COOLDOWN_HOURS)
+
+
+@pytest.mark.asyncio
+async def test_poll_x_no_role_skips_claim() -> None:
+    """With no ping role configured, the cooldown slot is never claimed."""
+    bot = MagicMock(spec=disnake.Client)
+    bot.is_ready.return_value = True
+
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    bot.get_channel.return_value = channel
+
+    tweet_new = SimpleNamespace(
+        id=100, text="hi", url="https://x.com/u/status/100", is_retweet=False,
+        author=SimpleNamespace(name="U", username="u", profile_image_url_https=None), created_on=None,
+    )
+    mock_app = MagicMock()
+    mock_app.get_tweets = AsyncMock(return_value=[tweet_new])
+
+    pool = _fake_pool(MagicMock())
+    accounts = [
+        {"guild_id": 1, "username": "testuser", "last_seen_tweet_id": 50, "x_channel_id": 999, "x_enabled": True}
+    ]
+
+    claim = AsyncMock(return_value=True)
+    with (
+        patch.object(client, "is_configured", return_value=True),
+        patch.object(client, "get_client", AsyncMock(return_value=mock_app)),
+        patch.object(storage, "get_all_watched_accounts", AsyncMock(return_value=accounts)),
+        patch.object(storage, "mark_tweets_seen", AsyncMock(return_value=[100])),
+        patch.object(storage, "update_last_seen", AsyncMock()),
+        patch.object(storage, "claim_ping_slot", claim),
+        patch.object(poller, "_role_ping_content", return_value=None),
+        patch("modules.x_monitor.poller.asyncio.sleep", AsyncMock()),
+    ):
+        summary = await poller.poll_x_accounts(pool, bot)
+
+    assert summary["tweets_posted"] == 1
+    claim.assert_not_awaited()
+    assert channel.send.await_args.kwargs["content"] is None
 
 
 @pytest.mark.asyncio
@@ -361,8 +465,8 @@ async def test_poll_skips_repost_when_content_already_seen() -> None:
             "guild_id": 1,
             "username": "testuser",
             "last_seen_tweet_id": 50,
-            "twitter_channel_id": 999,
-            "twitter_enabled": True,
+            "x_channel_id": 999,
+            "x_enabled": True,
         }
     ]
 
@@ -372,9 +476,9 @@ async def test_poll_skips_repost_when_content_already_seen() -> None:
         patch.object(storage, "get_all_watched_accounts", AsyncMock(return_value=accounts)),
         patch.object(storage, "mark_tweets_seen", AsyncMock(return_value=[])),
         patch.object(storage, "update_last_seen", AsyncMock()) as mock_update,
-        patch("modules.twitter_monitor.poller.asyncio.sleep", AsyncMock()),
+        patch("modules.x_monitor.poller.asyncio.sleep", AsyncMock()),
     ):
-        summary = await poller.poll_twitter_accounts(pool, bot)
+        summary = await poller.poll_x_accounts(pool, bot)
 
     assert summary["tweets_posted"] == 0
     channel.send.assert_not_awaited()

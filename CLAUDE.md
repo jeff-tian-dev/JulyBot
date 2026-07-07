@@ -105,4 +105,18 @@ When you discover a non-obvious convention, an architectural decision, or a work
 - New table: `youtube_watched_channels`. Extended `guild_settings` with `youtube_channel_id` and `youtube_enabled` (idempotent `ALTER TABLE` in `create_tables`).
 - Admin-only slash commands: `/setyoutubechannel`, `/toggleyoutube`, `/youtube_add`, `/youtube_remove`, `/youtube_list`.
 - `YOUTUBE_FEED_POLL_INTERVAL_MINUTES` env var (default 10). Twitter poll default also changed from 5 → 10 minutes.
+
+## 2026-06-24 — X monitor rename
+
+- Renamed `modules/twitter_monitor/` → `modules/x_monitor/` and Discord cog `twitter_commands` → `x_commands` (`XCommands`). Slash commands are `/xsetchannel`, `/xtoggle`, `/xadd`, `/xremove`, `/xlist`.
+- Settings fields are now `X_COOKIES`, `X_SESSION_NAME`, `X_POLL_INTERVAL_MINUTES`, `X_PING_ROLE_ID`. Legacy `TWITTER_*` env var names still load via fallback in `config/settings.py` — no `.env` migration required.
+- DB table/column names (`twitter_watched_accounts`, `twitter_channel_id`, `twitter_enabled`) are unchanged to avoid a live Supabase migration.
+- Session files: new default dir is `data/x/`; existing sessions under `data/twitter/` are still picked up automatically.
 - APScheduler job `poll_youtube_feed` is always registered (no auth gate). `main.py` calls `seed_unseeded_channels(pool)` before starting the scheduler.
+
+## 2026-07-05 — X/YouTube ping cooldown
+
+- New posts still always get posted; the role **ping** is now rate-limited. After a ping, further posts within a cooldown window post silently (no mention). Cooldowns are **separate per source**: `X_PING_COOLDOWN_HOURS` and `YOUTUBE_PING_COOLDOWN_HOURS` (both default 3).
+- State is a per-guild timestamp on `guild_settings`: `twitter_last_ping_at` / `youtube_last_ping_at` (idempotent `ALTER TABLE` in `create_tables`). Kept the `twitter_` DB prefix to match existing columns.
+- The check-and-set is one atomic UPDATE — `storage.claim_ping_slot(pool, guild_id, cooldown_hours)` in both modules — using `make_interval(hours => $2)`. Returns True (and stamps `NOW()`) only outside the window, so bursts ping once. Pollers only call it when a ping role is configured.
+- Known edge: the slot is claimed just before `channel.send`. If that send fails and the post is retried next poll, the retry posts silently (window already consumed). Deemed acceptable for a monitor bot.

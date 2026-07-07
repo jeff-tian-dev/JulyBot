@@ -54,6 +54,15 @@ async def get_player(coc_tag: str) -> dict | None:
     session = await get_session()
     try:
         async with session.get(url, headers=headers) as resp:
+            if resp.status == 403:
+                logger.error(
+                    "CoC API returned 403 for /players/%s — the token's whitelisted IP "
+                    "likely doesn't match the request source. Check the allowed IP at "
+                    "developer.clashofclans.com (or whitelist RoyaleAPI's 45.79.218.79 if "
+                    "using COC_API_BASE_URL=https://cocproxy.royaleapi.dev/v1).",
+                    coc_tag,
+                )
+                return None
             if resp.status != 200:
                 logger.warning("CoC API GET /players/%s returned %s", coc_tag, resp.status)
                 return None

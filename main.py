@@ -15,7 +15,7 @@ from database.models import create_tables
 from discord_bot.bot import create_bot
 from modules.legend_tracker.poller import close_session as close_legend_session
 from modules.ping_automator.scheduler import create_scheduler
-from modules.twitter_monitor.client import close_client as close_twitter_client
+from modules.x_monitor.client import close_client as close_x_client
 from modules.youtube_feed.storage import seed_unseeded_channels
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ async def _run() -> None:
             except (asyncio.CancelledError, Exception):
                 pass
         await close_legend_session()
-        await close_twitter_client()
+        await close_x_client()
         await close_pool()
 
 

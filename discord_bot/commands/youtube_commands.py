@@ -1,12 +1,26 @@
-"""/setyoutubechannel, /toggleyoutube, /youtube_add, /youtube_remove, /youtube_list."""
+"""/ytsetchannel, /yttoggle, /ytadd, /ytremove, /ytlist."""
 from __future__ import annotations
 
 import disnake
 from disnake.ext import commands
 
-from modules.youtube_feed import storage
+from discord_bot.time_format import discord_relative_timestamp
+from modules.youtube_feed import fetcher, storage
 
 ADMIN_PERMS = disnake.Permissions(administrator=True)
+
+
+async def _last_seen_video_label(channel_id: str, video_id: str | None) -> str:
+    if not video_id:
+        return "not seeded"
+    published = await fetcher.find_video_published(channel_id, video_id)
+    if published is None:
+        latest = await fetcher.fetch_latest_video(channel_id)
+        if latest is not None and latest.video_id == video_id and latest.published is not None:
+            published = latest.published
+    if published is None:
+        return "unknown"
+    return discord_relative_timestamp(published)
 
 
 class YoutubeCommands(commands.Cog):
@@ -14,11 +28,11 @@ class YoutubeCommands(commands.Cog):
         self.bot = bot
 
     @commands.slash_command(
-        name="setyoutubechannel",
+        name="ytsetchannel",
         description="Set the channel where new YouTube videos are posted.",
         default_member_permissions=ADMIN_PERMS,
     )
-    async def setyoutubechannel(
+    async def ytsetchannel(
         self,
         inter: disnake.ApplicationCommandInteraction,
         channel: disnake.TextChannel,
@@ -30,21 +44,21 @@ class YoutubeCommands(commands.Cog):
         )
 
     @commands.slash_command(
-        name="toggleyoutube",
+        name="yttoggle",
         description="Enable or disable YouTube feed monitoring for this server.",
         default_member_permissions=ADMIN_PERMS,
     )
-    async def toggleyoutube(self, inter: disnake.ApplicationCommandInteraction) -> None:
+    async def yttoggle(self, inter: disnake.ApplicationCommandInteraction) -> None:
         enabled = await storage.toggle_youtube(self.bot.pool, inter.guild.id)
         state = "enabled" if enabled else "disabled"
         await inter.response.send_message(f"YouTube feed monitoring is now **{state}**.", ephemeral=True)
 
     @commands.slash_command(
-        name="youtube_add",
+        name="ytadd",
         description="Add a YouTube channel to the watch list.",
         default_member_permissions=ADMIN_PERMS,
     )
-    async def youtube_add(
+    async def ytadd(
         self,
         inter: disnake.ApplicationCommandInteraction,
         channel_id: str,
@@ -63,11 +77,11 @@ class YoutubeCommands(commands.Cog):
         )
 
     @commands.slash_command(
-        name="youtube_remove",
+        name="ytremove",
         description="Remove a YouTube channel from the watch list.",
         default_member_permissions=ADMIN_PERMS,
     )
-    async def youtube_remove(
+    async def ytremove(
         self,
         inter: disnake.ApplicationCommandInteraction,
         channel_id: str,
@@ -87,33 +101,44 @@ class YoutubeCommands(commands.Cog):
             await inter.response.send_message("That channel is not on the watch list.", ephemeral=True)
 
     @commands.slash_command(
-        name="youtube_list",
+        name="ytlist",
         description="List YouTube channels being watched in this server.",
         default_member_permissions=ADMIN_PERMS,
     )
-    async def youtube_list(self, inter: disnake.ApplicationCommandInteraction) -> None:
+    async def ytlist(self, inter: disnake.ApplicationCommandInteraction) -> None:
+        await inter.response.defer(ephemeral=True)
+
         channels = await storage.list_watched_channels(self.bot.pool, inter.guild.id)
         settings_row = await storage.get_youtube_settings(self.bot.pool, inter.guild.id)
 
-        if not channels:
-            await inter.response.send_message("No YouTube channels are being watched.", ephemeral=True)
-            return
+        enabled = True
+        if settings_row is not None:
+            enabled = bool(settings_row.get("youtube_enabled", True))
 
-        lines = [
-            f"• {storage.format_channel_reference(c['channel_id'], c.get('channel_name'))} "
-            f"— last seen: {c['last_seen_video_id'] or 'not seeded'}"
-            for c in channels
-        ]
-        body = "\n".join(lines)
+        status = "enabled" if enabled else "disabled"
+        lines = [f"**YouTube monitoring:** {status}"]
 
-        if settings_row and settings_row.get("youtube_channel_id"):
-            channel = inter.guild.get_channel(settings_row["youtube_channel_id"])
-            channel_ref = channel.mention if channel else f"`{settings_row['youtube_channel_id']}`"
-            enabled = settings_row.get("youtube_enabled", True)
-            status = "enabled" if enabled else "disabled"
-            body += f"\n\nOutput channel: {channel_ref} ({status})"
+        channel_id = settings_row.get("youtube_channel_id") if settings_row else None
+        if channel_id:
+            channel = inter.guild.get_channel(channel_id)
+            channel_ref = channel.mention if channel else f"`{channel_id}`"
+            lines.append(f"**Output channel:** {channel_ref}")
+        else:
+            lines.append("**Output channel:** not set")
 
-        await inter.response.send_message(body, ephemeral=True)
+        if channels:
+            lines.append("")
+            for c in channels:
+                last_seen = await _last_seen_video_label(c["channel_id"], c.get("last_seen_video_id"))
+                lines.append(
+                    f"• {storage.format_channel_reference(c['channel_id'], c.get('channel_name'))} "
+                    f"— last seen: {last_seen}"
+                )
+        else:
+            lines.append("")
+            lines.append("No channels on the watch list.")
+
+        await inter.edit_original_response(content="\n".join(lines))
 
 
 def setup(bot: commands.InteractionBot) -> None:

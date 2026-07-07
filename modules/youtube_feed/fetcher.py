@@ -75,7 +75,10 @@ def _parse_feed(feed) -> VideoEntry | None:
     if not feed.entries:
         return None
 
-    entry = feed.entries[0]
+    return _parse_feed_entry(feed.entries[0], feed)
+
+
+def _parse_feed_entry(entry, feed) -> VideoEntry | None:
     video_id = _extract_video_id(entry)
     if not video_id:
         return None
@@ -93,13 +96,27 @@ def _parse_feed(feed) -> VideoEntry | None:
     )
 
 
+def find_video_published_sync(channel_id: str, video_id: str) -> datetime | None:
+    """Return the publish time for a video ID if it appears in the channel RSS feed."""
+    feed = _fetch_feed_document(channel_id)
+    for entry in feed.entries:
+        if _extract_video_id(entry) == video_id:
+            return _parse_published(entry)
+    return None
+
+
+async def find_video_published(channel_id: str, video_id: str) -> datetime | None:
+    """Async wrapper to look up a video publish time from the RSS feed."""
+    return await asyncio.to_thread(find_video_published_sync, channel_id, video_id)
+
+
 def fetch_latest_video_sync(channel_id: str) -> VideoEntry | None:
     """Parse the YouTube RSS feed and return the latest video entry."""
     feed = _fetch_feed_document(channel_id)
     if getattr(feed, "bozo", False) and not feed.entries:
         logger.warning("YouTube feed parse issue for channel_id=%s: %s", channel_id, feed.bozo_exception)
         return None
-    return _parse_feed(feed)
+    return _parse_feed_entry(feed.entries[0], feed)
 
 
 async def fetch_latest_video(channel_id: str) -> VideoEntry | None:

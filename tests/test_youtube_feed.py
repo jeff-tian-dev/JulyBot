@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, ANY
 
 import disnake
 import pytest
@@ -133,6 +133,11 @@ def test_format_channel_reference_id_only_when_name_missing() -> None:
     assert storage.format_channel_reference(channel_id, None) == f"`{channel_id}`"
 
 
+def test_role_ping_content() -> None:
+    assert poller._role_ping_content(1508359179440750602) == "<@&1508359179440750602>"
+    assert poller._role_ping_content(0) is None
+
+
 @pytest.mark.asyncio
 async def test_seed_unseeded_channels_sets_id_without_posting() -> None:
     channel_id = "UC" + "c" * 22
@@ -191,14 +196,103 @@ async def test_poll_posts_when_video_id_changes() -> None:
         patch.object(storage, "get_all_watched_channels", AsyncMock(return_value=watched)),
         patch.object(fetcher, "fetch_latest_video", AsyncMock(return_value=latest)),
         patch.object(storage, "update_last_seen", AsyncMock()) as mock_update,
+        patch.object(storage, "claim_ping_slot", AsyncMock(return_value=True)),
+        patch.object(poller, "_role_ping_content", return_value="<@&1508359179440750602>"),
+        patch.object(poller, "_role_ping_allowed_mentions", return_value=MagicMock()),
         patch("modules.youtube_feed.poller.asyncio.sleep", AsyncMock()),
     ):
         summary = await poller.poll_youtube_channels(pool, bot)
 
     assert summary["channels_polled"] == 1
     assert summary["videos_posted"] == 1
-    discord_channel.send.assert_awaited_once()
+    discord_channel.send.assert_awaited_once_with(
+        content="<@&1508359179440750602>",
+        embed=ANY,
+        allowed_mentions=ANY,
+    )
     mock_update.assert_awaited_once_with(pool, 1, channel_id, "newVideo001")
+
+
+@pytest.mark.asyncio
+async def test_poll_mutes_ping_within_cooldown() -> None:
+    """Two channels with new videos in one run: the first pings, the second is silent."""
+    from config.settings import settings
+
+    ch_a = "UC" + "g" * 22
+    ch_b = "UC" + "h" * 22
+    bot = MagicMock(spec=disnake.Client)
+    bot.is_ready.return_value = True
+
+    discord_channel = MagicMock()
+    discord_channel.send = AsyncMock()
+    bot.get_channel.return_value = discord_channel
+
+    def _vid(vid):
+        return fetcher.VideoEntry(
+            video_id=vid, title=vid, url=f"https://www.youtube.com/watch?v={vid}",
+            published=None, channel_title="Channel",
+        )
+
+    pool = _fake_pool(MagicMock())
+    watched = [
+        {"guild_id": 1, "channel_id": ch_a, "last_seen_video_id": "old_a00001", "youtube_channel_id": 999, "youtube_enabled": True},
+        {"guild_id": 1, "channel_id": ch_b, "last_seen_video_id": "old_b00001", "youtube_channel_id": 999, "youtube_enabled": True},
+    ]
+
+    claim = AsyncMock(side_effect=[True, False])
+    with (
+        patch.object(storage, "get_all_watched_channels", AsyncMock(return_value=watched)),
+        patch.object(fetcher, "fetch_latest_video", AsyncMock(side_effect=[_vid("new_a00001"), _vid("new_b00001")])),
+        patch.object(storage, "update_last_seen", AsyncMock()),
+        patch.object(storage, "claim_ping_slot", claim),
+        patch.object(poller, "_role_ping_content", return_value="<@&555>"),
+        patch.object(poller, "_role_ping_allowed_mentions", return_value=MagicMock()),
+        patch("modules.youtube_feed.poller.asyncio.sleep", AsyncMock()),
+    ):
+        summary = await poller.poll_youtube_channels(pool, bot)
+
+    assert summary["videos_posted"] == 2
+    assert discord_channel.send.await_count == 2
+    assert discord_channel.send.await_args_list[0].kwargs["content"] == "<@&555>"
+    assert discord_channel.send.await_args_list[1].kwargs["content"] is None
+    claim.assert_awaited_with(pool, 1, settings.YOUTUBE_PING_COOLDOWN_HOURS)
+
+
+@pytest.mark.asyncio
+async def test_poll_no_role_skips_claim() -> None:
+    """With no ping role configured, the cooldown slot is never claimed."""
+    channel_id = "UC" + "i" * 22
+    bot = MagicMock(spec=disnake.Client)
+    bot.is_ready.return_value = True
+
+    discord_channel = MagicMock()
+    discord_channel.send = AsyncMock()
+    bot.get_channel.return_value = discord_channel
+
+    latest = fetcher.VideoEntry(
+        video_id="newVideo002", title="V", url="https://www.youtube.com/watch?v=newVideo002",
+        published=None, channel_title="Channel",
+    )
+
+    pool = _fake_pool(MagicMock())
+    watched = [
+        {"guild_id": 1, "channel_id": channel_id, "last_seen_video_id": "oldVideo001", "youtube_channel_id": 999, "youtube_enabled": True}
+    ]
+
+    claim = AsyncMock(return_value=True)
+    with (
+        patch.object(storage, "get_all_watched_channels", AsyncMock(return_value=watched)),
+        patch.object(fetcher, "fetch_latest_video", AsyncMock(return_value=latest)),
+        patch.object(storage, "update_last_seen", AsyncMock()),
+        patch.object(storage, "claim_ping_slot", claim),
+        patch.object(poller, "_role_ping_content", return_value=None),
+        patch("modules.youtube_feed.poller.asyncio.sleep", AsyncMock()),
+    ):
+        summary = await poller.poll_youtube_channels(pool, bot)
+
+    assert summary["videos_posted"] == 1
+    claim.assert_not_awaited()
+    assert discord_channel.send.await_args.kwargs["content"] is None
 
 
 @pytest.mark.asyncio

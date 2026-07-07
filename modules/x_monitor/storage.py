@@ -1,4 +1,4 @@
-"""DB CRUD for Twitter monitor watch lists and deduplication."""
+"""DB CRUD for X monitor watch lists and deduplication."""
 from __future__ import annotations
 
 import logging
@@ -6,7 +6,7 @@ import re
 
 import asyncpg
 
-from modules.twitter_monitor import client as twitter_client
+from modules.x_monitor import client as x_client
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +14,7 @@ USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 
 
 def normalize_username(username: str) -> str:
-    """Validate and normalize an X/Twitter handle."""
+    """Validate and normalize an X handle."""
     cleaned = username.strip().lstrip("@").lower()
     if not USERNAME_PATTERN.match(cleaned):
         raise ValueError(
@@ -31,9 +31,9 @@ async def add_watched_account(
     """Add an account to the guild watch list, priming last_seen to avoid backfill."""
     username = normalize_username(username)
     last_seen = 0
-    if twitter_client.is_configured():
+    if x_client.is_configured():
         try:
-            last_seen = await twitter_client.fetch_latest_tweet_id(username)
+            last_seen = await x_client.fetch_latest_tweet_id(username)
         except Exception:
             logger.exception("Failed to prime last_seen for @%s", username)
 
@@ -94,7 +94,8 @@ async def get_all_watched_accounts(pool: asyncpg.Pool) -> list[dict]:
         rows = await conn.fetch(
             """
             SELECT w.id, w.guild_id, w.username, w.last_seen_tweet_id, w.added_at,
-                   g.twitter_channel_id, g.twitter_enabled
+                   g.twitter_channel_id AS x_channel_id,
+                   g.twitter_enabled AS x_enabled
             FROM twitter_watched_accounts w
             LEFT JOIN guild_settings g ON g.guild_id = w.guild_id
             ORDER BY w.guild_id, w.username;
@@ -103,12 +104,14 @@ async def get_all_watched_accounts(pool: asyncpg.Pool) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def get_twitter_settings(pool: asyncpg.Pool, guild_id: int) -> dict | None:
-    """Return twitter channel + enabled flag for a guild."""
+async def get_x_settings(pool: asyncpg.Pool, guild_id: int) -> dict | None:
+    """Return X output channel + enabled flag for a guild."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT guild_id, twitter_channel_id, twitter_enabled
+            SELECT guild_id,
+                   twitter_channel_id AS x_channel_id,
+                   twitter_enabled AS x_enabled
             FROM guild_settings
             WHERE guild_id = $1;
             """,
@@ -116,15 +119,11 @@ async def get_twitter_settings(pool: asyncpg.Pool, guild_id: int) -> dict | None
         )
     if row is None:
         return None
-    return {
-        "guild_id": row["guild_id"],
-        "twitter_channel_id": row["twitter_channel_id"],
-        "twitter_enabled": row["twitter_enabled"],
-    }
+    return dict(row)
 
 
-async def set_twitter_channel(pool: asyncpg.Pool, guild_id: int, channel_id: int) -> None:
-    """Set the Discord channel where tweets are posted."""
+async def set_x_channel(pool: asyncpg.Pool, guild_id: int, channel_id: int) -> None:
+    """Set the Discord channel where X posts are published."""
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -137,11 +136,11 @@ async def set_twitter_channel(pool: asyncpg.Pool, guild_id: int, channel_id: int
             guild_id,
             channel_id,
         )
-    logger.info("twitter_channel_id=%s for guild_id=%s", channel_id, guild_id)
+    logger.info("x_channel_id=%s for guild_id=%s", channel_id, guild_id)
 
 
-async def toggle_twitter(pool: asyncpg.Pool, guild_id: int) -> bool:
-    """Flip twitter_enabled for a guild. Returns the new state."""
+async def toggle_x(pool: asyncpg.Pool, guild_id: int) -> bool:
+    """Flip X monitoring for a guild. Returns the new state."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -150,13 +149,40 @@ async def toggle_twitter(pool: asyncpg.Pool, guild_id: int) -> bool:
             ON CONFLICT (guild_id) DO UPDATE
                 SET twitter_enabled = NOT COALESCE(guild_settings.twitter_enabled, TRUE),
                     updated_at = NOW()
-            RETURNING twitter_enabled;
+            RETURNING twitter_enabled AS x_enabled;
             """,
             guild_id,
         )
-    enabled = bool(row["twitter_enabled"])
-    logger.info("twitter_enabled=%s for guild_id=%s", enabled, guild_id)
+    enabled = bool(row["x_enabled"])
+    logger.info("x_enabled=%s for guild_id=%s", enabled, guild_id)
     return enabled
+
+
+async def claim_ping_slot(pool: asyncpg.Pool, guild_id: int, cooldown_hours: int) -> bool:
+    """Atomically claim the role-ping slot for a guild's X feed.
+
+    Returns True (and stamps NOW()) only if no ping has been sent within the last
+    ``cooldown_hours``. Subsequent calls inside the window return False, so bursts of
+    posts ping once and stay quiet after. The check-and-set is a single UPDATE so
+    concurrent posts can't both claim. A guild_settings row always exists here because
+    an X output channel must be configured before posting.
+    """
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE guild_settings
+            SET twitter_last_ping_at = NOW()
+            WHERE guild_id = $1
+              AND (
+                  twitter_last_ping_at IS NULL
+                  OR twitter_last_ping_at < NOW() - make_interval(hours => $2)
+              )
+            RETURNING twitter_last_ping_at;
+            """,
+            guild_id,
+            cooldown_hours,
+        )
+    return row is not None
 
 
 async def mark_tweets_seen(

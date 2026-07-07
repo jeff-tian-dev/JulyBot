@@ -84,11 +84,13 @@ CREATE TABLE IF NOT EXISTS guild_settings (
 ALTER_GUILD_SETTINGS_TWITTER = """
 ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS twitter_channel_id BIGINT;
 ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS twitter_enabled BOOLEAN DEFAULT TRUE;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS twitter_last_ping_at TIMESTAMP;
 """
 
 ALTER_GUILD_SETTINGS_YOUTUBE = """
 ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS youtube_channel_id BIGINT;
 ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS youtube_enabled BOOLEAN DEFAULT TRUE;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS youtube_last_ping_at TIMESTAMP;
 """
 
 CREATE_YOUTUBE_WATCHED_CHANNELS = """
@@ -159,14 +161,14 @@ async def create_tables(pool: asyncpg.Pool) -> None:
                 logger.info("Applying multi-account migration to users")
                 await conn.execute(MIGRATE_USERS_MULTI_ACCOUNT)
 
-        logger.info("Applying guild_settings twitter column migrations if needed")
+        logger.info("Applying guild_settings X column migrations if needed")
         await conn.execute(ALTER_GUILD_SETTINGS_TWITTER)
 
-        twitter_ddls = (
+        x_ddls = (
             (CREATE_TWITTER_WATCHED_ACCOUNTS, "twitter_watched_accounts"),
             (CREATE_SEEN_TWEETS, "seen_tweets"),
         )
-        for ddl, name in twitter_ddls:
+        for ddl, name in x_ddls:
             logger.info("Creating table %s if not exists", name)
             await conn.execute(ddl)
 

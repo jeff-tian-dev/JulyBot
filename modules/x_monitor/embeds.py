@@ -10,7 +10,17 @@ MAX_MEDIA_EMBEDS = 4
 
 _TCO_URL_RE = re.compile(r"https?://t\.co/\S+", re.IGNORECASE)
 _PIC_X_URL_RE = re.compile(r"https?://pic\.x\.com/\S+", re.IGNORECASE)
-_WHITESPACE_RE = re.compile(r"\s+")
+_HORIZONTAL_WS_RE = re.compile(r"[ \t]+")
+
+
+def _normalize_whitespace(text: str) -> str:
+    """Collapse runs of spaces/tabs within each line; preserve newlines and indentation."""
+    lines: list[str] = []
+    for line in text.splitlines():
+        body = line.lstrip(" \t")
+        indent = line[: len(line) - len(body)]
+        lines.append(indent + _HORIZONTAL_WS_RE.sub(" ", body).rstrip())
+    return "\n".join(lines).strip()
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -101,7 +111,7 @@ def _clean_tweet_text(tweet) -> str:
 
     cleaned = _TCO_URL_RE.sub(" ", cleaned)
     cleaned = _PIC_X_URL_RE.sub(" ", cleaned)
-    return _WHITESPACE_RE.sub(" ", cleaned).strip()
+    return _normalize_whitespace(cleaned)
 
 
 def _author_labels(author) -> tuple[str, str]:

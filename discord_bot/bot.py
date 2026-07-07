@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 COG_MODULES = (
-    "discord_bot.commands.twitter_commands",
+    "discord_bot.commands.x_commands",
     "discord_bot.commands.youtube_commands",
     "discord_bot.commands.moderation_commands",
     "discord_bot.commands.account_commands",

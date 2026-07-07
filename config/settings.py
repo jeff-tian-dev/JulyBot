@@ -30,6 +30,10 @@ def _optional(name: str, default: str) -> str:
     return os.getenv(name) or default
 
 
+def _optional_with_legacy(name: str, legacy: str, default: str) -> str:
+    return os.getenv(name) or os.getenv(legacy) or default
+
+
 def _int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None or raw == "":
@@ -38,6 +42,20 @@ def _int(name: str, default: int) -> int:
         return int(raw)
     except ValueError as e:
         raise ValueError(f"Environment variable {name!r} must be an int, got {raw!r}") from e
+
+
+def _int_with_legacy(name: str, legacy: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        raw = os.getenv(legacy)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError as e:
+        raise ValueError(
+            f"Environment variable {name!r} (or legacy {legacy!r}) must be an int, got {raw!r}"
+        ) from e
 
 
 def _csv(name: str) -> list[str]:
@@ -57,11 +75,14 @@ class Settings:
     YOUTUBE_CHANNEL_IDS: list[str] = field(default_factory=list)
     LEGEND_POLL_INTERVAL_MINUTES: int = 60
     CACHE_REFRESH_INTERVAL_HOURS: int = 24
-    TWITTER_COOKIES: str = ""
-    TWITTER_SESSION_NAME: str = "julybot_twitter"
-    TWITTER_POLL_INTERVAL_MINUTES: int = 10
-    TWITTER_PING_ROLE_ID: int = 0
+    X_COOKIES: str = ""
+    X_SESSION_NAME: str = "julybot_x"
+    X_POLL_INTERVAL_MINUTES: int = 10
+    X_PING_ROLE_ID: int = 0
+    X_PING_COOLDOWN_HOURS: int = 3
     YOUTUBE_FEED_POLL_INTERVAL_MINUTES: int = 10
+    YOUTUBE_PING_ROLE_ID: int = 0
+    YOUTUBE_PING_COOLDOWN_HOURS: int = 3
     MOD_LOG_CHANNEL_ID: int = 0
 
 
@@ -86,11 +107,14 @@ def _load() -> Settings:
         YOUTUBE_CHANNEL_IDS=_csv("YOUTUBE_CHANNEL_IDS"),
         LEGEND_POLL_INTERVAL_MINUTES=_int("LEGEND_POLL_INTERVAL_MINUTES", 60),
         CACHE_REFRESH_INTERVAL_HOURS=_int("CACHE_REFRESH_INTERVAL_HOURS", 24),
-        TWITTER_COOKIES=_optional("TWITTER_COOKIES", ""),
-        TWITTER_SESSION_NAME=_optional("TWITTER_SESSION_NAME", "julybot_twitter"),
-        TWITTER_POLL_INTERVAL_MINUTES=_int("TWITTER_POLL_INTERVAL_MINUTES", 10),
-        TWITTER_PING_ROLE_ID=_int("TWITTER_PING_ROLE_ID", 0),
+        X_COOKIES=_optional_with_legacy("X_COOKIES", "TWITTER_COOKIES", ""),
+        X_SESSION_NAME=_optional_with_legacy("X_SESSION_NAME", "TWITTER_SESSION_NAME", "julybot_x"),
+        X_POLL_INTERVAL_MINUTES=_int_with_legacy("X_POLL_INTERVAL_MINUTES", "TWITTER_POLL_INTERVAL_MINUTES", 10),
+        X_PING_ROLE_ID=_int_with_legacy("X_PING_ROLE_ID", "TWITTER_PING_ROLE_ID", 0),
+        X_PING_COOLDOWN_HOURS=_int("X_PING_COOLDOWN_HOURS", 3),
         YOUTUBE_FEED_POLL_INTERVAL_MINUTES=_int("YOUTUBE_FEED_POLL_INTERVAL_MINUTES", 10),
+        YOUTUBE_PING_ROLE_ID=_int("YOUTUBE_PING_ROLE_ID", 1508359179440750602),
+        YOUTUBE_PING_COOLDOWN_HOURS=_int("YOUTUBE_PING_COOLDOWN_HOURS", 3),
         MOD_LOG_CHANNEL_ID=_int("MOD_LOG_CHANNEL_ID", 1514111681222148219),
     )
 

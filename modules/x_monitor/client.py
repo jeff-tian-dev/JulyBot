@@ -1,4 +1,4 @@
-"""tweety-ns session wrapper for Twitter/X scraping."""
+"""tweety-ns session wrapper for X scraping."""
 from __future__ import annotations
 
 import logging
@@ -6,24 +6,32 @@ import os
 from pathlib import Path
 
 from config.settings import settings
-from modules.twitter_monitor.tweety_patch import apply_tweety_patch
+from modules.x_monitor.tweety_patch import apply_tweety_patch
 
 apply_tweety_patch()
 
 from tweety import TwitterAsync
 from tweety.exceptions import AuthenticationRequired, InvalidCredentials
 
-from config.settings import settings
-
 logger = logging.getLogger(__name__)
 
-SESSION_DIR = Path("./data/twitter")
+SESSION_DIR = Path("./data/x")
+_LEGACY_SESSION_DIR = Path("./data/twitter")
 _client: TwitterAsync | None = None
 
 
-def _session_path() -> str:
+def _session_dir() -> Path:
+    """Prefer data/x; fall back to legacy data/twitter if the session file lives there."""
+    name = settings.X_SESSION_NAME
+    if (_LEGACY_SESSION_DIR / name).exists() and not (SESSION_DIR / name).exists():
+        return _LEGACY_SESSION_DIR
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    return str(SESSION_DIR / settings.TWITTER_SESSION_NAME)
+    return SESSION_DIR
+
+
+def _session_path() -> str:
+    session_dir = _session_dir()
+    return str(session_dir / settings.X_SESSION_NAME)
 
 
 async def get_client() -> TwitterAsync:
@@ -32,21 +40,22 @@ async def get_client() -> TwitterAsync:
     if _client is not None:
         return _client
 
-    if not settings.TWITTER_COOKIES:
-        raise InvalidCredentials("TWITTER_COOKIES is not configured")
+    if not settings.X_COOKIES:
+        raise InvalidCredentials("X_COOKIES is not configured")
 
     session_name = _session_path()
     app = TwitterAsync(session_name)
 
     cwd = os.getcwd()
+    session_dir = _session_dir()
     try:
-        os.chdir(SESSION_DIR)
+        os.chdir(session_dir)
         try:
             await app.connect()
-            logger.info("Twitter session restored for @%s", app.me.username)
+            logger.info("X session restored for @%s", app.me.username)
         except Exception:
-            await app.load_cookies(settings.TWITTER_COOKIES)
-            logger.info("Twitter session loaded from cookies for @%s", app.me.username)
+            await app.load_cookies(settings.X_COOKIES)
+            logger.info("X session loaded from cookies for @%s", app.me.username)
     finally:
         os.chdir(cwd)
 
@@ -77,8 +86,8 @@ async def fetch_latest_tweet_id(username: str) -> int:
 
 
 def is_configured() -> bool:
-    """True when Twitter cookie auth is available."""
-    return bool(settings.TWITTER_COOKIES)
+    """True when X cookie auth is available."""
+    return bool(settings.X_COOKIES)
 
 
 def is_auth_error(exc: BaseException) -> bool:
