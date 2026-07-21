@@ -136,8 +136,6 @@ async def purge_user_messages(
     word = word.strip()
     if not word:
         raise ModerationError("Provide a non-empty word to purge.")
-    if target.id == moderator.id:
-        raise ModerationError("You can't purge your own messages with this command.")
 
     me = guild.me
     if me is None:

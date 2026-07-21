@@ -34,6 +34,12 @@ def create_bot(pool: asyncpg.Pool) -> commands.InteractionBot:
     """Build a configured InteractionBot with Cogs for all modules."""
     intents = disnake.Intents.default()
     intents.message_content = True
+    # Required to resolve `disnake.Member` command arguments for users other than
+    # the invoker (e.g. /purgeword <member>). Without it, member-typed options for
+    # other users can fail to resolve, so the interaction is never acked in time
+    # ("The application did not respond"). Privileged: also enable "Server Members
+    # Intent" for the bot in the Discord Developer Portal.
+    intents.members = True
 
     test_guilds = [settings.DISCORD_GUILD_ID] if settings.DISCORD_GUILD_ID else None
 

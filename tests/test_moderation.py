@@ -210,11 +210,16 @@ async def test_purge_rejects_empty_word() -> None:
 
 
 @pytest.mark.asyncio
-async def test_purge_rejects_self_target() -> None:
-    guild = _purge_guild([])
-    mod = SimpleNamespace(id=42)
-    with pytest.raises(ModerationError, match="your own messages"):
-        await purge.purge_user_messages(guild, mod, "word", mod)
+async def test_purge_allows_self_target() -> None:
+    """A moderator may purge their own messages (no self-target guard)."""
+    mod_id = 42
+    channel = _purge_channel([_message(author_id=mod_id, content="dog", age_days=1)])
+    guild = _purge_guild([channel])
+    mod = SimpleNamespace(id=mod_id)
+
+    result = await purge.purge_user_messages(guild, mod, "dog", mod)
+
+    assert result.deleted == 1
 
 
 @pytest.mark.asyncio

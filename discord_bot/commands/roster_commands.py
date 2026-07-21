@@ -144,8 +144,9 @@ class RosterCommands(commands.Cog):
     async def _user_label(self, guild: disnake.Guild, discord_id: int | None) -> str:
         """Resolve a Discord id to a plain name for the table (no mention markup).
 
-        Tries the guild/user caches first, then a single API fetch on a miss —
-        the bot runs without the members intent, so the cache is often empty.
+        Tries the guild/user caches first, then a single API fetch on a miss.
+        (The members intent is enabled, but the cache can still miss for users
+        who haven't been seen since startup.)
         """
         if discord_id is None:
             return "Unlinked"
