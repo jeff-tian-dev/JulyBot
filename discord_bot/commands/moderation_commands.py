@@ -1,11 +1,15 @@
-"""/kick, /ban, /unban — admin-only moderation commands."""
+"""/kick, /ban, /unban, /purgeword — admin-only moderation commands."""
 from __future__ import annotations
+
+import logging as _logging
 
 import disnake
 from disnake.ext import commands
 
 from modules.moderation import actions, logging, messages, purge
 from modules.moderation.validation import ModerationError
+
+logger = _logging.getLogger(__name__)
 
 ADMIN_PERMS = disnake.Permissions(administrator=True)
 
@@ -105,7 +109,9 @@ class ModerationCommands(commands.Cog):
     async def purgeword(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        member: disnake.Member,
+        # Accept User (not just Member) so resolution never fails on a
+        # member-vs-user mismatch or a target who left the guild.
+        member: disnake.User,
         word: str = commands.Param(max_length=100),
     ) -> None:
         # A full-server history scan far exceeds the 3s interaction deadline.
@@ -114,7 +120,11 @@ class ModerationCommands(commands.Cog):
         try:
             result = await purge.purge_user_messages(inter.guild, member, word, inter.author)
         except ModerationError as exc:
-            await inter.edit_original_response(content=str(exc))
+            await self._respond(inter, str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 — surface any failure to the invoker + log
+            logger.exception("purgeword failed for target=%s word=%r", member.id, word)
+            await self._respond(inter, f"Purge failed: {type(exc).__name__}: {exc}")
             return
 
         summary = (
@@ -130,7 +140,7 @@ class ModerationCommands(commands.Cog):
                 f"\n⚠️ Hit the {purge.MAX_DELETIONS_PER_RUN}-per-run limit — "
                 "run the command again to keep going."
             )
-        await inter.edit_original_response(content=summary)
+        await self._respond(inter, summary)
 
         await logging.send_mod_log(
             self.bot,
@@ -140,6 +150,17 @@ class ModerationCommands(commands.Cog):
             moderator=inter.author,
             reason=f"Purged {result.deleted} message(s) containing {word!r}",
         )
+
+    @staticmethod
+    async def _respond(inter: disnake.ApplicationCommandInteraction, content: str) -> None:
+        """Reply whether or not the interaction was already deferred/responded."""
+        try:
+            if inter.response.is_done():
+                await inter.edit_original_response(content=content)
+            else:
+                await inter.response.send_message(content=content, ephemeral=True)
+        except disnake.HTTPException:
+            logger.exception("Failed to send purgeword response")
 
 
 def setup(bot: commands.InteractionBot) -> None:
