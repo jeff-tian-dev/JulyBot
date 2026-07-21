@@ -22,8 +22,11 @@ logger = _logging.getLogger(__name__)
 BULK_DELETE_MAX_AGE_DAYS = 14
 # Max messages Discord accepts in a single bulk_delete call.
 BULK_DELETE_BATCH_SIZE = 100
-# Pause between individual (old-message) deletes to stay under rate limits.
-INDIVIDUAL_DELETE_DELAY_SECONDS = 0.5
+# Extra pause between individual (old-message) deletes. disnake's HTTP layer
+# already waits out Discord's rate limits automatically, so this is 0 by
+# default — an added sleep here only slows the trickle of old-message deletes
+# without preventing 429s. Bump it only if you deliberately want to go gentler.
+INDIVIDUAL_DELETE_DELAY_SECONDS = 0.0
 # Stop after this many deletions in one run so old-message deletes stay under
 # Discord's rate limits and within the interaction follow-up window. Re-run the
 # command to continue where it left off (history is scanned newest-first).
@@ -107,7 +110,8 @@ async def _purge_channel(
             except (disnake.Forbidden, disnake.HTTPException) as exc:
                 result.failed += 1
                 logger.warning("Delete failed for message %s: %s", message.id, exc)
-            await asyncio.sleep(INDIVIDUAL_DELETE_DELAY_SECONDS)
+            if INDIVIDUAL_DELETE_DELAY_SECONDS:
+                await asyncio.sleep(INDIVIDUAL_DELETE_DELAY_SECONDS)
 
         # Count queued-but-not-yet-deleted messages so we never overshoot.
         if result.deleted + len(recent_batch) >= MAX_DELETIONS_PER_RUN:
