@@ -2,7 +2,8 @@
 
 Discord exposes no "all messages by user" endpoint, so this walks every
 readable text channel and thread, filters history by author + word, and
-deletes matches. Messages younger than the bulk-delete cutoff are removed in
+deletes matches. Channels are scanned concurrently (the history read is the
+dominant cost). Messages younger than the bulk-delete cutoff are removed in
 batches; older ones are deleted one at a time.
 """
 from __future__ import annotations
@@ -31,6 +32,11 @@ INDIVIDUAL_DELETE_DELAY_SECONDS = 0.0
 # Discord's rate limits and within the interaction follow-up window. Re-run the
 # command to continue where it left off (history is scanned newest-first).
 MAX_DELETIONS_PER_RUN = 500
+# How many channels/threads to scan in parallel. None = unbounded (scan every
+# channel at once). Set an int (e.g. 5) to bound parallelism via a semaphore if
+# unbounded scanning trips Discord's *global* rate limit and backs everything
+# off. The history read is the dominant cost, so parallelising it is the win.
+SCAN_CONCURRENCY: int | None = None
 
 
 @dataclass
@@ -71,11 +77,14 @@ async def _purge_channel(
     word_lower: str,
     result: PurgeResult,
     cutoff: datetime,
+    stop_event: asyncio.Event,
 ) -> bool:
     """Delete matching messages in one channel/thread, updating ``result``.
 
-    Returns ``True`` if the per-run deletion cap was reached (caller should
-    stop scanning further channels).
+    ``result`` is shared across all channels scanning in parallel, so
+    ``result.deleted`` is a live global count. When it reaches the per-run cap,
+    ``stop_event`` is set and every channel bails out at its next check. Returns
+    ``True`` if this channel observed the cap being reached.
     """
     recent_batch: list[disnake.Message] = []
 
@@ -94,6 +103,10 @@ async def _purge_channel(
                 logger.warning("Bulk delete failed in %s: %s", channel, exc)
 
     async for message in channel.history(limit=None):
+        # Another channel hit the global cap — stop reading this one too.
+        if stop_event.is_set():
+            break
+
         if message.author.id != target_id:
             continue
         if not _content_matches(message.content, word_lower):
@@ -117,11 +130,13 @@ async def _purge_channel(
         if result.deleted + len(recent_batch) >= MAX_DELETIONS_PER_RUN:
             await flush_recent()
             result.capped = True
+            stop_event.set()
             return True
 
     await flush_recent()
     if result.deleted >= MAX_DELETIONS_PER_RUN:
         result.capped = True
+        stop_event.set()
         return True
     return False
 
@@ -157,22 +172,33 @@ async def purge_user_messages(
         if channel.id not in manageable_ids:
             result.channels_skipped += 1
 
-    for channel in manageable_channels:
+    # Channels are scanned in parallel — the history read is the dominant cost,
+    # so this is the main speedup. `result` is shared; `stop_event` lets every
+    # channel bail once the global deletion cap is reached.
+    stop_event = asyncio.Event()
+    semaphore = asyncio.Semaphore(SCAN_CONCURRENCY) if SCAN_CONCURRENCY else None
+
+    async def scan(channel: disnake.abc.Messageable) -> None:
+        if stop_event.is_set():
+            return
         try:
-            capped = await _purge_channel(channel, target.id, word_lower, result, cutoff)
+            if semaphore is not None:
+                async with semaphore:
+                    await _purge_channel(channel, target.id, word_lower, result, cutoff, stop_event)
+            else:
+                await _purge_channel(channel, target.id, word_lower, result, cutoff, stop_event)
             result.channels_scanned += 1
         except disnake.Forbidden:
             result.channels_skipped += 1
             logger.warning("Lost access mid-scan in %s; skipping", channel)
-            continue
         except disnake.HTTPException as exc:
             result.channels_skipped += 1
             logger.warning("HTTP error scanning %s: %s; skipping", channel, exc)
-            continue
 
-        if capped:
-            logger.info("Hit per-run deletion cap (%d); stopping early", MAX_DELETIONS_PER_RUN)
-            break
+    await asyncio.gather(*(scan(channel) for channel in manageable_channels))
+
+    if result.capped:
+        logger.info("Hit per-run deletion cap (%d); stopped early", MAX_DELETIONS_PER_RUN)
 
     logger.info(
         "Purge by %s: word=%r target=%s deleted=%d scanned=%d skipped=%d failed=%d",

@@ -339,3 +339,22 @@ async def test_purge_not_capped_when_under_limit() -> None:
 
     assert result.deleted == 1
     assert result.capped is False
+
+
+@pytest.mark.asyncio
+async def test_purge_scans_all_channels_concurrently() -> None:
+    """Every manageable channel is scanned and its matches deleted."""
+    target_id = 55
+    channels = [
+        _purge_channel([_message(author_id=target_id, content="dog", age_days=1)])
+        for _ in range(4)
+    ]
+    guild = _purge_guild(channels)
+
+    result = await purge.purge_user_messages(
+        guild, SimpleNamespace(id=target_id), "dog", SimpleNamespace(id=42)
+    )
+
+    assert result.deleted == 4
+    assert result.channels_scanned == 4
+    assert result.capped is False
