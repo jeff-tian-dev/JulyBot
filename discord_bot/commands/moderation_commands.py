@@ -4,7 +4,7 @@ from __future__ import annotations
 import disnake
 from disnake.ext import commands
 
-from modules.moderation import actions, logging, messages
+from modules.moderation import actions, logging, messages, purge
 from modules.moderation.validation import ModerationError
 
 ADMIN_PERMS = disnake.Permissions(administrator=True)
@@ -95,6 +95,50 @@ class ModerationCommands(commands.Cog):
             target_id=target_id,
             moderator=inter.author,
             reason=reason,
+        )
+
+    @commands.slash_command(
+        name="purgeword",
+        description="Delete all of a member's messages that contain a given word.",
+        default_member_permissions=ADMIN_PERMS,
+    )
+    async def purgeword(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        member: disnake.Member,
+        word: str = commands.Param(max_length=100),
+    ) -> None:
+        # A full-server history scan far exceeds the 3s interaction deadline.
+        await inter.response.defer(ephemeral=True)
+
+        try:
+            result = await purge.purge_user_messages(inter.guild, member, word, inter.author)
+        except ModerationError as exc:
+            await inter.edit_original_response(content=str(exc))
+            return
+
+        summary = (
+            f"Deleted **{result.deleted}** message(s) from **{member}** containing "
+            f"`{word}` across {result.channels_scanned} channel(s)."
+        )
+        if result.channels_skipped:
+            summary += f" Skipped {result.channels_skipped} channel(s) I can't manage."
+        if result.failed:
+            summary += f" {result.failed} deletion(s) failed."
+        if result.capped:
+            summary += (
+                f"\n⚠️ Hit the {purge.MAX_DELETIONS_PER_RUN}-per-run limit — "
+                "run the command again to keep going."
+            )
+        await inter.edit_original_response(content=summary)
+
+        await logging.send_mod_log(
+            self.bot,
+            action="purge",
+            target_label=str(member),
+            target_id=member.id,
+            moderator=inter.author,
+            reason=f"Purged {result.deleted} message(s) containing {word!r}",
         )
 
 

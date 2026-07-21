@@ -248,6 +248,7 @@ Five Cogs are loaded today (see `COG_MODULES` in [discord_bot/bot.py](discord_bo
 | `/kick <member> [reason]`        | moderation (admin) | live         |
 | `/ban <member> [reason]`         | moderation (admin) | live         |
 | `/unban <user_id> [reason]`      | moderation (admin) | live         |
+| `/purgeword <member> <word>`     | moderation (admin) | live         |
 | `/legend`                        | legend_tracker     | stub, not loaded |
 | `/legend_history <days>`         | legend_tracker     | stub, not loaded |
 | `/leaderboard`                   | legend_tracker     | stub, not loaded |

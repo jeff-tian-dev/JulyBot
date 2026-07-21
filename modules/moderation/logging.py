@@ -10,18 +10,20 @@ from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-Action = Literal["kick", "ban", "unban"]
+Action = Literal["kick", "ban", "unban", "purge"]
 
 _ACTION_COLOURS: dict[Action, int] = {
     "kick": 0xE67E22,
     "ban": 0xE74C3C,
     "unban": 0x2ECC71,
+    "purge": 0x9B59B6,
 }
 
 _ACTION_TITLES: dict[Action, str] = {
     "kick": "Member Kicked",
     "ban": "Member Banned",
     "unban": "Member Unbanned",
+    "purge": "Messages Purged",
 }
 
 
