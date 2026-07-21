@@ -106,3 +106,11 @@ When you discover a non-obvious convention, an architectural decision, or a work
 - Admin-only slash commands: `/setyoutubechannel`, `/toggleyoutube`, `/youtube_add`, `/youtube_remove`, `/youtube_list`.
 - `YOUTUBE_FEED_POLL_INTERVAL_MINUTES` env var (default 10). Twitter poll default also changed from 5 → 10 minutes.
 - APScheduler job `poll_youtube_feed` is always registered (no auth gate). `main.py` calls `seed_unseeded_channels(pool)` before starting the scheduler.
+
+## 2026-07-21 — /purgeword (moderation)
+
+- Added `modules/moderation/purge.py` — `purge_user_messages(guild, target, word, moderator)` deletes every message from `target` whose content contains `word` (case-insensitive substring) across all text channels + active threads the bot can `read_message_history` + `manage_messages`. Returns a `PurgeResult` dataclass (deleted / channels_scanned / channels_skipped / failed). Pool-free — it only touches the Discord API, so tests mock disnake objects, not a pool.
+- **Discord has no "all messages by user" endpoint.** The only way is to walk each channel's `history()` and filter by author — inherently slow and rate-limited. The `/purgeword` cog command therefore `defer(ephemeral=True)`s before scanning.
+- **14-day bulk-delete rule:** messages younger than `BULK_DELETE_MAX_AGE_DAYS` are batched via `channel.delete_messages` (max 100/call); older ones are deleted individually with a `INDIVIDUAL_DELETE_DELAY_SECONDS` pause to respect rate limits. Constants live at the top of `purge.py`.
+- **`MAX_DELETIONS_PER_RUN = 500` caps *deletions*, not messages scanned.** The cap check sits after the author + word filter, so non-matching messages never consume the budget. When hit, `PurgeResult.capped=True` and the cog tells the user to re-run; because deleted messages vanish from history, the next run's newest-first scan resumes past them (no re-deletion). Trade-off: each run re-*reads* history from the top — reads are cheap/unthrottled, so we accepted it over a `before`-timestamp resume param.
+- Extended `logging.py` `Action` literal + colour/title maps with `"purge"`. Admin-only (`default_member_permissions`). No new tables or env vars.

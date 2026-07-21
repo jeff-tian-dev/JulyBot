@@ -213,6 +213,7 @@ Tests mock `asyncpg.Pool` and patch `aiohttp` calls — no Postgres or network a
 | `/youtube_add <channel_id>`      | youtube_feed (admin only)    |
 | `/youtube_remove <channel_id>`   | youtube_feed (admin only)    |
 | `/youtube_list`                  | youtube_feed (admin only)    |
+| `/purgeword <member> <word>`     | moderation (admin only)      |
 
 Most commands still respond with placeholder text; replace with real handlers as features come online.
 
