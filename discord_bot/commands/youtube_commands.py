@@ -1,4 +1,4 @@
-"""/ytsetchannel, /yttoggle, /ytadd, /ytremove, /ytlist."""
+"""/yt setchannel, /yt toggle, /yt add, /yt remove, /yt list."""
 from __future__ import annotations
 
 import disnake
@@ -28,11 +28,18 @@ class YoutubeCommands(commands.Cog):
         self.bot = bot
 
     @commands.slash_command(
-        name="ytsetchannel",
-        description="Set the channel where new YouTube videos are posted.",
+        name="yt",
+        description="YouTube feed monitoring commands.",
         default_member_permissions=ADMIN_PERMS,
     )
-    async def ytsetchannel(
+    async def yt(self, inter: disnake.ApplicationCommandInteraction) -> None:
+        """Parent group; never invoked directly."""
+
+    @yt.sub_command(
+        name="setchannel",
+        description="Set the channel where new YouTube videos are posted.",
+    )
+    async def setchannel(
         self,
         inter: disnake.ApplicationCommandInteraction,
         channel: disnake.TextChannel,
@@ -43,22 +50,20 @@ class YoutubeCommands(commands.Cog):
             ephemeral=True,
         )
 
-    @commands.slash_command(
-        name="yttoggle",
+    @yt.sub_command(
+        name="toggle",
         description="Enable or disable YouTube feed monitoring for this server.",
-        default_member_permissions=ADMIN_PERMS,
     )
-    async def yttoggle(self, inter: disnake.ApplicationCommandInteraction) -> None:
+    async def toggle(self, inter: disnake.ApplicationCommandInteraction) -> None:
         enabled = await storage.toggle_youtube(self.bot.pool, inter.guild.id)
         state = "enabled" if enabled else "disabled"
         await inter.response.send_message(f"YouTube feed monitoring is now **{state}**.", ephemeral=True)
 
-    @commands.slash_command(
-        name="ytadd",
+    @yt.sub_command(
+        name="add",
         description="Add a YouTube channel to the watch list.",
-        default_member_permissions=ADMIN_PERMS,
     )
-    async def ytadd(
+    async def add(
         self,
         inter: disnake.ApplicationCommandInteraction,
         channel_id: str,
@@ -76,12 +81,11 @@ class YoutubeCommands(commands.Cog):
             ephemeral=True,
         )
 
-    @commands.slash_command(
-        name="ytremove",
+    @yt.sub_command(
+        name="remove",
         description="Remove a YouTube channel from the watch list.",
-        default_member_permissions=ADMIN_PERMS,
     )
-    async def ytremove(
+    async def remove(
         self,
         inter: disnake.ApplicationCommandInteraction,
         channel_id: str,
@@ -100,12 +104,11 @@ class YoutubeCommands(commands.Cog):
         else:
             await inter.response.send_message("That channel is not on the watch list.", ephemeral=True)
 
-    @commands.slash_command(
-        name="ytlist",
+    @yt.sub_command(
+        name="list",
         description="List YouTube channels being watched in this server.",
-        default_member_permissions=ADMIN_PERMS,
     )
-    async def ytlist(self, inter: disnake.ApplicationCommandInteraction) -> None:
+    async def list(self, inter: disnake.ApplicationCommandInteraction) -> None:
         await inter.response.defer(ephemeral=True)
 
         channels = await storage.list_watched_channels(self.bot.pool, inter.guild.id)

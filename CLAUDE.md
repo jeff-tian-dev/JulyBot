@@ -4,9 +4,42 @@ Project-specific instructions for Claude Code working on this repo. Read top-to-
 
 ---
 
+## ▶️ Running the bot (start / stop) — read this first
+
+The bot runs locally on the Mac Studio at `/Users/jefftian/JulyBot`. All commands below are run from the repo root. The DB is remote (Supabase); there is nothing local to start or stop.
+
+**Start (foreground — for debugging, logs to terminal, Ctrl-C to stop):**
+```bash
+./deploy/start.sh          # == .venv/bin/python main.py
+```
+
+**Start (background — launchd agent, auto-starts on login, restarts on crash):**
+```bash
+./deploy/install-service.sh
+```
+
+**Stop the background service:**
+```bash
+./deploy/stop.sh           # boots out the launchd agent com.julybot
+```
+
+**Restart the background service after a code change:**
+```bash
+./deploy/install-service.sh   # re-installs + kickstarts; safe to re-run
+```
+
+**Remove the launchd agent entirely:** `./deploy/uninstall-service.sh`
+
+- Foreground vs. background are mutually exclusive — if the launchd service is running, stop it before `start.sh` or you'll get two bots double-posting.
+- Background logs: `logs/julybot.stdout.log` and `logs/julybot.stderr.log`.
+- launchd label is `com.julybot`; inspect with `launchctl print gui/$(id -u)/com.julybot`.
+- First-time only: `./deploy/setup.sh` (venv + `.env`), then `.venv/bin/python scripts/init_db.py` (creates tables). `init_db.py` and `create_tables` are idempotent — safe to re-run after adding tables/columns.
+
+---
+
 ## Project at a glance
 
-A Clash of Clans Discord bot, Python 3.11+. Four modules: `base_finder` (image recognition pipeline over YouTube VODs), `legend_tracker` (CoC API polling + daily snapshots), `account_linker` (Discord ID <-> CoC tag verification), `ping_automator` (APScheduler jobs). Discord layer (`discord_bot/`) is a thin shim — every Cog command must delegate to module functions and format the reply, nothing more.
+A Clash of Clans Discord bot, Python 3.11+. Core modules: `base_finder` (image recognition pipeline over YouTube VODs), `legend_tracker` (CoC API polling + daily snapshots), `account_linker` (Discord ID <-> CoC tag verification), `ping_automator` (APScheduler jobs), plus `x_monitor`, `youtube_feed`, `moderation`, and `roster` (admin-managed player groups + clan leave/rejoin watcher — see the 2026-07-20 entry). Discord layer (`discord_bot/`) is a thin shim — every Cog command must delegate to module functions and format the reply, nothing more.
 
 Storage is PostgreSQL with the `pgvector` extension. Connection is raw `asyncpg` — **do not introduce SQLAlchemy or any other ORM**.
 
@@ -120,3 +153,16 @@ When you discover a non-obvious convention, an architectural decision, or a work
 - State is a per-guild timestamp on `guild_settings`: `twitter_last_ping_at` / `youtube_last_ping_at` (idempotent `ALTER TABLE` in `create_tables`). Kept the `twitter_` DB prefix to match existing columns.
 - The check-and-set is one atomic UPDATE — `storage.claim_ping_slot(pool, guild_id, cooldown_hours)` in both modules — using `make_interval(hours => $2)`. Returns True (and stamps `NOW()`) only outside the window, so bursts ping once. Pollers only call it when a ping role is configured.
 - Known edge: the slot is claimed just before `channel.send`. If that send fails and the post is retried next poll, the retry posts silently (window already consumed). Deemed acceptable for a monitor bot.
+
+## 2026-07-20 — roster module + clan-watch, grouped X/YT commands
+
+- New `modules/roster/` (`storage.py` + `watcher.py`) and Cog `roster_commands` (`RosterCommands`). All `/roster …` subcommands are admin-only. A roster is a named group of members; each member is **either** a Discord user (`/roster add|remove|move`) **or** a raw CoC tag (`/roster addtag|removetag|movetag`) for people who never linked. `/roster view` renders an ephemeral embed with per-column show/hide buttons; `/roster watch` opts a roster into clan-leave/rejoin alerts.
+- New tables in [database/models.py](database/models.py): `rosters`, `roster_members`, `clan_membership`, `coc_player_cache`. Member identity is a CHECK (`discord_id` OR `coc_tag`) plus two partial unique indexes; roster names are unique per guild case-insensitively (`lower(name)` index). `ALL_TABLES` drop-order lists these before `users` (FK/child-first). All additive — `create_tables` stays idempotent.
+- Clan-watch poller `poll_clan_watch(pool, bot)` unions the member lists of every **family** clan (`COC_FAMILY_CLAN_TAGS` + legacy single `COC_CLAN_TAG`); a tag is "in" if in ANY family clan, so hopping between family clans never alerts. First sight of a tag is seeded silently (no restart spam). **If any family clan fetch fails the whole poll is skipped** to avoid false "left" alerts. Alerts post plain text to `CLAN_WATCH_CHANNEL_ID`.
+- New settings: `COC_CLAN_TAG`, `COC_FAMILY_CLAN_TAGS` (CSV, no `#`), `CLAN_WATCH_CHANNEL_ID` (has a hardcoded default id), `CLAN_WATCH_POLL_INTERVAL_MINUTES` (default 10). The scheduler registers `poll_clan_watch` **only when** a clan tag is configured (mirrors the X-cookie gate).
+- CoC RTL gotcha: clan/player names are frequently Arabic. Both the watcher alerts and `/roster view` cells wrap each field in a LEFT-TO-RIGHT ISOLATE / POP DIRECTIONAL ISOLATE pair (`_isolate()`) so the bidi algorithm doesn't reorder digits/emoji/spaces across neighbouring fields.
+- New CoC API helpers in [modules/legend_tracker/poller.py](modules/legend_tracker/poller.py): `get_clan(tag)` (name + memberList in one call) and `get_clan_members(tag)`.
+- New admin command `/dumpaccounts` (in `account_commands`) backed by `linker.get_all_accounts(pool)` — dumps every user + their linked accounts, chunked under the 2000-char limit, mentions rendered with `AllowedMentions.none()`.
+- **Slash-command restructure:** the flat `/xsetchannel …` and `/ytsetchannel …` families are now subcommand groups — `/x setchannel|toggle|add|remove|list` and `/yt setchannel|toggle|add|remove|list`. Parent group carries `default_member_permissions`; subcommands inherit it. Update any external docs/muscle-memory referencing the old flat names.
+- `conftest.py` now stubs `COC_CLAN_TAG` (required-at-import safety). New required-ish settings should keep getting a matching `os.environ.setdefault` line.
+- Cogs loaded today: **x, youtube, moderation, account, roster** (`COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py)). legend/base_finder/ping remain stubbed and commented out.

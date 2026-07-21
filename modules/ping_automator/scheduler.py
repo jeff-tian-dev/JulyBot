@@ -6,12 +6,14 @@ import logging
 import asyncpg
 import disnake
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from config.settings import settings
 from modules.base_finder.pipeline import run_pipeline
 from modules.legend_tracker.poller import poll_all_legend_players
 from modules.legend_tracker.snapshots import save_snapshot
+from modules.roster.watcher import poll_clan_watch, run_daily_watchlist
 from modules.x_monitor.poller import poll_x_accounts
 from modules.youtube_feed.poller import poll_youtube_channels
 
@@ -71,6 +73,25 @@ async def poll_youtube(pool: asyncpg.Pool, bot: disnake.Client) -> None:
         logger.exception("poll_youtube_channels raised")
 
 
+async def poll_clan_watch_job(pool: asyncpg.Pool, bot: disnake.Client) -> None:
+    """Scheduled job: alert on watched-roster members leaving/rejoining the family."""
+    try:
+        summary = await poll_clan_watch(pool, bot)
+        if summary.get("alerts") or summary.get("error"):
+            logger.info("Clan watch summary: %s", summary)
+    except Exception:
+        logger.exception("poll_clan_watch raised")
+
+
+async def daily_watchlist_job(pool: asyncpg.Pool, bot: disnake.Client) -> None:
+    """Scheduled job (1am): post each watched roster's daily leaderboard, then reset."""
+    try:
+        summary = await run_daily_watchlist(pool, bot)
+        logger.info("Daily watchlist summary: %s", summary)
+    except Exception:
+        logger.exception("run_daily_watchlist raised")
+
+
 def create_scheduler(pool: asyncpg.Pool, bot: disnake.Client) -> AsyncIOScheduler:
     """Build (but do not start) an AsyncIOScheduler with all recurring jobs."""
     scheduler = AsyncIOScheduler()
@@ -107,5 +128,25 @@ def create_scheduler(pool: asyncpg.Pool, bot: disnake.Client) -> AsyncIOSchedule
         id="poll_youtube_feed",
         replace_existing=True,
     )
+
+    if settings.COC_CLAN_TAG or settings.COC_FAMILY_CLAN_TAGS:
+        scheduler.add_job(
+            poll_clan_watch_job,
+            trigger=IntervalTrigger(minutes=settings.CLAN_WATCH_POLL_INTERVAL_MINUTES),
+            kwargs={"pool": pool, "bot": bot},
+            id="poll_clan_watch",
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            daily_watchlist_job,
+            trigger=CronTrigger(
+                hour=settings.CLAN_WATCH_DAILY_HOUR,
+                minute=0,
+                timezone=settings.CLAN_WATCH_TIMEZONE,
+            ),
+            kwargs={"pool": pool, "bot": bot},
+            id="daily_watchlist",
+            replace_existing=True,
+        )
 
     return scheduler

@@ -36,6 +36,8 @@ def test_normalize_tag_is_lenient() -> None:
     # accepts a tag without '#', lowercase, with spaces, and fixes the O->0 typo
     assert linker._normalize_tag(" 2ppojccl ") == "#2PP0JCCL"
     assert linker._normalize_tag("#2pp0jccl") == "#2PP0JCCL"
+    # strips invisible bidi isolate marks copied from a rendered embed/board
+    assert linker._normalize_tag("⁦#98RRVQQVL⁩") == "#98RRVQQVL"
 
 
 @pytest.mark.asyncio

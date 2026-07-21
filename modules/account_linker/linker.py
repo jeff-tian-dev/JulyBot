@@ -8,6 +8,7 @@ GET /players/{tag}/verifyToken with that token in the JSON body.
 from __future__ import annotations
 
 import logging
+import re
 from urllib.parse import quote
 
 import aiohttp
@@ -19,14 +20,19 @@ logger = logging.getLogger(__name__)
 
 VERIFY_TIMEOUT_SECONDS = 10
 
+# CoC tags are uppercase letters + digits only. Anything else is dropped — this
+# includes '#', spaces, and the invisible bidi isolate marks (U+2066/U+2069) that
+# come along when a tag is copied out of a rendered embed/board.
+_TAG_STRIP_RE = re.compile(r"[^A-Z0-9]")
+
 
 def _normalize_tag(coc_tag: str) -> str:
     """Clean up a user-entered CoC tag.
 
-    Strips whitespace, drops a leading '#', uppercases, and fixes the common
-    O->0 typo (CoC tags never contain the letter O). Re-adds the leading '#'.
+    Uppercases, fixes the common O->0 typo (CoC tags never contain the letter O),
+    and strips every non-tag character ('#', spaces, stray Unicode). Re-adds '#'.
     """
-    cleaned = (coc_tag or "").strip().upper().replace(" ", "").lstrip("#").replace("O", "0")
+    cleaned = _TAG_STRIP_RE.sub("", (coc_tag or "").upper().replace("O", "0"))
     if not cleaned:
         raise ValueError("Please enter your CoC player tag, e.g. #2PP0JCCL.")
     return f"#{cleaned}"
@@ -168,6 +174,32 @@ async def get_linked_accounts(pool: asyncpg.Pool, discord_id: int) -> list[dict]
             "coc_tag": r["coc_tag"],
             "coc_name": r["coc_name"],
             "verified": r["verified"],
+        }
+        for r in rows
+    ]
+
+
+async def get_all_accounts(pool: asyncpg.Pool) -> list[dict]:
+    """Return every linked account, grouped by Discord user (oldest link first).
+
+    Used by the admin dump command. Ordered by discord_id then linked_at so
+    the caller can group consecutive rows by the same user without sorting.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT discord_id, coc_tag, coc_name, verified, linked_at
+            FROM users
+            ORDER BY discord_id, linked_at ASC;
+            """
+        )
+    return [
+        {
+            "discord_id": r["discord_id"],
+            "coc_tag": r["coc_tag"],
+            "coc_name": r["coc_name"],
+            "verified": r["verified"],
+            "linked_at": r["linked_at"],
         }
         for r in rows
     ]

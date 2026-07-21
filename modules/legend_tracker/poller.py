@@ -72,6 +72,56 @@ async def get_player(coc_tag: str) -> dict | None:
         return None
 
 
+async def get_clan(clan_tag: str) -> dict | None:
+    """Fetch full clan data from GET /clans/{tag}.
+
+    The response carries both the clan's own display `name` and its `memberList`,
+    so one call gives the clan-watch poller everything it needs to name the clan
+    a member is in (used for the "from → to" movement in alerts). Returns the raw
+    clan dict, or None on failure.
+    """
+    url = f"{settings.COC_API_BASE_URL}/clans/{_encode_tag(clan_tag)}"
+    headers = {
+        "Authorization": f"Bearer {settings.COC_API_TOKEN}",
+        "Accept": "application/json",
+    }
+    session = await get_session()
+    try:
+        async with session.get(url, headers=headers) as resp:
+            if resp.status != 200:
+                logger.warning("CoC API GET /clans/%s returned %s", clan_tag, resp.status)
+                return None
+            return await resp.json()
+    except aiohttp.ClientError as e:
+        logger.warning("CoC API error fetching clan %s: %s", clan_tag, e)
+        return None
+
+
+async def get_clan_members(clan_tag: str) -> list[dict] | None:
+    """Fetch a clan's current member list from GET /clans/{tag}/members.
+
+    Returns the list of member dicts (each has 'tag', 'name', ...) or None on
+    failure. One call covers the whole clan, so the clan-watch poller uses this
+    instead of hitting /players per roster member.
+    """
+    url = f"{settings.COC_API_BASE_URL}/clans/{_encode_tag(clan_tag)}/members"
+    headers = {
+        "Authorization": f"Bearer {settings.COC_API_TOKEN}",
+        "Accept": "application/json",
+    }
+    session = await get_session()
+    try:
+        async with session.get(url, headers=headers) as resp:
+            if resp.status != 200:
+                logger.warning("CoC API GET /clans/%s/members returned %s", clan_tag, resp.status)
+                return None
+            data = await resp.json()
+            return data.get("items", [])
+    except aiohttp.ClientError as e:
+        logger.warning("CoC API error fetching members for %s: %s", clan_tag, e)
+        return None
+
+
 async def get_legend_stats(coc_tag: str) -> dict | None:
     """Extract legend league stats for the current season."""
     player = await get_player(coc_tag)

@@ -21,6 +21,7 @@ COG_MODULES = (
     "discord_bot.commands.youtube_commands",
     "discord_bot.commands.moderation_commands",
     "discord_bot.commands.account_commands",
+    "discord_bot.commands.roster_commands",
 )
 
 # Disabled until wired up (still under development):

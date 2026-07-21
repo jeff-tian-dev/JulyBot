@@ -9,12 +9,15 @@ import disnake
 from disnake.ext import commands
 
 from modules.account_linker.linker import (
+    get_all_accounts,
     get_linked_accounts,
     link_account,
     unlink_account,
 )
 
 X_BLUE = disnake.Color.from_rgb(45, 136, 255)
+ADMIN_PERMS = disnake.Permissions(administrator=True)
+MAX_MESSAGE_LEN = 1900  # Discord's hard limit is 2000; leave headroom.
 
 
 def _accounts_embed(title: str, accounts: list[dict]) -> disnake.Embed:
@@ -112,6 +115,56 @@ class AccountCommands(commands.Cog):
 
         embed = _accounts_embed(f"{discord_user.display_name}'s linked CoC accounts", accounts)
         await inter.edit_original_response(embed=embed)
+
+
+    @commands.slash_command(
+        name="dumpaccounts",
+        description="Admin: list every user and their linked CoC accounts.",
+        default_member_permissions=ADMIN_PERMS,
+    )
+    async def dumpaccounts(self, inter: disnake.ApplicationCommandInteraction) -> None:
+        await inter.response.defer(ephemeral=True)
+        accounts = await get_all_accounts(self.bot.pool)
+        if not accounts:
+            await inter.edit_original_response(content="No linked accounts yet.")
+            return
+
+        # Rows arrive grouped by discord_id (oldest link first); render one
+        # block per user, then split into messages under the Discord limit.
+        blocks: list[str] = []
+        current_id: int | None = None
+        lines: list[str] = []
+        for a in accounts:
+            if a["discord_id"] != current_id:
+                if lines:
+                    blocks.append("\n".join(lines))
+                current_id = a["discord_id"]
+                lines = [f"<@{current_id}>"]
+            name = a.get("coc_name") or "Unknown"
+            mark = "✅" if a.get("verified") else "❔"
+            lines.append(f"  {mark} **{name}** — `{a['coc_tag']}`")
+        if lines:
+            blocks.append("\n".join(lines))
+
+        user_count = len({a["discord_id"] for a in accounts})
+        header = f"**All linked accounts** — {user_count} users, {len(accounts)} accounts\n\n"
+
+        chunks: list[str] = []
+        buf = header
+        for block in blocks:
+            piece = block + "\n\n"
+            if len(buf) + len(piece) > MAX_MESSAGE_LEN and buf.strip():
+                chunks.append(buf.rstrip())
+                buf = ""
+            buf += piece
+        if buf.strip():
+            chunks.append(buf.rstrip())
+
+        # Render <@id> as names without notifying anyone.
+        no_pings = disnake.AllowedMentions.none()
+        await inter.edit_original_response(content=chunks[0], allowed_mentions=no_pings)
+        for chunk in chunks[1:]:
+            await inter.followup.send(content=chunk, ephemeral=True, allowed_mentions=no_pings)
 
 
 def setup(bot: commands.InteractionBot) -> None:

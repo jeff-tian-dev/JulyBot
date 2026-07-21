@@ -1,4 +1,4 @@
-"""/xsetchannel, /xtoggle, /xadd, /xremove, /xlist."""
+"""/x setchannel, /x toggle, /x add, /x remove, /x list."""
 from __future__ import annotations
 
 import disnake
@@ -28,11 +28,18 @@ class XCommands(commands.Cog):
         self.bot = bot
 
     @commands.slash_command(
-        name="xsetchannel",
-        description="Set the channel where new X posts are published.",
+        name="x",
+        description="X (Twitter) monitoring commands.",
         default_member_permissions=ADMIN_PERMS,
     )
-    async def xsetchannel(
+    async def x(self, inter: disnake.ApplicationCommandInteraction) -> None:
+        """Parent group; never invoked directly."""
+
+    @x.sub_command(
+        name="setchannel",
+        description="Set the channel where new X posts are published.",
+    )
+    async def setchannel(
         self,
         inter: disnake.ApplicationCommandInteraction,
         channel: disnake.TextChannel,
@@ -47,12 +54,11 @@ class XCommands(commands.Cog):
             ephemeral=True,
         )
 
-    @commands.slash_command(
-        name="xtoggle",
+    @x.sub_command(
+        name="toggle",
         description="Enable or disable X monitoring for this server.",
-        default_member_permissions=ADMIN_PERMS,
     )
-    async def xtoggle(self, inter: disnake.ApplicationCommandInteraction) -> None:
+    async def toggle(self, inter: disnake.ApplicationCommandInteraction) -> None:
         if not settings.X_COOKIES:
             await inter.response.send_message(NOT_CONFIGURED_MSG, ephemeral=True)
             return
@@ -61,12 +67,11 @@ class XCommands(commands.Cog):
         state = "enabled" if enabled else "disabled"
         await inter.response.send_message(f"X monitoring is now **{state}**.", ephemeral=True)
 
-    @commands.slash_command(
-        name="xadd",
+    @x.sub_command(
+        name="add",
         description="Add an X account to the watch list.",
-        default_member_permissions=ADMIN_PERMS,
     )
-    async def xadd(
+    async def add(
         self,
         inter: disnake.ApplicationCommandInteraction,
         username: str,
@@ -86,12 +91,11 @@ class XCommands(commands.Cog):
             ephemeral=True,
         )
 
-    @commands.slash_command(
-        name="xremove",
+    @x.sub_command(
+        name="remove",
         description="Remove an X account from the watch list.",
-        default_member_permissions=ADMIN_PERMS,
     )
-    async def xremove(
+    async def remove(
         self,
         inter: disnake.ApplicationCommandInteraction,
         username: str,
@@ -111,12 +115,11 @@ class XCommands(commands.Cog):
         else:
             await inter.response.send_message("That account is not on the watch list.", ephemeral=True)
 
-    @commands.slash_command(
-        name="xlist",
+    @x.sub_command(
+        name="list",
         description="List X accounts being watched in this server.",
-        default_member_permissions=ADMIN_PERMS,
     )
-    async def xlist(self, inter: disnake.ApplicationCommandInteraction) -> None:
+    async def list(self, inter: disnake.ApplicationCommandInteraction) -> None:
         if not settings.X_COOKIES:
             await inter.response.send_message(NOT_CONFIGURED_MSG, ephemeral=True)
             return
