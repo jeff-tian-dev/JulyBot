@@ -151,6 +151,8 @@ cp .env.example .env   # only if setup.sh didn't already create it
 | `X_POLL_INTERVAL_MINUTES`       | no       | `10`                                   | X account poll cadence (`TWITTER_POLL_INTERVAL_MINUTES` still accepted) |
 | `X_PING_ROLE_ID`                | no       | `0`                                    | Role mention on new posts (0 = no ping; `TWITTER_PING_ROLE_ID` still accepted) |
 | `X_PING_COOLDOWN_HOURS`         | no       | `3`                                    | After a ping, new X posts within this window post silently |
+| `X_MAX_CONSECUTIVE_FAILURES`    | no       | `3`                                    | Consecutive connection failures before the poller alerts once and pauses (resumes on restart) |
+| `X_ALERT_CHANNEL_ID`            | no       | `0`                                    | Channel for the "X monitoring stopped" alert (0 = fall back to `MOD_LOG_CHANNEL_ID`) |
 | `YOUTUBE_FEED_POLL_INTERVAL_MINUTES` | no  | `10`                                   | YouTube RSS poll cadence                           |
 | `YOUTUBE_PING_ROLE_ID`          | no       | `1508359179440750602`                  | Role mention on new YouTube videos (0 = no ping)   |
 | `YOUTUBE_PING_COOLDOWN_HOURS`   | no       | `3`                                    | After a ping, new YouTube videos within this window post silently |
@@ -249,6 +251,7 @@ Five Cogs are loaded today (see `COG_MODULES` in [discord_bot/bot.py](discord_bo
 | `/ban <member> [reason]`         | moderation (admin) | live         |
 | `/unban <user_id> [reason]`      | moderation (admin) | live         |
 | `/purgeword <member> <word>`     | moderation (admin) | live         |
+| `/post <image> <channel> [text] [ping_role]` | announce (admin) | live |
 | `/legend`                        | legend_tracker     | stub, not loaded |
 | `/legend_history <days>`         | legend_tracker     | stub, not loaded |
 | `/leaderboard`                   | legend_tracker     | stub, not loaded |
@@ -264,7 +267,7 @@ Five Cogs are loaded today (see `COG_MODULES` in [discord_bot/bot.py](discord_bo
 
 Module logic is implemented end-to-end across all packages. The wiring gap is on the Discord side:
 
-- **Wired and live:** account linker, X monitor, YouTube feed tracker, moderation, and roster Cogs delegate to their module functions.
+- **Wired and live:** account linker, X monitor, YouTube feed tracker, moderation, roster, and announce (`/post`) Cogs delegate to their module functions.
 - **Stubs, not loaded:** the legend, base_finder, and ping Cogs still return placeholder text and are commented out of `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py). Their underlying module functions and scheduler jobs are implemented — only the Cog replies are stubbed.
 - The legend, base-finder, and YouTube scheduler jobs run unconditionally; the X poll job is registered only when `X_COOKIES` is set, and the clan-watch job only when a clan tag (`COC_FAMILY_CLAN_TAGS` or `COC_CLAN_TAG`) is set.
 - `modules/base_finder/detector.py` — CV thresholds are placeholders, marked `NOTE FOR CV ENGINEER`. Tune against real VOD frames.

@@ -37,6 +37,27 @@ def apply_tweety_patch() -> None:
         return
 
     import tweety.transaction as tx
+    import tweety.http as http
+
+    async def _patched_init_local_api(self):
+        # X stopped embedding the transaction-ID JS manifest in the *logged-out*
+        # home page (as of ~2026-07-21), so tweety's default flow — which strips
+        # cookies before fetching it — gets a stub page with no `ondemand.s`
+        # pointer and get_indices raises "Couldn't get animation key indices".
+        # Fetch the home page with cookies intact so the manifest is present;
+        # only the guest-token call still needs to run unauthenticated.
+        if not self._transaction:
+            home_page_html = await self.get_home_html()
+            self._transaction = tx.TransactionGenerator(home_page_html)
+
+        if not self._guest_token:
+            cookies = await self.remove_cookies()
+            try:
+                self._guest_token = await self._get_guest_token()
+            finally:
+                self.cookies = cookies
+
+    http.Request._init_local_api = _patched_init_local_api
 
     def _patched_get_indices(self, home_page_html=None):
         key_byte_indices = []

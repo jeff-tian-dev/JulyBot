@@ -245,6 +245,48 @@ async def test_post_daily_board_sorts_and_deletes_old(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_daily_resets_only_on_clean_run(monkeypatch) -> None:
+    monkeypatch.setattr(watcher, "family_tags", lambda: ["#FAM"])
+    monkeypatch.setattr(
+        watcher.storage,
+        "get_watched_rosters",
+        AsyncMock(return_value=[{"id": 5, "name": "July"}]),
+    )
+    reset = AsyncMock()
+    monkeypatch.setattr(watcher.storage, "reset_daily_absent", reset)
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    monkeypatch.setattr(watcher, "_post_daily_board", AsyncMock())
+
+    await watcher.run_daily_watchlist(MagicMock(), _fake_bot(channel))
+    reset.assert_awaited_once()  # clean run -> counters reset
+
+
+@pytest.mark.asyncio
+async def test_run_daily_skips_reset_and_warns_in_chat_on_failure(monkeypatch) -> None:
+    monkeypatch.setattr(watcher, "family_tags", lambda: ["#FAM"])
+    monkeypatch.setattr(
+        watcher.storage,
+        "get_watched_rosters",
+        AsyncMock(return_value=[{"id": 5, "name": "July"}]),
+    )
+    reset = AsyncMock()
+    monkeypatch.setattr(watcher.storage, "reset_daily_absent", reset)
+    # The board build blows up (e.g. a CoC API timeout).
+    monkeypatch.setattr(watcher, "_post_daily_board", AsyncMock(side_effect=RuntimeError("boom")))
+    channel = MagicMock()
+    channel.send = AsyncMock()
+
+    summary = await watcher.run_daily_watchlist(MagicMock(), _fake_bot(channel))
+
+    assert summary["failed"] == 1
+    reset.assert_not_awaited()  # counters preserved for the next run
+    channel.send.assert_awaited_once()  # user is told in chat
+    notice = channel.send.await_args.args[0]
+    assert "couldn't be posted" in notice and "July" in notice
+
+
+@pytest.mark.asyncio
 async def test_poll_warms_cache_from_clan_data(monkeypatch) -> None:
     # The poll hands its fetched clan-member data to the player cache.
     monkeypatch.setattr(watcher, "family_tags", lambda: ["#A"])

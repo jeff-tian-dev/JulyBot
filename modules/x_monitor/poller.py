@@ -90,6 +90,10 @@ async def poll_x_accounts(pool: asyncpg.Pool, bot: disnake.Client) -> dict:
         else:
             logger.exception("Failed to connect X client")
         summary["errors"] += 1
+        # Signals a systemic (connection/auth) failure to the scheduler, which
+        # trips the consecutive-failure circuit breaker. Distinct from per-account
+        # errors below, which are transient and never pause polling.
+        summary["connect_failed"] = True
         return summary
 
     for account in accounts:

@@ -53,14 +53,87 @@ async def send_legend_ping(bot, discord_id: int, message: str) -> None:
     logger.info("send_legend_ping stub: discord_id=%s message=%r", discord_id, message)
 
 
-async def poll_x(pool: asyncpg.Pool, bot: disnake.Client) -> None:
+# Circuit breaker: count consecutive systemic (connection) failures so a broken
+# X session — expired cookies or an X site change — alerts once and stops polling
+# instead of erroring every interval forever.
+_x_consecutive_connect_failures = 0
+_x_polling_disabled = False
+
+
+async def _alert_x_polling_stopped(bot: disnake.Client, failures: int) -> None:
+    """Post a one-time operator alert that X polling has been paused."""
+    channel_id = settings.X_ALERT_CHANNEL_ID or settings.MOD_LOG_CHANNEL_ID
+    if not channel_id:
+        logger.error(
+            "X polling paused after %d consecutive connection failures, but no "
+            "alert channel is configured (set X_ALERT_CHANNEL_ID or MOD_LOG_CHANNEL_ID)",
+            failures,
+        )
+        return
+
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        logger.error("X alert channel_id=%s not found; cannot post X-down alert", channel_id)
+        return
+
+    try:
+        await channel.send(
+            "⚠️ **X monitoring stopped.** The X poller failed to connect "
+            f"{failures} times in a row (likely expired cookies or an X site "
+            "change). Polling has been paused to avoid spamming this channel. "
+            "Fix the cookies / tweety patch, then restart the bot "
+            "(`./deploy/install-service.sh`) to resume.",
+            allowed_mentions=disnake.AllowedMentions.none(),
+        )
+    except Exception:
+        logger.exception("Failed to send X-down alert to channel_id=%s", channel_id)
+
+
+async def poll_x(
+    pool: asyncpg.Pool, bot: disnake.Client, scheduler: AsyncIOScheduler | None = None
+) -> None:
     """Scheduled job: poll watched X accounts and post new posts to Discord."""
+    global _x_consecutive_connect_failures, _x_polling_disabled
     try:
         summary = await poll_x_accounts(pool, bot)
-        if summary["accounts_polled"] or summary["tweets_posted"] or summary["errors"]:
-            logger.info("X poll summary: %s", summary)
     except Exception:
         logger.exception("poll_x_accounts raised")
+        return
+
+    if summary.get("connect_failed"):
+        _x_consecutive_connect_failures += 1
+        logger.warning(
+            "X poll connection failure %d/%d",
+            _x_consecutive_connect_failures,
+            settings.X_MAX_CONSECUTIVE_FAILURES,
+        )
+        if (
+            not _x_polling_disabled
+            and _x_consecutive_connect_failures >= settings.X_MAX_CONSECUTIVE_FAILURES
+        ):
+            _x_polling_disabled = True
+            await _alert_x_polling_stopped(bot, _x_consecutive_connect_failures)
+            if scheduler is not None:
+                try:
+                    scheduler.pause_job("poll_x_accounts")
+                    logger.error(
+                        "X polling paused after %d consecutive connection failures",
+                        _x_consecutive_connect_failures,
+                    )
+                except Exception:
+                    logger.exception("Failed to pause poll_x_accounts job")
+        return
+
+    # Reached X successfully — clear the failure streak.
+    if _x_consecutive_connect_failures:
+        logger.info(
+            "X poll recovered after %d consecutive connection failure(s)",
+            _x_consecutive_connect_failures,
+        )
+    _x_consecutive_connect_failures = 0
+
+    if summary["accounts_polled"] or summary["tweets_posted"] or summary["errors"]:
+        logger.info("X poll summary: %s", summary)
 
 
 async def poll_youtube(pool: asyncpg.Pool, bot: disnake.Client) -> None:
@@ -116,7 +189,7 @@ def create_scheduler(pool: asyncpg.Pool, bot: disnake.Client) -> AsyncIOSchedule
         scheduler.add_job(
             poll_x,
             trigger=IntervalTrigger(minutes=settings.X_POLL_INTERVAL_MINUTES),
-            kwargs={"pool": pool, "bot": bot},
+            kwargs={"pool": pool, "bot": bot, "scheduler": scheduler},
             id="poll_x_accounts",
             replace_existing=True,
         )

@@ -148,22 +148,49 @@ async def post_daily_watchlist(pool: asyncpg.Pool, bot: disnake.Client) -> dict:
         return {"skipped": "no clan tags"}
     watched_rosters = await storage.get_watched_rosters(pool)
     if not watched_rosters:
-        return {"watched_rosters": 0}
+        return {"watched_rosters": 0, "failed": 0}
     channel = await _watch_channel(bot)
     if channel is None:
-        return {"error": "no channel"}
+        # Can't reach the channel to post the board *or* a failure notice.
+        return {"error": "no channel", "failed": len(watched_rosters)}
 
+    failed: list[str] = []
     for roster in watched_rosters:
         try:
             await _post_daily_board(pool, channel, roster, family)
         except Exception:
             logger.exception("Daily board failed for %s", roster["name"])
-    return {"rosters": len(watched_rosters)}
+            failed.append(roster["name"])
+
+    if failed:
+        names = ", ".join(_isolate(name) for name in failed)
+        try:
+            await channel.send(
+                f"⚠️ Daily leaderboard couldn't be posted for {names} "
+                "(Clash of Clans API error). Daily out-of-family counters were kept "
+                "and will roll into the next successful run.",
+                allowed_mentions=disnake.AllowedMentions.none(),
+            )
+        except disnake.HTTPException:
+            logger.exception("Failed to post daily-board failure notice")
+
+    return {"rosters": len(watched_rosters), "failed": len(failed)}
 
 
 async def run_daily_watchlist(pool: asyncpg.Pool, bot: disnake.Client) -> dict:
-    """Scheduled 1am job: post the daily boards, then reset the daily counters."""
+    """Scheduled 1am job: post the daily boards, then reset the daily counters.
+
+    The reset is skipped whenever a board failed to post (or the channel was
+    unreachable), so a transient API error never silently discards a day's
+    accumulated out-of-family time — it rolls into the next successful run.
+    """
     summary = await post_daily_watchlist(pool, bot)
+    if summary.get("failed") or summary.get("error"):
+        logger.warning(
+            "Daily watchlist incomplete (%s); keeping daily-absent counters for the next run",
+            summary,
+        )
+        return summary
     await storage.reset_daily_absent(pool)
     return summary
 

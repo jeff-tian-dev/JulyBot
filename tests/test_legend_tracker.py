@@ -1,11 +1,25 @@
 """Unit tests for modules.legend_tracker."""
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from modules.legend_tracker import poller, snapshots
+
+
+class _RaisingGetCtx:
+    """Async context manager whose __aenter__ raises — mimics a timed-out request."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+
+    async def __aenter__(self):
+        raise self._exc
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
 
 
 class _FakePoolAcquireCtx:
@@ -30,6 +44,17 @@ async def test_get_legend_stats_not_in_legend() -> None:
     not_in_legend_player = {"league": {"id": 29000021}, "trophies": 4500}
     with patch.object(poller, "get_player", AsyncMock(return_value=not_in_legend_player)):
         result = await poller.get_legend_stats("#ABC123")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_player_returns_none_on_timeout() -> None:
+    """A request timeout must be swallowed (return None), not propagate — otherwise
+    it aborts the daily-board build instead of falling back to last-known state."""
+    session = MagicMock()
+    session.get = MagicMock(return_value=_RaisingGetCtx(asyncio.TimeoutError()))
+    with patch.object(poller, "get_session", AsyncMock(return_value=session)):
+        result = await poller.get_player("#ABC123")
     assert result is None
 
 

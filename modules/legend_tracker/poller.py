@@ -4,6 +4,7 @@ Uses a single shared aiohttp.ClientSession for all calls.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from urllib.parse import quote
 
@@ -67,7 +68,7 @@ async def get_player(coc_tag: str) -> dict | None:
                 logger.warning("CoC API GET /players/%s returned %s", coc_tag, resp.status)
                 return None
             return await resp.json()
-    except aiohttp.ClientError as e:
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         logger.warning("CoC API error for %s: %s", coc_tag, e)
         return None
 
@@ -92,7 +93,7 @@ async def get_clan(clan_tag: str) -> dict | None:
                 logger.warning("CoC API GET /clans/%s returned %s", clan_tag, resp.status)
                 return None
             return await resp.json()
-    except aiohttp.ClientError as e:
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         logger.warning("CoC API error fetching clan %s: %s", clan_tag, e)
         return None
 
@@ -117,7 +118,7 @@ async def get_clan_members(clan_tag: str) -> list[dict] | None:
                 return None
             data = await resp.json()
             return data.get("items", [])
-    except aiohttp.ClientError as e:
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         logger.warning("CoC API error fetching members for %s: %s", clan_tag, e)
         return None
 
