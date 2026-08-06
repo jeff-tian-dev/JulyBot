@@ -24,10 +24,10 @@ logger = logging.getLogger(__name__)
 
 # Embed accent for base posts — CoC gold, distinct from /post's pink.
 BASE_EMBED_COLOUR = 0xE8B923
-# A line of exactly "---" is rendered by Discord as a true full-width
-# horizontal rule. Don't replace it with a run of literal dashes: those render
-# as a ragged fixed-width string that doesn't match the embed width.
-DIVIDER = "---"
+# A literal run of dashes. Markdown `---` does NOT become a horizontal rule
+# inside an embed description — Discord renders it as three bare dashes, which
+# looks broken. Keep the long literal run; it reads as a deliberate separator.
+DIVIDER = "------------------------"
 # The only section heading. The description is rendered bare — a poster who
 # wants a "Notes:" label types it themselves as part of the description.
 CC_HEADING = "**CC:**"

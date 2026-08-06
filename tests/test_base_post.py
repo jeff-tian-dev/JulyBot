@@ -77,21 +77,27 @@ def test_validate_base_input_rejects_overlong_description() -> None:
 
 def test_build_base_body_matches_layout() -> None:
     body = base_poster.build_base_body(cc="X2 HH x2 W x1 FRN", description="Invis Rage Cake Base!")
-    # "---" alone on a line is a true horizontal rule in Discord. The title is
-    # absent by design — it lives in the embed's native title field.
-    assert body == "---\n\n**CC:**\nX2 HH x2 W x1 FRN\n\nInvis Rage Cake Base!"
+    # The title is absent by design — it lives in the embed's native title field.
+    assert body == f"{base_poster.DIVIDER}\n\n**CC:**\nX2 HH x2 W x1 FRN\n\nInvis Rage Cake Base!"
+
+
+def test_divider_is_not_bare_markdown_rule() -> None:
+    # Markdown "---" does NOT become a horizontal rule inside an embed
+    # description; Discord renders it as three bare dashes, which looks broken.
+    assert base_poster.DIVIDER != "---"
+    assert set(base_poster.DIVIDER) == {"-"} and len(base_poster.DIVIDER) > 3
 
 
 def test_build_base_body_renders_description_bare() -> None:
     # No "Notes:" heading is injected — the poster types their own label if
     # they want one, so whatever they wrote is reproduced verbatim.
     body = base_poster.build_base_body(cc=None, description="Notes:\nmine")
-    assert body == "---\n\nNotes:\nmine"
+    assert body == f"{base_poster.DIVIDER}\n\nNotes:\nmine"
 
 
 def test_build_base_body_omits_blank_sections() -> None:
     body = base_poster.build_base_body(cc=None, description="Just notes.")
-    assert body == "---\n\nJust notes."
+    assert body == f"{base_poster.DIVIDER}\n\nJust notes."
     assert "CC:" not in body
 
 
