@@ -26,13 +26,13 @@ logger = logging.getLogger(__name__)
 BASE_EMBED_COLOUR = 0xE8B923
 # The divider drawn under the title, matching the in-game post format.
 DIVIDER = "------------------------"
-# Section headings.
-CC_HEADING = "🏰 **CC:**"
-NOTES_HEADING = "*Notes:*"
+# The only section heading. The description is rendered bare — a poster who
+# wants a "Notes:" label types it themselves as part of the description.
+CC_HEADING = "**CC:**"
 # Discord limits.
 MAX_TITLE_LENGTH = 256
 MAX_EMBED_DESCRIPTION_LENGTH = 4096
-# Room for the divider + headings that get prepended to the user's text.
+# Room for the divider + heading that get prepended to the user's text.
 MAX_DESCRIPTION_LENGTH = 2000
 MAX_CC_LENGTH = 500
 MAX_LINK_LENGTH = 1000
@@ -120,8 +120,9 @@ def build_base_body(
 ) -> str:
     """Compose the embed description in the in-game base-post layout.
 
-    Title, divider, CC block, then the italic Notes heading and the body. Any
-    section the poster left blank is skipped entirely.
+    Title, divider, CC block, then the description verbatim. Any section the
+    poster left blank is skipped entirely. The description gets no heading of
+    its own — any label is the poster's to type.
     """
     parts: list[str] = []
     if title:
@@ -130,7 +131,7 @@ def build_base_body(
     if cc:
         parts.append(f"{CC_HEADING}\n{cc}")
     if description:
-        parts.append(f"{NOTES_HEADING}\n{description}")
+        parts.append(description)
 
     body = "\n\n".join(parts)
     if len(body) > MAX_EMBED_DESCRIPTION_LENGTH:

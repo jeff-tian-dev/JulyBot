@@ -275,12 +275,10 @@ class BasePostCommands(commands.Cog):
             default=None, description="Where to post it (defaults to this channel)."
         ),
         title: str = commands.Param(
-            default=None, max_length=MAX_TITLE_LENGTH, description="Base name, e.g. 'Tap 6.0'."
+            default=None, max_length=MAX_TITLE_LENGTH, description="Base name."
         ),
         cc: str = commands.Param(
-            default=None,
-            max_length=MAX_CC_LENGTH,
-            description="Clan Castle troops, e.g. 'x2 HH x2 W x1 FRN'.",
+            default=None, max_length=MAX_CC_LENGTH, description="Clan Castle troops."
         ),
     ) -> None:
         # Downloading + re-uploading the attachment can outlast the 3s deadline.

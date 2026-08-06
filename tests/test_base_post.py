@@ -82,14 +82,21 @@ def test_build_base_body_matches_layout() -> None:
     assert body == (
         "## 🌸 Tap 6.0 🌸\n\n"
         "------------------------\n\n"
-        "🏰 **CC:**\nX2 HH x2 W x1 FRN\n\n"
-        "*Notes:*\nInvis Rage Cake Base!"
+        "**CC:**\nX2 HH x2 W x1 FRN\n\n"
+        "Invis Rage Cake Base!"
     )
+
+
+def test_build_base_body_renders_description_bare() -> None:
+    # No "Notes:" heading is injected — the poster types their own label if
+    # they want one, so whatever they wrote is reproduced verbatim.
+    body = base_poster.build_base_body(title=None, cc=None, description="Notes:\nmine")
+    assert body == "------------------------\n\nNotes:\nmine"
 
 
 def test_build_base_body_omits_blank_sections() -> None:
     body = base_poster.build_base_body(title=None, cc=None, description="Just notes.")
-    assert body == "------------------------\n\n*Notes:*\nJust notes."
+    assert body == "------------------------\n\nJust notes."
     assert "CC:" not in body
 
 
@@ -133,7 +140,7 @@ def test_embed_from_record_uses_stored_url() -> None:
     }
     embed = base_poster.embed_from_record(record)
     assert embed.image.url == "https://cdn.example/base.png"
-    assert "🏰 **CC:**" in embed.description
+    assert "**CC:**" in embed.description
 
 
 # --- image validation -------------------------------------------------------
