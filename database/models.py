@@ -212,7 +212,43 @@ ALTER_COC_PLAYER_CACHE_TROPHIES = """
 ALTER TABLE coc_player_cache ADD COLUMN IF NOT EXISTS trophies INT;
 """
 
+# A base post made by /postbase. The layout `link` is deliberately NOT shown in
+# the message — it's handed out only through the "Fetch Link" button, and every
+# press is recorded in base_post_downloads so the button can show a unique-user
+# count. `message_id` is the posted message and doubles as the key the persistent
+# view's custom_ids carry, so the buttons keep working across bot restarts.
+CREATE_BASE_POSTS = """
+CREATE TABLE IF NOT EXISTS base_posts (
+    id SERIAL PRIMARY KEY,
+    guild_id BIGINT NOT NULL,
+    channel_id BIGINT NOT NULL,
+    message_id BIGINT UNIQUE,
+    author_id BIGINT NOT NULL,
+    title VARCHAR(256),
+    cc TEXT,
+    description TEXT,
+    link TEXT NOT NULL,
+    image_url TEXT,
+    image_filename VARCHAR(256),
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+"""
+
+# One row per (post, user) — the PK makes repeat fetches by the same user a
+# no-op, so COUNT(*) is the unique-downloader count shown on the button.
+CREATE_BASE_POST_DOWNLOADS = """
+CREATE TABLE IF NOT EXISTS base_post_downloads (
+    base_post_id INTEGER NOT NULL REFERENCES base_posts(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL,
+    fetched_at TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (base_post_id, user_id)
+);
+"""
+
 ALL_TABLES = (
+    "base_post_downloads",
+    "base_posts",
     "seen_tweets",
     "twitter_watched_accounts",
     "youtube_watched_channels",
@@ -283,6 +319,11 @@ async def create_tables(pool: asyncpg.Pool) -> None:
         await conn.execute(ALTER_CLAN_MEMBERSHIP_CLAN_NAME)
         logger.info("Applying clan_membership daily_absent_seconds column migration if needed")
         await conn.execute(ALTER_CLAN_MEMBERSHIP_DAILY)
+
+        logger.info("Creating table base_posts if not exists")
+        await conn.execute(CREATE_BASE_POSTS)
+        logger.info("Creating table base_post_downloads if not exists")
+        await conn.execute(CREATE_BASE_POST_DOWNLOADS)
 
 
 async def drop_tables(pool: asyncpg.Pool) -> None:

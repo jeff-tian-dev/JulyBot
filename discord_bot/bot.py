@@ -12,6 +12,7 @@ import disnake
 from disnake.ext import commands
 
 from config.settings import settings
+from discord_bot.commands.base_post_commands import register_persistent_views
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ COG_MODULES = (
     "discord_bot.commands.account_commands",
     "discord_bot.commands.roster_commands",
     "discord_bot.commands.post_commands",
+    "discord_bot.commands.base_post_commands",
 )
 
 # Disabled until wired up (still under development):
@@ -50,9 +52,17 @@ def create_bot(pool: asyncpg.Pool) -> commands.InteractionBot:
     )
     bot.pool = pool
 
+    # on_ready fires again on every reconnect; the base-post views only need
+    # restoring once per process.
+    views_restored = False
+
     @bot.event
     async def on_ready() -> None:
+        nonlocal views_restored
         logger.info("Discord bot ready as %s (id=%s)", bot.user, getattr(bot.user, "id", None))
+        if not views_restored:
+            views_restored = True
+            await register_persistent_views(bot)
 
     for module in COG_MODULES:
         bot.load_extension(module)
