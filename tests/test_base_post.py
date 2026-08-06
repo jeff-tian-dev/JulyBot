@@ -76,39 +76,46 @@ def test_validate_base_input_rejects_overlong_description() -> None:
 
 
 def test_build_base_body_matches_layout() -> None:
-    body = base_poster.build_base_body(
-        title="🌸 Tap 6.0 🌸", cc="X2 HH x2 W x1 FRN", description="Invis Rage Cake Base!"
-    )
-    assert body == (
-        "## 🌸 Tap 6.0 🌸\n\n"
-        "------------------------\n\n"
-        "**CC:**\nX2 HH x2 W x1 FRN\n\n"
-        "Invis Rage Cake Base!"
-    )
+    body = base_poster.build_base_body(cc="X2 HH x2 W x1 FRN", description="Invis Rage Cake Base!")
+    # "---" alone on a line is a true horizontal rule in Discord. The title is
+    # absent by design — it lives in the embed's native title field.
+    assert body == "---\n\n**CC:**\nX2 HH x2 W x1 FRN\n\nInvis Rage Cake Base!"
 
 
 def test_build_base_body_renders_description_bare() -> None:
     # No "Notes:" heading is injected — the poster types their own label if
     # they want one, so whatever they wrote is reproduced verbatim.
-    body = base_poster.build_base_body(title=None, cc=None, description="Notes:\nmine")
-    assert body == "------------------------\n\nNotes:\nmine"
+    body = base_poster.build_base_body(cc=None, description="Notes:\nmine")
+    assert body == "---\n\nNotes:\nmine"
 
 
 def test_build_base_body_omits_blank_sections() -> None:
-    body = base_poster.build_base_body(title=None, cc=None, description="Just notes.")
-    assert body == "------------------------\n\nJust notes."
+    body = base_poster.build_base_body(cc=None, description="Just notes.")
+    assert body == "---\n\nJust notes."
     assert "CC:" not in body
 
 
 def test_build_base_body_rejects_combined_overflow() -> None:
-    # Each field can be individually valid yet overflow the 4096 embed limit
-    # once concatenated (reachable via the edit modal, which takes raw text).
+    # CC and description are each individually valid yet overflow the 4096
+    # embed limit once concatenated (reachable via the edit modal, which takes
+    # raw text). The title is exempt — it has its own field and its own limit.
     with pytest.raises(PostError):
         base_poster.build_base_body(
-            title="t" * base_poster.MAX_TITLE_LENGTH,
             cc="c" * base_poster.MAX_CC_LENGTH,
             description="d" * base_poster.MAX_EMBED_DESCRIPTION_LENGTH,
         )
+
+
+def test_build_base_embed_puts_title_in_title_field() -> None:
+    embed = base_poster.build_base_embed(title="Tap 6.0", cc=None, description="notes")
+    assert embed.title == "Tap 6.0"
+    # ...and not duplicated into the body.
+    assert "Tap 6.0" not in embed.description
+
+
+def test_build_base_embed_omits_blank_title() -> None:
+    embed = base_poster.build_base_embed(title=None, cc=None, description="notes")
+    assert not embed.title
 
 
 def test_build_base_embed_uses_attachment_uri() -> None:

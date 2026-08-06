@@ -24,8 +24,10 @@ logger = logging.getLogger(__name__)
 
 # Embed accent for base posts — CoC gold, distinct from /post's pink.
 BASE_EMBED_COLOUR = 0xE8B923
-# The divider drawn under the title, matching the in-game post format.
-DIVIDER = "------------------------"
+# A line of exactly "---" is rendered by Discord as a true full-width
+# horizontal rule. Don't replace it with a run of literal dashes: those render
+# as a ragged fixed-width string that doesn't match the embed width.
+DIVIDER = "---"
 # The only section heading. The description is rendered bare — a poster who
 # wants a "Notes:" label types it themselves as part of the description.
 CC_HEADING = "**CC:**"
@@ -114,20 +116,17 @@ def validate_image(attachment: disnake.Attachment) -> None:
 
 def build_base_body(
     *,
-    title: str | None,
     cc: str | None,
     description: str | None,
 ) -> str:
-    """Compose the embed description in the in-game base-post layout.
+    """Compose the embed description: a rule, the CC block, then the body.
 
-    Title, divider, CC block, then the description verbatim. Any section the
-    poster left blank is skipped entirely. The description gets no heading of
-    its own — any label is the poster's to type.
+    The title is NOT part of this — it lives in the embed's native title field,
+    which Discord renders bold in its own slot. Any section the poster left
+    blank is skipped entirely, and the description gets no heading of its own
+    (a "Notes:" label is the poster's to type).
     """
-    parts: list[str] = []
-    if title:
-        parts.append(f"## {title}")
-    parts.append(DIVIDER)
+    parts: list[str] = [DIVIDER]
     if cc:
         parts.append(f"{CC_HEADING}\n{cc}")
     if description:
@@ -135,9 +134,11 @@ def build_base_body(
 
     body = "\n\n".join(parts)
     if len(body) > MAX_EMBED_DESCRIPTION_LENGTH:
-        # Individually-valid fields can still overflow together.
+        # The title has its own field and its own limit, so only CC and the
+        # description count against the description budget — but those two can
+        # still overflow together while each is individually valid.
         raise PostError(
-            "The title, CC, and description are too long together "
+            "The CC and description are too long together "
             f"({len(body)} characters — the embed limit is {MAX_EMBED_DESCRIPTION_LENGTH})."
         )
     return body
@@ -159,7 +160,8 @@ def build_base_embed(
     already-posted image on edit.
     """
     embed = disnake.Embed(
-        description=build_base_body(title=title, cc=cc, description=description),
+        title=title or None,
+        description=build_base_body(cc=cc, description=description),
         colour=BASE_EMBED_COLOUR,
     )
     if image_filename:
