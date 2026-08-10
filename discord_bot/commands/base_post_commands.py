@@ -38,12 +38,57 @@ CUSTOM_ID_PREFIX = "basepost"
 MAX_DOWNLOADER_LINES = 40
 
 
-def _can_edit(user: disnake.abc.User, record) -> bool:
-    """The original poster, or anyone with Manage Messages / admin in the guild."""
-    if user.id == record["author_id"]:
-        return True
+def _is_moderator(user: disnake.abc.User) -> bool:
+    """True if the user has Manage Messages or administrator in this guild."""
     perms = getattr(user, "guild_permissions", None)
     return bool(perms and (perms.administrator or perms.manage_messages))
+
+
+def _can_edit(user: disnake.abc.User, record) -> bool:
+    """The original poster, or anyone with Manage Messages / admin in the guild."""
+    return user.id == record["author_id"] or _is_moderator(user)
+
+
+def _can_view_stats(user: disnake.abc.User, record) -> bool:
+    """Who may see the download count and downloader list.
+
+    Open to everyone unless the post was created with stats_admin_only, in which
+    case it's moderators only. The author is deliberately NOT exempt — the point
+    of the flag is to keep the tally from the wider channel, and the author can
+    still see it if they're a moderator.
+    """
+    if not record["stats_admin_only"]:
+        return True
+    return _is_moderator(user)
+
+
+class InfoModal(disnake.ui.Modal):
+    """A modal used purely to *display* text in a popup panel.
+
+    Discord has no read-only display modal, so the content sits in a prefilled
+    paragraph TextInput. Discord always draws Cancel/Submit and its own "do not
+    share passwords" banner — neither can be removed. Submitting is a no-op:
+    the callback just acknowledges so the dialog closes cleanly.
+    """
+
+    def __init__(self, *, title: str, label: str, body: str, custom_id: str) -> None:
+        super().__init__(
+            title=title[:45],  # Discord truncates modal titles past 45 chars.
+            custom_id=custom_id,
+            components=[
+                disnake.ui.TextInput(
+                    label=label[:45],
+                    custom_id="body",
+                    value=body[:4000],
+                    style=disnake.TextInputStyle.paragraph,
+                    required=False,
+                )
+            ],
+        )
+
+    async def callback(self, inter: disnake.ModalInteraction) -> None:
+        # Nothing to save — ack silently so the popup just closes.
+        await inter.response.defer()
 
 
 class BaseEditModal(disnake.ui.Modal):
@@ -133,7 +178,9 @@ class BaseEditModal(disnake.ui.Modal):
         author = inter.guild.get_member(updated["author_id"]) if inter.guild else None
         embed = embed_from_record(updated, author=author)
         count = await base_storage.count_downloads(pool, self.base_post_id)
-        view = BasePostView(self.base_post_id, count)
+        view = BasePostView(
+            self.base_post_id, count, stats_admin_only=bool(updated["stats_admin_only"])
+        )
 
         try:
             await inter.response.edit_message(embed=embed, view=view)
@@ -149,9 +196,15 @@ class BasePostView(disnake.ui.View):
     can re-attach handlers to messages it posted in a previous run.
     """
 
-    def __init__(self, base_post_id: int, download_count: int = 0) -> None:
+    def __init__(
+        self,
+        base_post_id: int,
+        download_count: int = 0,
+        stats_admin_only: bool = False,
+    ) -> None:
         super().__init__(timeout=None)
         self.base_post_id = base_post_id
+        self.stats_admin_only = stats_admin_only
 
         fetch = disnake.ui.Button(
             label="Fetch Link",
@@ -171,12 +224,19 @@ class BasePostView(disnake.ui.View):
         self.add_item(edit)
 
         self.downloads_button = disnake.ui.Button(
-            label=f"{download_count} Downloads",
+            label=self._downloads_label(download_count),
             style=disnake.ButtonStyle.primary,
             custom_id=f"{CUSTOM_ID_PREFIX}:downloads:{base_post_id}",
         )
         self.downloads_button.callback = self._on_downloads
         self.add_item(self.downloads_button)
+
+    def _downloads_label(self, count: int) -> str:
+        """Button text. Every viewer shares one component payload, so when stats
+        are admin-only the number is omitted entirely — a label like "24
+        Downloads" would leak the tally to exactly the people it's hidden from.
+        """
+        return "Downloads" if self.stats_admin_only else f"{count} Downloads"
 
     async def _load(self, inter: disnake.MessageInteraction):
         record = await base_storage.get_base_post(inter.bot.pool, self.base_post_id)
@@ -195,26 +255,34 @@ class BasePostView(disnake.ui.View):
         count = await base_storage.record_download(
             inter.bot.pool, self.base_post_id, inter.author.id
         )
-        await inter.response.send_message(
-            f"🔗 **Base layout link**\n{record['link']}",
-            ephemeral=True,
-            allowed_mentions=NO_PINGS,
+        # A modal must be the FIRST response to an interaction, so it's sent
+        # before the counter refresh below (which edits the message, not the
+        # interaction, and so doesn't consume the response slot).
+        await inter.response.send_modal(
+            InfoModal(
+                title="Copy Layout",
+                label="Click the link below to copy the layout",
+                body=record["link"],
+                custom_id=f"{CUSTOM_ID_PREFIX}:linkmodal:{self.base_post_id}",
+            )
         )
 
+        # Keep the view in step with the stored flag; a restored view can be
+        # stale if the post's visibility changed after this process started.
+        self.stats_admin_only = bool(record["stats_admin_only"])
+
         # Refresh the counter on the public message; a failure here is cosmetic.
-        if count != self._current_count():
-            self.downloads_button.label = f"{count} Downloads"
+        # When stats are admin-only the label carries no number, so there's
+        # nothing to refresh and editing would only burn an API call.
+        new_label = self._downloads_label(count)
+        if new_label != self.downloads_button.label:
+            self.downloads_button.label = new_label
             try:
                 await inter.message.edit(view=self)
             except disnake.HTTPException:
                 logger.warning(
                     "Couldn't refresh download count on base post id=%s", self.base_post_id
                 )
-
-    def _current_count(self) -> int:
-        label = self.downloads_button.label or ""
-        head = label.split(" ", 1)[0]
-        return int(head) if head.isdigit() else -1
 
     async def _on_edit(self, inter: disnake.MessageInteraction) -> None:
         record = await self._load(inter)
@@ -229,23 +297,50 @@ class BasePostView(disnake.ui.View):
         await inter.response.send_modal(BaseEditModal(record))
 
     async def _on_downloads(self, inter: disnake.MessageInteraction) -> None:
-        """Show the presser a private list of everyone who fetched the link."""
-        rows = await base_storage.list_downloaders(inter.bot.pool, self.base_post_id)
-        if not rows:
+        """Show the presser a private list of everyone who fetched the link.
+
+        Gated on the post's stats_admin_only flag, read fresh from the DB so a
+        stale restored view can't leak the tally.
+        """
+        record = await self._load(inter)
+        if record is None:
+            return
+        if not _can_view_stats(inter.author, record):
             await inter.response.send_message(
-                "Nobody has fetched this link yet.", ephemeral=True
+                "Only moderators can view download stats for this base.", ephemeral=True
             )
             return
 
+        rows = await base_storage.list_downloaders(inter.bot.pool, self.base_post_id)
+        if not rows:
+            await inter.response.send_modal(
+                InfoModal(
+                    title="Downloads",
+                    label="Who fetched this layout",
+                    body="Nobody has fetched this link yet.",
+                    custom_id=f"{CUSTOM_ID_PREFIX}:statsmodal:{self.base_post_id}",
+                )
+            )
+            return
+
+        # A modal shows plain text, so <@id> mentions would render as raw ids —
+        # resolve them to display names instead.
         shown = rows[:MAX_DOWNLOADER_LINES]
-        lines = [f"{i}. <@{row['user_id']}>" for i, row in enumerate(shown, start=1)]
+        lines = []
+        for i, row in enumerate(shown, start=1):
+            user = inter.guild.get_member(row["user_id"]) if inter.guild else None
+            name = user.display_name if user else f"Unknown user ({row['user_id']})"
+            lines.append(f"{i}. {name}")
         if len(rows) > len(shown):
             lines.append(f"…and {len(rows) - len(shown)} more.")
 
-        await inter.response.send_message(
-            f"**{len(rows)} unique download(s)**\n" + "\n".join(lines),
-            ephemeral=True,
-            allowed_mentions=NO_PINGS,
+        await inter.response.send_modal(
+            InfoModal(
+                title="Downloads",
+                label=f"{len(rows)} unique download(s)",
+                body="\n".join(lines),
+                custom_id=f"{CUSTOM_ID_PREFIX}:statsmodal:{self.base_post_id}",
+            )
         )
 
 
@@ -280,6 +375,10 @@ class BasePostCommands(commands.Cog):
         cc: str = commands.Param(
             default=None, max_length=MAX_CC_LENGTH, description="Clan Castle troops."
         ),
+        admin_only_stats: bool = commands.Param(
+            default=False,
+            description="Hide the download count and downloader list from non-moderators.",
+        ),
     ) -> None:
         # Downloading + re-uploading the attachment can outlast the 3s deadline.
         await inter.response.defer(ephemeral=True)
@@ -312,6 +411,7 @@ class BasePostCommands(commands.Cog):
             cc=cleaned["cc"],
             description=cleaned["description"],
             image_filename=file.filename,
+            stats_admin_only=admin_only_stats,
         )
 
         embed = build_base_embed(
@@ -321,7 +421,9 @@ class BasePostCommands(commands.Cog):
             image_filename=file.filename,
             author=inter.author,
         )
-        view = BasePostView(record["id"], download_count=0)
+        view = BasePostView(
+            record["id"], download_count=0, stats_admin_only=admin_only_stats
+        )
 
         try:
             message = await target.send(
@@ -371,16 +473,21 @@ async def register_persistent_views(bot: commands.InteractionBot) -> None:
     ("This interaction failed") because the in-memory View is gone.
     """
     try:
-        ids = await base_storage.list_base_post_ids(bot.pool)
+        rows = await base_storage.list_views_to_restore(bot.pool)
     except Exception:  # noqa: BLE001 — never block startup on this
         logger.exception("Couldn't load base posts to restore views")
         return
 
-    for base_post_id in ids:
-        count = await base_storage.count_downloads(bot.pool, base_post_id)
-        bot.add_view(BasePostView(base_post_id, count))
-    if ids:
-        logger.info("Restored %d base post view(s)", len(ids))
+    for row in rows:
+        bot.add_view(
+            BasePostView(
+                row["id"],
+                int(row["download_count"]),
+                stats_admin_only=bool(row["stats_admin_only"]),
+            )
+        )
+    if rows:
+        logger.info("Restored %d base post view(s)", len(rows))
 
 
 def setup(bot: commands.InteractionBot) -> None:

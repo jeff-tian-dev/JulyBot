@@ -237,6 +237,12 @@ CREATE TABLE IF NOT EXISTS base_posts (
 
 # One row per (post, user) — the PK makes repeat fetches by the same user a
 # no-op, so COUNT(*) is the unique-downloader count shown on the button.
+# When TRUE, only admins/Manage Messages can see the download count and the
+# downloader list; everyone else gets a refusal. Set per-post at /postbase time.
+ALTER_BASE_POSTS_STATS_ADMIN_ONLY = """
+ALTER TABLE base_posts ADD COLUMN IF NOT EXISTS stats_admin_only BOOLEAN NOT NULL DEFAULT FALSE;
+"""
+
 CREATE_BASE_POST_DOWNLOADS = """
 CREATE TABLE IF NOT EXISTS base_post_downloads (
     base_post_id INTEGER NOT NULL REFERENCES base_posts(id) ON DELETE CASCADE,
@@ -322,6 +328,8 @@ async def create_tables(pool: asyncpg.Pool) -> None:
 
         logger.info("Creating table base_posts if not exists")
         await conn.execute(CREATE_BASE_POSTS)
+        logger.info("Applying base_posts stats_admin_only column migration if needed")
+        await conn.execute(ALTER_BASE_POSTS_STATS_ADMIN_ONLY)
         logger.info("Creating table base_post_downloads if not exists")
         await conn.execute(CREATE_BASE_POST_DOWNLOADS)
 

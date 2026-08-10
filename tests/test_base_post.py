@@ -174,6 +174,50 @@ def test_validate_image_accepts_png() -> None:
     base_poster.validate_image(attachment)  # does not raise
 
 
+# --- stats visibility gate --------------------------------------------------
+
+
+def _user(user_id: int, *, admin: bool = False, manage_messages: bool = False):
+    user = MagicMock()
+    user.id = user_id
+    user.guild_permissions.administrator = admin
+    user.guild_permissions.manage_messages = manage_messages
+    return user
+
+
+def _record(author_id: int = 1, *, stats_admin_only: bool = False):
+    return {"author_id": author_id, "stats_admin_only": stats_admin_only}
+
+
+def test_stats_public_by_default() -> None:
+    from discord_bot.commands import base_post_commands as bp
+
+    assert bp._can_view_stats(_user(99), _record()) is True
+
+
+def test_stats_hidden_from_plain_member_when_flagged() -> None:
+    from discord_bot.commands import base_post_commands as bp
+
+    assert bp._can_view_stats(_user(99), _record(stats_admin_only=True)) is False
+
+
+def test_stats_hidden_even_from_the_author() -> None:
+    from discord_bot.commands import base_post_commands as bp
+
+    # The author isn't exempt — the flag exists to keep the tally private, and
+    # /postbase is open to everyone so the author may be a plain member.
+    author = _user(1)
+    assert bp._can_view_stats(author, _record(author_id=1, stats_admin_only=True)) is False
+
+
+@pytest.mark.parametrize("perm", ["admin", "manage_messages"])
+def test_stats_visible_to_moderators(perm: str) -> None:
+    from discord_bot.commands import base_post_commands as bp
+
+    mod = _user(99, **{perm if perm == "admin" else "manage_messages": True})
+    assert bp._can_view_stats(mod, _record(stats_admin_only=True)) is True
+
+
 # --- storage ----------------------------------------------------------------
 
 
@@ -230,6 +274,43 @@ async def test_update_base_post_with_no_fields_is_a_read() -> None:
 
     sql = conn.fetchrow.await_args.args[0]
     assert sql.strip().upper().startswith("SELECT")
+
+
+@pytest.mark.asyncio
+async def test_create_base_post_persists_stats_flag() -> None:
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={"id": 1})
+    pool = _fake_pool(conn)
+
+    await base_storage.create_base_post(
+        pool,
+        guild_id=1,
+        channel_id=2,
+        author_id=3,
+        link="https://example.com",
+        stats_admin_only=True,
+    )
+
+    params = conn.fetchrow.await_args.args[1:]
+    assert params[-1] is True
+
+
+@pytest.mark.asyncio
+async def test_list_views_to_restore_is_a_single_query() -> None:
+    conn = MagicMock()
+    conn.fetch = AsyncMock(
+        return_value=[{"id": 1, "stats_admin_only": True, "download_count": 4}]
+    )
+    pool = _fake_pool(conn)
+
+    rows = await base_storage.list_views_to_restore(pool)
+
+    # One aggregate query, not a count per post.
+    conn.fetch.assert_awaited_once()
+    sql = conn.fetch.await_args.args[0]
+    assert "LEFT JOIN base_post_downloads" in sql
+    assert "message_id IS NOT NULL" in sql
+    assert rows[0]["download_count"] == 4
 
 
 @pytest.mark.asyncio

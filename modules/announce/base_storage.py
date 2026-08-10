@@ -27,6 +27,7 @@ async def create_base_post(
     description: str | None = None,
     image_url: str | None = None,
     image_filename: str | None = None,
+    stats_admin_only: bool = False,
 ) -> asyncpg.Record:
     """Insert a base post before it's sent; message_id is attached afterwards."""
     async with pool.acquire() as conn:
@@ -34,9 +35,10 @@ async def create_base_post(
             """
             INSERT INTO base_posts (
                 guild_id, channel_id, author_id, link,
-                title, cc, description, image_url, image_filename
+                title, cc, description, image_url, image_filename,
+                stats_admin_only
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             RETURNING *;
             """,
             guild_id,
@@ -48,6 +50,7 @@ async def create_base_post(
             description,
             image_url,
             image_filename,
+            stats_admin_only,
         )
 
 
@@ -157,3 +160,24 @@ async def list_base_post_ids(pool: asyncpg.Pool) -> list[int]:
             "SELECT id FROM base_posts WHERE message_id IS NOT NULL ORDER BY id;"
         )
     return [row["id"] for row in rows]
+
+
+async def list_views_to_restore(pool: asyncpg.Pool) -> list[asyncpg.Record]:
+    """Every published post with the data needed to rebuild its view.
+
+    One query with a LEFT JOIN aggregate instead of a count per post, so startup
+    stays O(1) queries no matter how many base posts exist.
+    """
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT p.id,
+                   p.stats_admin_only,
+                   COUNT(d.user_id) AS download_count
+            FROM base_posts p
+            LEFT JOIN base_post_downloads d ON d.base_post_id = p.id
+            WHERE p.message_id IS NOT NULL
+            GROUP BY p.id, p.stats_admin_only
+            ORDER BY p.id;
+            """
+        )
