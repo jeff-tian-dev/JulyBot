@@ -112,48 +112,19 @@ def test_build_base_body_rejects_combined_overflow() -> None:
         )
 
 
-def test_build_base_embed_puts_title_in_title_field() -> None:
-    embed = base_poster.build_base_embed(title="Tap 6.0", cc=None, description="notes")
-    assert embed.title == "Tap 6.0"
-    # ...and not duplicated into the body.
-    assert "Tap 6.0" not in embed.description
+def test_title_renders_as_a_markdown_heading() -> None:
+    # "## " renders larger than an embed's title field, which is why the post
+    # is a plain message rather than an embed.
+    body = base_poster.build_base_body(title="Tap 6.0", cc=None, description="notes")
+    assert body.startswith("## Tap 6.0")
 
 
-def test_build_base_embed_omits_blank_title() -> None:
-    embed = base_poster.build_base_embed(title=None, cc=None, description="notes")
-    assert not embed.title
-
-
-def test_build_base_embed_uses_attachment_uri() -> None:
-    embed = base_poster.build_base_embed(
-        title="Tap", cc=None, description="notes", image_filename="my base.png"
-    )
-    # The filename is sanitised so attachment:// resolves.
-    assert embed.image.url == "attachment://my_base.png"
-    assert embed.colour.value == base_poster.BASE_EMBED_COLOUR
-
-
-def test_build_base_embed_prefers_filename_over_url() -> None:
-    embed = base_poster.build_base_embed(
-        title=None,
-        cc=None,
-        description="x",
-        image_filename="a.png",
-        image_url="https://cdn.example/b.png",
-    )
-    assert embed.image.url == "attachment://a.png"
-
-
-def test_embed_from_record_uses_stored_url() -> None:
-    record = {
-        "title": "Tap 6.0",
-        "cc": "x2 HH",
-        "description": "notes",
-        "image_url": "https://cdn.example/base.png",
-    }
-    embed = base_poster.embed_from_record(record)
-    assert embed.image.url == "https://cdn.example/base.png"
-    assert "**CC:**" in embed.description
+def test_content_from_record_round_trips() -> None:
+    record = {"title": "Tap 6.0", "cc": "x2 HH", "description": "notes"}
+    content = base_poster.content_from_record(record)
+    assert content.startswith("## Tap 6.0")
+    assert "**CC:**\nx2 HH" in content
+    assert content.endswith("notes")
 
 
 # --- image validation -------------------------------------------------------
@@ -256,11 +227,21 @@ def test_id_falls_back_when_custom_id_is_unparsable() -> None:
 # --- fetch / stats panels ---------------------------------------------------
 
 
-def test_link_embed_renders_link_as_text_not_input() -> None:
-    embed = base_poster.link_embed("https://link.clashofclans.com/en?action=OpenLayout")
-    assert embed.title == "Copy Layout"
-    # The raw URL must be in the description so Discord auto-links it.
-    assert "https://link.clashofclans.com/en?action=OpenLayout" in embed.description
+def test_info_modal_has_no_editable_input() -> None:
+    """The Copy Layout popup must be a static TextDisplay, never a TextInput —
+    a TextInput is always editable and would let the viewer type over the link."""
+    import asyncio
+
+    from discord_bot.commands import base_post_commands as bp
+
+    async def check():
+        modal = bp.InfoModal(title="Copy Layout", body="https://example.com", custom_id="x")
+        payload = modal.to_components()
+        types = [c["type"] for c in payload["components"]]
+        assert 10 in types, "expected a TextDisplay (type 10)"
+        assert 4 not in types, "a TextInput (type 4) would be editable"
+
+    asyncio.run(check())
 
 
 def test_downloaders_embed_lists_mentions() -> None:

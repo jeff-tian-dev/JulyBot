@@ -20,10 +20,9 @@ from modules.announce.base_poster import (
     MAX_LINK_LENGTH,
     MAX_TITLE_LENGTH,
     PostError,
-    build_base_embed,
+    build_base_body,
+    content_from_record,
     downloaders_embed,
-    embed_from_record,
-    link_embed,
     normalize_text,
     validate_base_input,
     validate_image,
@@ -62,6 +61,27 @@ def _can_view_stats(user: disnake.abc.User, record) -> bool:
     return _is_moderator(user)
 
 
+class InfoModal(disnake.ui.Modal):
+    """A popup panel that displays text without any editable field.
+
+    The body is a `TextDisplay` (component type 10), which is static text —
+    NOT a `TextInput`, which is always editable and would let the viewer type
+    over the content. Discord still draws its own Cancel/Submit row and the
+    "this form will be submitted" banner; those can't be removed.
+    """
+
+    def __init__(self, *, title: str, body: str, custom_id: str) -> None:
+        super().__init__(
+            title=title[:45],  # Discord truncates modal titles past 45 chars.
+            custom_id=custom_id,
+            components=[disnake.ui.TextDisplay(content=body[:4000])],
+        )
+
+    async def callback(self, inter: disnake.ModalInteraction) -> None:
+        # Nothing to save — ack silently so the popup just closes.
+        await inter.response.defer()
+
+
 class BaseEditModal(disnake.ui.Modal):
     """Pre-filled modal for editing a base post's text fields and image URL."""
 
@@ -91,14 +111,6 @@ class BaseEditModal(disnake.ui.Modal):
                 required=False,
                 max_length=MAX_DESCRIPTION_LENGTH,
                 style=disnake.TextInputStyle.paragraph,
-            ),
-            disnake.ui.TextInput(
-                label="Image URL (leave as-is to keep current)",
-                custom_id="image_url",
-                value=record["image_url"] or "",
-                required=False,
-                max_length=MAX_LINK_LENGTH,
-                style=disnake.TextInputStyle.short,
             ),
             disnake.ui.TextInput(
                 label="Layout link",
@@ -140,21 +152,23 @@ class BaseEditModal(disnake.ui.Modal):
             cc=values.get("cc", "") or "",
             description=values.get("description", "") or "",
             link=cleaned["link"] if link else None,
-            image_url=values.get("image_url", "") or "",
         )
         if updated is None:
             await inter.response.send_message("That base post no longer exists.", ephemeral=True)
             return
 
-        author = inter.guild.get_member(updated["author_id"]) if inter.guild else None
-        embed = embed_from_record(updated, author=author)
         count = await base_storage.count_downloads(pool, self.base_post_id)
         view = BasePostView(
             self.base_post_id, count, stats_admin_only=bool(updated["stats_admin_only"])
         )
 
         try:
-            await inter.response.edit_message(embed=embed, view=view)
+            # Only the text changes. The original attachment is left alone —
+            # editing an embed alongside a live attachment is what made the
+            # picture appear twice.
+            await inter.response.edit_message(
+                content=content_from_record(updated), view=view
+            )
         except disnake.HTTPException:
             logger.exception("Failed to apply base post edit id=%s", self.base_post_id)
             await inter.response.send_message("Couldn't update the post.", ephemeral=True)
@@ -242,11 +256,16 @@ class BasePostView(disnake.ui.View):
         count = await base_storage.record_download(
             inter.bot.pool, base_post_id, inter.author.id
         )
-        # An ephemeral message, not a modal: only a message renders the link as
-        # a real clickable hyperlink and is read-only. A modal body can only be
-        # a TextInput, which is always editable.
-        await inter.response.send_message(
-            embed=link_embed(record["link"]), ephemeral=True, allowed_mentions=NO_PINGS
+        # A popup panel built from a static TextDisplay, so nothing is editable.
+        # A modal must be the FIRST response to an interaction, so it's sent
+        # before the counter refresh below (which edits the message, not the
+        # interaction, and so doesn't consume the response slot).
+        await inter.response.send_modal(
+            InfoModal(
+                title="Copy Layout",
+                body=f"Click the link below to copy the layout:\n\n{record['link']}",
+                custom_id=f"{CUSTOM_ID_PREFIX}:linkmodal:{base_post_id}",
+            )
         )
 
         # Keep the view in step with the stored flag; a restored view can be
@@ -369,12 +388,12 @@ class BasePostCommands(commands.Cog):
             stats_admin_only=admin_only_stats,
         )
 
-        embed = build_base_embed(
+        # A bare attachment, not an embed image: attachments render at full
+        # message width, where an embed caps the picture much narrower.
+        content = build_base_body(
             title=cleaned["title"],
             cc=cleaned["cc"],
             description=cleaned["description"],
-            image_filename=file.filename,
-            author=inter.author,
         )
         view = BasePostView(
             record["id"], download_count=0, stats_admin_only=admin_only_stats
@@ -382,7 +401,7 @@ class BasePostCommands(commands.Cog):
 
         try:
             message = await target.send(
-                embed=embed, file=file, view=view, allowed_mentions=NO_PINGS
+                content=content, file=file, view=view, allowed_mentions=NO_PINGS
             )
         except disnake.HTTPException as exc:
             # Roll back so no orphan row is left pointing at a message that
@@ -398,11 +417,12 @@ class BasePostCommands(commands.Cog):
 
         await base_storage.attach_message(self.bot.pool, record["id"], message.id)
 
-        # The uploaded attachment is now hosted by Discord; store its URL so
-        # edits can re-render the embed without re-uploading the file.
-        if message.embeds and message.embeds[0].image:
+        # Record where Discord is hosting the upload. Editing a message keeps
+        # its attachments as long as they aren't cleared, so this is kept for
+        # reference/debugging rather than for re-rendering.
+        if message.attachments:
             await base_storage.update_base_post(
-                self.bot.pool, record["id"], image_url=message.embeds[0].image.url
+                self.bot.pool, record["id"], image_url=message.attachments[0].url
             )
 
         await self._respond(inter, f"Posted to {target.mention} — {message.jump_url}")

@@ -31,12 +31,15 @@ DIVIDER = "------------------------"
 # The only section heading. The description is rendered bare — a poster who
 # wants a "Notes:" label types it themselves as part of the description.
 CC_HEADING = "**CC:**"
-# Discord limits.
-MAX_TITLE_LENGTH = 256
+# Discord limits. The post is a plain message + attachment (attachments render
+# wider than embed images), so the whole body shares the 2000-char message
+# budget rather than an embed's 4096.
+MAX_MESSAGE_LENGTH = 2000
 MAX_EMBED_DESCRIPTION_LENGTH = 4096
-# Room for the divider + heading that get prepended to the user's text.
-MAX_DESCRIPTION_LENGTH = 2000
-MAX_CC_LENGTH = 500
+MAX_TITLE_LENGTH = 256
+# Leaves room for the title, CC, divider, and the blank lines between them.
+MAX_DESCRIPTION_LENGTH = 1200
+MAX_CC_LENGTH = 200
 MAX_LINK_LENGTH = 1000
 # Downloader lists are truncated to stay under the embed description limit.
 MAX_DOWNLOADER_LINES = 40
@@ -118,77 +121,43 @@ def validate_image(attachment: disnake.Attachment) -> None:
 
 def build_base_body(
     *,
+    title: str | None = None,
     cc: str | None,
     description: str | None,
 ) -> str:
-    """Compose the embed description: a rule, the CC block, then the body.
+    """Compose the whole post body: title, a rule, the CC block, then the notes.
 
-    The title is NOT part of this — it lives in the embed's native title field,
-    which Discord renders bold in its own slot. Any section the poster left
-    blank is skipped entirely, and the description gets no heading of its own
-    (a "Notes:" label is the poster's to type).
+    The title is a `##` markdown heading, which renders larger than an embed's
+    title field. Any section the poster left blank is skipped entirely, and the
+    description gets no heading of its own (a "Notes:" label is the poster's to
+    type).
     """
-    parts: list[str] = [DIVIDER]
+    parts: list[str] = []
+    if title:
+        parts.append(f"## {title}")
+    parts.append(DIVIDER)
     if cc:
         parts.append(f"{CC_HEADING}\n{cc}")
     if description:
         parts.append(description)
 
     body = "\n\n".join(parts)
-    if len(body) > MAX_EMBED_DESCRIPTION_LENGTH:
-        # The title has its own field and its own limit, so only CC and the
-        # description count against the description budget — but those two can
-        # still overflow together while each is individually valid.
+    if len(body) > MAX_MESSAGE_LENGTH:
+        # The post is a plain message + attachment (an attachment renders wider
+        # than an embed image), so the whole body shares one 2000-char budget.
         raise PostError(
-            "The CC and description are too long together "
-            f"({len(body)} characters — the embed limit is {MAX_EMBED_DESCRIPTION_LENGTH})."
+            "The title, CC, and description are too long together "
+            f"({len(body)} characters — the message limit is {MAX_MESSAGE_LENGTH})."
         )
     return body
 
 
-def build_base_embed(
-    *,
-    title: str | None,
-    cc: str | None,
-    description: str | None,
-    image_url: str | None = None,
-    image_filename: str | None = None,
-    author: disnake.abc.User | None = None,
-) -> disnake.Embed:
-    """Build the base-post embed.
-
-    Pass `image_filename` when the image is being uploaded alongside the embed
-    (referenced as ``attachment://``), or `image_url` when re-rendering an
-    already-posted image on edit.
-    """
-    embed = disnake.Embed(
-        title=title or None,
-        description=build_base_body(cc=cc, description=description),
-        colour=BASE_EMBED_COLOUR,
-    )
-    if image_filename:
-        embed.set_image(url=f"attachment://{safe_filename(image_filename)}")
-    elif image_url:
-        embed.set_image(url=image_url)
-    if author is not None:
-        embed.set_footer(
-            text=f"Posted by {author.display_name}",
-            icon_url=author.display_avatar.url if author.display_avatar else None,
-        )
-    return embed
-
-
-def link_embed(link: str) -> disnake.Embed:
-    """The 'Copy Layout' panel shown to whoever pressed Fetch Link.
-
-    An embed, not a modal: only a message renders the link as a real clickable
-    hyperlink and is read-only. A modal body can only be a TextInput, which the
-    viewer can edit.
-    """
-    return disnake.Embed(
-        title="Copy Layout",
-        description=f"Click the link below to copy the layout:\n\n{link}",
-        colour=BASE_EMBED_COLOUR,
+def content_from_record(record) -> str:
+    """Rebuild a stored base post's message text (used after an edit)."""
+    return build_base_body(
+        title=record["title"],
+        cc=record["cc"],
+        description=record["description"],
     )
 
 
@@ -215,15 +184,6 @@ def downloaders_embed(rows) -> disnake.Embed:
     return embed
 
 
-def embed_from_record(record, author: disnake.abc.User | None = None) -> disnake.Embed:
-    """Re-render a stored base post row (used after an edit)."""
-    return build_base_embed(
-        title=record["title"],
-        cc=record["cc"],
-        description=record["description"],
-        image_url=record["image_url"],
-        author=author,
-    )
 
 
 __all__ = [
@@ -231,13 +191,12 @@ __all__ = [
     "MAX_CC_LENGTH",
     "MAX_DESCRIPTION_LENGTH",
     "MAX_LINK_LENGTH",
+    "MAX_MESSAGE_LENGTH",
     "MAX_TITLE_LENGTH",
     "PostError",
     "build_base_body",
-    "build_base_embed",
+    "content_from_record",
     "downloaders_embed",
-    "link_embed",
-    "embed_from_record",
     "normalize_text",
     "validate_base_input",
     "validate_image",
