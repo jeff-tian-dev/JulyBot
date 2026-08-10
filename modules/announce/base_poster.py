@@ -38,6 +38,8 @@ MAX_EMBED_DESCRIPTION_LENGTH = 4096
 MAX_DESCRIPTION_LENGTH = 2000
 MAX_CC_LENGTH = 500
 MAX_LINK_LENGTH = 1000
+# Downloader lists are truncated to stay under the embed description limit.
+MAX_DOWNLOADER_LINES = 40
 # Only these schemes are accepted for the layout link — a base link is always a
 # normal web/deep link, and anything else (javascript:, data:) is a trap.
 ALLOWED_LINK_SCHEMES = ("http", "https")
@@ -176,6 +178,43 @@ def build_base_embed(
     return embed
 
 
+def link_embed(link: str) -> disnake.Embed:
+    """The 'Copy Layout' panel shown to whoever pressed Fetch Link.
+
+    An embed, not a modal: only a message renders the link as a real clickable
+    hyperlink and is read-only. A modal body can only be a TextInput, which the
+    viewer can edit.
+    """
+    return disnake.Embed(
+        title="Copy Layout",
+        description=f"Click the link below to copy the layout:\n\n{link}",
+        colour=BASE_EMBED_COLOUR,
+    )
+
+
+def downloaders_embed(rows) -> disnake.Embed:
+    """The download-stats panel: a numbered list of everyone who fetched."""
+    if not rows:
+        return disnake.Embed(
+            title="Downloads",
+            description="Nobody has fetched this link yet.",
+            colour=BASE_EMBED_COLOUR,
+        )
+
+    shown = list(rows)[:MAX_DOWNLOADER_LINES]
+    lines = [f"{i}. <@{row['user_id']}>" for i, row in enumerate(shown, start=1)]
+    if len(rows) > len(shown):
+        lines.append(f"…and {len(rows) - len(shown)} more.")
+
+    embed = disnake.Embed(
+        title="Downloads",
+        description="\n".join(lines),
+        colour=BASE_EMBED_COLOUR,
+    )
+    embed.set_footer(text=f"{len(rows)} unique download(s)")
+    return embed
+
+
 def embed_from_record(record, author: disnake.abc.User | None = None) -> disnake.Embed:
     """Re-render a stored base post row (used after an edit)."""
     return build_base_embed(
@@ -196,6 +235,8 @@ __all__ = [
     "PostError",
     "build_base_body",
     "build_base_embed",
+    "downloaders_embed",
+    "link_embed",
     "embed_from_record",
     "normalize_text",
     "validate_base_input",

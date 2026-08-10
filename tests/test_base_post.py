@@ -218,6 +218,71 @@ def test_stats_visible_to_moderators(perm: str) -> None:
     assert bp._can_view_stats(mod, _record(stats_admin_only=True)) is True
 
 
+# --- persistent-view id dispatch --------------------------------------------
+
+
+def test_id_comes_from_the_clicked_button_not_the_instance() -> None:
+    """Regression: a persistent view is matched by custom_id, but the callback
+    runs on whichever registered instance disnake dispatches to. Reading
+    self.base_post_id recorded the fetch against the wrong post, so the
+    downloader list always came back empty."""
+    import asyncio
+
+    from discord_bot.commands import base_post_commands as bp
+
+    async def check():
+        view = bp.BasePostView(1, 0)  # instance registered for post 1...
+        inter = MagicMock()
+        inter.data.custom_id = "basepost:fetch:57"  # ...but post 57 was clicked
+        assert view._id_from(inter) == 57
+
+    asyncio.run(check())
+
+
+def test_id_falls_back_when_custom_id_is_unparsable() -> None:
+    import asyncio
+
+    from discord_bot.commands import base_post_commands as bp
+
+    async def check():
+        view = bp.BasePostView(9, 0)
+        inter = MagicMock()
+        inter.data.custom_id = "garbage"
+        assert view._id_from(inter) == 9
+
+    asyncio.run(check())
+
+
+# --- fetch / stats panels ---------------------------------------------------
+
+
+def test_link_embed_renders_link_as_text_not_input() -> None:
+    embed = base_poster.link_embed("https://link.clashofclans.com/en?action=OpenLayout")
+    assert embed.title == "Copy Layout"
+    # The raw URL must be in the description so Discord auto-links it.
+    assert "https://link.clashofclans.com/en?action=OpenLayout" in embed.description
+
+
+def test_downloaders_embed_lists_mentions() -> None:
+    rows = [{"user_id": 11}, {"user_id": 22}]
+    embed = base_poster.downloaders_embed(rows)
+    assert "<@11>" in embed.description and "<@22>" in embed.description
+    assert "2 unique download(s)" in embed.footer.text
+
+
+def test_downloaders_embed_handles_empty() -> None:
+    embed = base_poster.downloaders_embed([])
+    assert "Nobody has fetched this link yet." in embed.description
+
+
+def test_downloaders_embed_truncates_long_lists() -> None:
+    rows = [{"user_id": i} for i in range(base_poster.MAX_DOWNLOADER_LINES + 10)]
+    embed = base_poster.downloaders_embed(rows)
+    assert "…and 10 more." in embed.description
+    # The footer still reports the true total, not the truncated count.
+    assert f"{len(rows)} unique download(s)" in embed.footer.text
+
+
 # --- storage ----------------------------------------------------------------
 
 

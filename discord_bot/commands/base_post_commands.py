@@ -21,7 +21,9 @@ from modules.announce.base_poster import (
     MAX_TITLE_LENGTH,
     PostError,
     build_base_embed,
+    downloaders_embed,
     embed_from_record,
+    link_embed,
     normalize_text,
     validate_base_input,
     validate_image,
@@ -34,8 +36,6 @@ logger = _logging.getLogger(__name__)
 NO_PINGS = disnake.AllowedMentions.none()
 # Prefix for every custom_id this feature owns, so the ids stay unambiguous.
 CUSTOM_ID_PREFIX = "basepost"
-# Downloader lists are chunked well under Discord's 2000-char message limit.
-MAX_DOWNLOADER_LINES = 40
 
 
 def _is_moderator(user: disnake.abc.User) -> bool:
@@ -60,35 +60,6 @@ def _can_view_stats(user: disnake.abc.User, record) -> bool:
     if not record["stats_admin_only"]:
         return True
     return _is_moderator(user)
-
-
-class InfoModal(disnake.ui.Modal):
-    """A modal used purely to *display* text in a popup panel.
-
-    Discord has no read-only display modal, so the content sits in a prefilled
-    paragraph TextInput. Discord always draws Cancel/Submit and its own "do not
-    share passwords" banner — neither can be removed. Submitting is a no-op:
-    the callback just acknowledges so the dialog closes cleanly.
-    """
-
-    def __init__(self, *, title: str, label: str, body: str, custom_id: str) -> None:
-        super().__init__(
-            title=title[:45],  # Discord truncates modal titles past 45 chars.
-            custom_id=custom_id,
-            components=[
-                disnake.ui.TextInput(
-                    label=label[:45],
-                    custom_id="body",
-                    value=body[:4000],
-                    style=disnake.TextInputStyle.paragraph,
-                    required=False,
-                )
-            ],
-        )
-
-    async def callback(self, inter: disnake.ModalInteraction) -> None:
-        # Nothing to save — ack silently so the popup just closes.
-        await inter.response.defer()
 
 
 class BaseEditModal(disnake.ui.Modal):
@@ -238,8 +209,23 @@ class BasePostView(disnake.ui.View):
         """
         return "Downloads" if self.stats_admin_only else f"{count} Downloads"
 
+    def _id_from(self, inter: disnake.MessageInteraction) -> int:
+        """The base post id encoded in the clicked button's custom_id.
+
+        A persistent view is matched by custom_id, but the callback runs on
+        whichever registered instance disnake dispatches to — its
+        `self.base_post_id` is NOT necessarily the clicked post's. Always take
+        the id from the interaction, or clicks land on the wrong row.
+        """
+        custom_id = (inter.data.custom_id or "") if inter.data else ""
+        try:
+            return int(custom_id.rsplit(":", 1)[1])
+        except (IndexError, ValueError):
+            logger.warning("Unparsable base post custom_id %r", custom_id)
+            return self.base_post_id
+
     async def _load(self, inter: disnake.MessageInteraction):
-        record = await base_storage.get_base_post(inter.bot.pool, self.base_post_id)
+        record = await base_storage.get_base_post(inter.bot.pool, self._id_from(inter))
         if record is None:
             await inter.response.send_message(
                 "That base post's data is gone — it may have been deleted.", ephemeral=True
@@ -252,19 +238,15 @@ class BasePostView(disnake.ui.View):
         if record is None:
             return
 
+        base_post_id = self._id_from(inter)
         count = await base_storage.record_download(
-            inter.bot.pool, self.base_post_id, inter.author.id
+            inter.bot.pool, base_post_id, inter.author.id
         )
-        # A modal must be the FIRST response to an interaction, so it's sent
-        # before the counter refresh below (which edits the message, not the
-        # interaction, and so doesn't consume the response slot).
-        await inter.response.send_modal(
-            InfoModal(
-                title="Copy Layout",
-                label="Click the link below to copy the layout",
-                body=record["link"],
-                custom_id=f"{CUSTOM_ID_PREFIX}:linkmodal:{self.base_post_id}",
-            )
+        # An ephemeral message, not a modal: only a message renders the link as
+        # a real clickable hyperlink and is read-only. A modal body can only be
+        # a TextInput, which is always editable.
+        await inter.response.send_message(
+            embed=link_embed(record["link"]), ephemeral=True, allowed_mentions=NO_PINGS
         )
 
         # Keep the view in step with the stored flag; a restored view can be
@@ -281,7 +263,7 @@ class BasePostView(disnake.ui.View):
                 await inter.message.edit(view=self)
             except disnake.HTTPException:
                 logger.warning(
-                    "Couldn't refresh download count on base post id=%s", self.base_post_id
+                    "Couldn't refresh download count on base post id=%s", base_post_id
                 )
 
     async def _on_edit(self, inter: disnake.MessageInteraction) -> None:
@@ -311,36 +293,9 @@ class BasePostView(disnake.ui.View):
             )
             return
 
-        rows = await base_storage.list_downloaders(inter.bot.pool, self.base_post_id)
-        if not rows:
-            await inter.response.send_modal(
-                InfoModal(
-                    title="Downloads",
-                    label="Who fetched this layout",
-                    body="Nobody has fetched this link yet.",
-                    custom_id=f"{CUSTOM_ID_PREFIX}:statsmodal:{self.base_post_id}",
-                )
-            )
-            return
-
-        # A modal shows plain text, so <@id> mentions would render as raw ids —
-        # resolve them to display names instead.
-        shown = rows[:MAX_DOWNLOADER_LINES]
-        lines = []
-        for i, row in enumerate(shown, start=1):
-            user = inter.guild.get_member(row["user_id"]) if inter.guild else None
-            name = user.display_name if user else f"Unknown user ({row['user_id']})"
-            lines.append(f"{i}. {name}")
-        if len(rows) > len(shown):
-            lines.append(f"…and {len(rows) - len(shown)} more.")
-
-        await inter.response.send_modal(
-            InfoModal(
-                title="Downloads",
-                label=f"{len(rows)} unique download(s)",
-                body="\n".join(lines),
-                custom_id=f"{CUSTOM_ID_PREFIX}:statsmodal:{self.base_post_id}",
-            )
+        rows = await base_storage.list_downloaders(inter.bot.pool, self._id_from(inter))
+        await inter.response.send_message(
+            embed=downloaders_embed(rows), ephemeral=True, allowed_mentions=NO_PINGS
         )
 
 
