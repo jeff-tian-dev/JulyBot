@@ -78,8 +78,11 @@ class InfoModal(disnake.ui.Modal):
         )
 
     async def callback(self, inter: disnake.ModalInteraction) -> None:
-        # Nothing to save — ack silently so the popup just closes.
-        await inter.response.defer()
+        # Nothing to save. `with_message` defaults to True on a modal submit,
+        # which promises a follow-up message and leaves a "JulyBot is
+        # thinking..." placeholder hanging forever. False sends a bare
+        # deferred_message_update instead, so the popup just closes.
+        await inter.response.defer(with_message=False)
 
 
 class BaseEditModal(disnake.ui.Modal):
@@ -171,7 +174,18 @@ class BaseEditModal(disnake.ui.Modal):
             )
         except disnake.HTTPException:
             logger.exception("Failed to apply base post edit id=%s", self.base_post_id)
-            await inter.response.send_message("Couldn't update the post.", ephemeral=True)
+            # edit_message may have already consumed the response slot, in which
+            # case send_message would raise InteractionResponded and hide the
+            # real error — fall back to a follow-up.
+            try:
+                if inter.response.is_done():
+                    await inter.followup.send("Couldn't update the post.", ephemeral=True)
+                else:
+                    await inter.response.send_message(
+                        "Couldn't update the post.", ephemeral=True
+                    )
+            except disnake.HTTPException:
+                logger.exception("Also failed to report the edit failure")
 
 
 class BasePostView(disnake.ui.View):

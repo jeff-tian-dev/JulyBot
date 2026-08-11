@@ -227,6 +227,24 @@ def test_id_falls_back_when_custom_id_is_unparsable() -> None:
 # --- fetch / stats panels ---------------------------------------------------
 
 
+def test_info_modal_submit_does_not_leave_a_thinking_placeholder() -> None:
+    """Submitting the popup must ack with with_message=False. The default
+    (True on a modal submit) promises a follow-up message, leaving a
+    "JulyBot is thinking..." prompt hanging forever."""
+    import asyncio
+
+    from discord_bot.commands import base_post_commands as bp
+
+    async def check():
+        modal = bp.InfoModal(title="t", body="b", custom_id="x")
+        inter = MagicMock()
+        inter.response.defer = AsyncMock()
+        await modal.callback(inter)
+        inter.response.defer.assert_awaited_once_with(with_message=False)
+
+    asyncio.run(check())
+
+
 def test_info_modal_has_no_editable_input() -> None:
     """The Copy Layout popup must be a static TextDisplay, never a TextInput —
     a TextInput is always editable and would let the viewer type over the link."""
