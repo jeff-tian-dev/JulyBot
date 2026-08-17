@@ -263,10 +263,36 @@ def test_info_modal_has_no_editable_input() -> None:
 
 
 def test_downloaders_embed_lists_mentions() -> None:
-    rows = [{"user_id": 11}, {"user_id": 22}]
+    rows = [{"user_id": 11, "fetched_at": None}, {"user_id": 22, "fetched_at": None}]
     embed = base_poster.downloaders_embed(rows)
     assert "<@11>" in embed.description and "<@22>" in embed.description
     assert "2 unique download(s)" in embed.footer.text
+
+
+def test_downloaders_embed_shows_fetch_time() -> None:
+    from datetime import datetime, timezone
+
+    when = datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc)
+    rows = [{"user_id": 11, "fetched_at": when}]
+    embed = base_poster.downloaders_embed(rows)
+    # A <t:…:R> token renders in each viewer's own timezone.
+    assert f"<t:{int(when.timestamp())}:R>" in embed.description
+
+
+def test_downloaders_embed_treats_naive_timestamps_as_utc() -> None:
+    from datetime import datetime, timezone
+
+    # asyncpg returns a naive datetime for a TIMESTAMP column written by NOW().
+    naive = datetime(2026, 8, 17, 12, 0)
+    aware = naive.replace(tzinfo=timezone.utc)
+    embed = base_poster.downloaders_embed([{"user_id": 1, "fetched_at": naive}])
+    assert f"<t:{int(aware.timestamp())}:R>" in embed.description
+
+
+def test_downloaders_embed_omits_missing_timestamp() -> None:
+    embed = base_poster.downloaders_embed([{"user_id": 7, "fetched_at": None}])
+    assert "<@7>" in embed.description
+    assert "<t:" not in embed.description
 
 
 def test_downloaders_embed_handles_empty() -> None:
@@ -275,7 +301,10 @@ def test_downloaders_embed_handles_empty() -> None:
 
 
 def test_downloaders_embed_truncates_long_lists() -> None:
-    rows = [{"user_id": i} for i in range(base_poster.MAX_DOWNLOADER_LINES + 10)]
+    rows = [
+        {"user_id": i, "fetched_at": None}
+        for i in range(base_poster.MAX_DOWNLOADER_LINES + 10)
+    ]
     embed = base_poster.downloaders_embed(rows)
     assert "…and 10 more." in embed.description
     # The footer still reports the true total, not the truncated count.

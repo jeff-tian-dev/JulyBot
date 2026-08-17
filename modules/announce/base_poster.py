@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import disnake
@@ -161,6 +162,18 @@ def content_from_record(record) -> str:
     )
 
 
+def _relative_timestamp(dt: datetime) -> str:
+    """A Discord `<t:…:R>` token, which renders as e.g. '3 hours ago'.
+
+    Duplicated from discord_bot.time_format rather than imported: modules/ must
+    not depend on the Discord layer. `fetched_at` is a naive TIMESTAMP written
+    by NOW(), so it's read as UTC (Supabase runs UTC).
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return f"<t:{int(dt.timestamp())}:R>"
+
+
 def downloaders_embed(rows) -> disnake.Embed:
     """The download-stats panel: a numbered list of everyone who fetched."""
     if not rows:
@@ -171,7 +184,15 @@ def downloaders_embed(rows) -> disnake.Embed:
         )
 
     shown = list(rows)[:MAX_DOWNLOADER_LINES]
-    lines = [f"{i}. <@{row['user_id']}>" for i, row in enumerate(shown, start=1)]
+    lines = []
+    for i, row in enumerate(shown, start=1):
+        line = f"{i}. <@{row['user_id']}>"
+        # `fetched_at` is nullable on rows written before it was recorded, and
+        # a Discord <t:…> token renders in each viewer's own timezone.
+        fetched_at = row.get("fetched_at") if hasattr(row, "get") else row["fetched_at"]
+        if fetched_at is not None:
+            line += f" — {_relative_timestamp(fetched_at)}"
+        lines.append(line)
     if len(rows) > len(shown):
         lines.append(f"…and {len(rows) - len(shown)} more.")
 
