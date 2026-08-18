@@ -88,6 +88,58 @@ def _relative_timestamp(dt: datetime) -> str:
     return f"<t:{int(dt.timestamp())}:R>"
 
 
+def _absolute_utc(dt: datetime) -> str:
+    """A plain UTC timestamp string for a receipt document (no Discord markup —
+    a downloaded file won't render <t:…> tokens)."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def receipt_text(
+    record,
+    *,
+    buyer_label: str,
+    sender_label: str,
+    voided_by_label: str | None = None,
+) -> str:
+    """Plain-text proof-of-signature document for a signed (or voided) agreement.
+
+    Not tied to Discord's embed limits — meant to be forwarded to a payment
+    processor as an attachment, so it carries the exact agreement text the
+    buyer saw rather than a pointer to a possibly-since-edited template.
+    """
+    lines = [
+        "PURCHASE AGREEMENT RECEIPT",
+        "=" * 27,
+        f"Agreement ID: #{record['id']}",
+        f"Buyer: {buyer_label} (discord id {record['buyer_id']})",
+        f"PayPal Name: {record['paypal_name']}",
+        f"PayPal Contact: {record['paypal_contact']}",
+        f"Order Ref: {record['order_ref'] or '(none)'}",
+    ]
+
+    if record["signed_at"]:
+        lines.append(f"Signed At: {_absolute_utc(record['signed_at'])}")
+        lines.append("Status: SIGNED")
+    else:
+        lines.append("Status: NOT YET SIGNED")
+
+    lines.append(f"Sent By: {sender_label} (discord id {record['sent_by']})")
+
+    if record["voided_at"]:
+        lines.append("")
+        lines.append(f"VOIDED: {_absolute_utc(record['voided_at'])}")
+        lines.append(f"Voided By: {voided_by_label or record['voided_by']}")
+        lines.append(f"Void Reason: {record['void_reason']}")
+
+    lines.append("")
+    lines.append("--- AGREEMENT TEXT AS SIGNED ---")
+    lines.append(record["agreement_text"])
+
+    return "\n".join(lines)
+
+
 def pending_embed(*, buyer_id: int, order_ref: str | None) -> disnake.Embed:
     """The embed posted alongside the PDF attachment and the I Agree button."""
     embed = disnake.Embed(
@@ -177,6 +229,7 @@ __all__ = [
     "embed_for_record",
     "lookup_embed",
     "pending_embed",
+    "receipt_text",
     "signed_embed",
     "validate_order_ref",
     "validate_paypal_contact",

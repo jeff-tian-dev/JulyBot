@@ -12,6 +12,7 @@ register_persistent_views).
 """
 from __future__ import annotations
 
+import io
 import logging as _logging
 
 import disnake
@@ -22,6 +23,7 @@ from modules.agreements.document import AGREEMENT_FULL_TEXT, AGREEMENT_PDF_PATH
 from modules.agreements.validation import (
     lookup_embed,
     pending_embed,
+    receipt_text,
     signed_embed,
     validate_order_ref,
     validate_paypal_contact,
@@ -204,6 +206,49 @@ class AgreementCommands(commands.Cog):
         await inter.response.send_message(
             embed=lookup_embed(member.id, rows), ephemeral=True, allowed_mentions=NO_PINGS
         )
+
+    @agreement.sub_command(
+        name="receipt",
+        description="Get a downloadable proof-of-signature document for an agreement.",
+    )
+    async def receipt(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        agreement_id: int = commands.Param(description="The agreement's #id (see /agreement lookup)."),
+    ) -> None:
+        record = await storage.get_agreement(self.bot.pool, agreement_id)
+        if record is None:
+            await inter.response.send_message(
+                f"No agreement found with id {agreement_id}.", ephemeral=True
+            )
+            return
+
+        text = receipt_text(
+            record,
+            buyer_label=await self._user_label(record["buyer_id"]),
+            sender_label=await self._user_label(record["sent_by"]),
+            voided_by_label=(
+                await self._user_label(record["voided_by"])
+                if record["voided_by"] is not None
+                else None
+            ),
+        )
+        file = disnake.File(
+            io.BytesIO(text.encode("utf-8")), filename=f"agreement_{agreement_id}_receipt.txt"
+        )
+        await inter.response.send_message(file=file, ephemeral=True)
+
+    async def _user_label(self, user_id: int) -> str:
+        """Best-effort "Name (id)" label for a receipt; never raises — a user
+        who left the server or was never cached still needs a resolvable
+        label on the document."""
+        user = self.bot.get_user(user_id)
+        if user is None:
+            try:
+                user = await self.bot.fetch_user(user_id)
+            except disnake.HTTPException:
+                return f"Unknown user ({user_id})"
+        return str(user)
 
     @agreement.sub_command(name="void", description="Void a signed or pending agreement.")
     async def void(

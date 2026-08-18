@@ -194,6 +194,78 @@ def test_lookup_embed_lists_status_per_row() -> None:
     assert "2 agreement(s)" in embed.footer.text
 
 
+# --- receipt document -------------------------------------------------------
+
+
+def _signed_record(**overrides):
+    base = {
+        "id": 14,
+        "buyer_id": 111,
+        "sent_by": 222,
+        "paypal_name": "Jane Doe",
+        "paypal_contact": "jane@example.com",
+        "order_ref": "#1042",
+        "agreement_text": "TERMS...",
+        "signed_at": datetime(2026, 8, 17, 14, 32, 1, tzinfo=timezone.utc),
+        "voided_at": None,
+        "voided_by": None,
+        "void_reason": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_receipt_text_includes_core_fields() -> None:
+    text = validation.receipt_text(
+        _signed_record(), buyer_label="janedoe#0", sender_label="mod#0"
+    )
+    assert "Agreement ID: #14" in text
+    assert "Buyer: janedoe#0 (discord id 111)" in text
+    assert "PayPal Name: Jane Doe" in text
+    assert "PayPal Contact: jane@example.com" in text
+    assert "Order Ref: #1042" in text
+    assert "Sent By: mod#0 (discord id 222)" in text
+    assert "Status: SIGNED" in text
+    assert "2026-08-17 14:32:01 UTC" in text
+
+
+def test_receipt_text_carries_the_full_agreement_text() -> None:
+    text = validation.receipt_text(
+        _signed_record(agreement_text="EXACT TERMS BUYER SAW"),
+        buyer_label="janedoe#0",
+        sender_label="mod#0",
+    )
+    assert "EXACT TERMS BUYER SAW" in text
+
+
+def test_receipt_text_marks_unsigned() -> None:
+    text = validation.receipt_text(
+        _signed_record(signed_at=None), buyer_label="janedoe#0", sender_label="mod#0"
+    )
+    assert "Status: NOT YET SIGNED" in text
+    assert "Signed At:" not in text
+
+
+def test_receipt_text_includes_void_details() -> None:
+    when = datetime(2026, 8, 18, 9, 0, tzinfo=timezone.utc)
+    text = validation.receipt_text(
+        _signed_record(voided_at=when, voided_by=333, void_reason="refunded"),
+        buyer_label="janedoe#0",
+        sender_label="mod#0",
+        voided_by_label="mod2#0",
+    )
+    assert "VOIDED: 2026-08-18 09:00:00 UTC" in text
+    assert "Voided By: mod2#0" in text
+    assert "Void Reason: refunded" in text
+
+
+def test_receipt_text_omits_order_ref_placeholder_when_missing() -> None:
+    text = validation.receipt_text(
+        _signed_record(order_ref=None), buyer_label="janedoe#0", sender_label="mod#0"
+    )
+    assert "Order Ref: (none)" in text
+
+
 # --- storage --------------------------------------------------------------
 
 
@@ -391,5 +463,49 @@ def test_voided_agreement_cannot_be_signed() -> None:
 
         inter.response.send_message.assert_awaited_once()
         assert "voided" in inter.response.send_message.await_args.args[0]
+
+    asyncio.run(check())
+
+
+# --- receipt command ---------------------------------------------------------
+
+
+def test_user_label_prefers_the_cache() -> None:
+    import asyncio
+
+    from discord_bot.commands import agreement_commands as ac
+
+    async def check():
+        cog = ac.AgreementCommands.__new__(ac.AgreementCommands)
+        cog.bot = MagicMock()
+        cog.bot.get_user = MagicMock(return_value=MagicMock(__str__=lambda self: "janedoe"))
+        cog.bot.fetch_user = AsyncMock()
+
+        label = await cog._user_label(111)
+
+        assert label == "janedoe"
+        cog.bot.fetch_user.assert_not_called()
+
+    asyncio.run(check())
+
+
+def test_user_label_falls_back_to_fetch_then_unknown() -> None:
+    """A buyer who left the guild (or was never cached) still needs a
+    resolvable label on the receipt rather than the command failing."""
+    import asyncio
+
+    import disnake
+
+    from discord_bot.commands import agreement_commands as ac
+
+    async def check():
+        cog = ac.AgreementCommands.__new__(ac.AgreementCommands)
+        cog.bot = MagicMock()
+        cog.bot.get_user = MagicMock(return_value=None)
+        cog.bot.fetch_user = AsyncMock(side_effect=disnake.NotFound(MagicMock(status=404), "x"))
+
+        label = await cog._user_label(999)
+
+        assert label == "Unknown user (999)"
 
     asyncio.run(check())
