@@ -14,46 +14,74 @@ import disnake
 from modules.announce.poster import PostError
 from modules.agreements.document import AGREEMENT_SUMMARY
 
-MAX_PAYPAL_NAME_LENGTH = 200
-MAX_PAYPAL_CONTACT_LENGTH = 320
+MAX_PAYER_NAME_LENGTH = 200
+MAX_PAYMENT_CONTACT_LENGTH = 320
 MAX_ORDER_REF_LENGTH = 200
 MAX_VOID_REASON_LENGTH = 512
+
+PAYMENT_METHODS = ("PayPal", "Venmo", "Wise")
 
 # Not a full RFC 5322 validator — just enough to catch obvious typos. A
 # moderator can still enter a wrong-but-well-formed email; that's an accepted
 # limitation rather than something worth over-engineering around.
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
-# PayPal also identifies accounts by a $Cashtag-style @handle (e.g. @jane-doe1),
-# separate from an email address — accept either.
-_PAYPAL_HANDLE_RE = re.compile(r"^@[A-Za-z0-9_.-]{1,50}$")
+# PayPal and Venmo identify accounts by a $Cashtag/@handle-style contact
+# (e.g. @jane-doe1) as well as (for PayPal) an email address.
+_HANDLE_RE = re.compile(r"^@[A-Za-z0-9_.-]{1,50}$")
+
 
 AGREEMENT_EMBED_COLOUR = 0x2ECC71
 VOIDED_EMBED_COLOUR = 0x95A5A6
 
 
-def validate_paypal_name(name: str) -> str:
+def validate_payer_name(name: str) -> str:
     cleaned = (name or "").strip()
     if not cleaned:
-        raise PostError("The PayPal name can't be empty.")
-    if len(cleaned) > MAX_PAYPAL_NAME_LENGTH:
-        raise PostError(f"The PayPal name is limited to {MAX_PAYPAL_NAME_LENGTH} characters.")
+        raise PostError("The payer name can't be empty.")
+    if len(cleaned) > MAX_PAYER_NAME_LENGTH:
+        raise PostError(f"The payer name is limited to {MAX_PAYER_NAME_LENGTH} characters.")
     return cleaned
 
 
-def validate_paypal_contact(contact: str) -> str:
-    """Accept either a PayPal email address or a $Cashtag-style @handle."""
+def validate_payment_method(method: str) -> str:
+    cleaned = (method or "").strip()
+    if cleaned not in PAYMENT_METHODS:
+        raise PostError(
+            f"`{cleaned}` isn't a supported payment method "
+            f"(choose one of: {', '.join(PAYMENT_METHODS)})."
+        )
+    return cleaned
+
+
+def validate_payment_contact(method: str, contact: str) -> str:
+    """Validate a payment contact against the shape expected for `method`.
+
+    PayPal: email or a $Cashtag-style @handle. Venmo: an @handle. Wise: an
+    email. Not a full validator for any of these — just enough to catch
+    obvious typos before they end up in a permanent signed record.
+    """
     cleaned = (contact or "").strip()
     if not cleaned:
-        raise PostError("The PayPal email or @ can't be empty.")
-    if len(cleaned) > MAX_PAYPAL_CONTACT_LENGTH:
+        raise PostError(f"The {method} contact can't be empty.")
+    if len(cleaned) > MAX_PAYMENT_CONTACT_LENGTH:
         raise PostError(
-            f"The PayPal email or @ is limited to {MAX_PAYPAL_CONTACT_LENGTH} characters."
+            f"The {method} contact is limited to {MAX_PAYMENT_CONTACT_LENGTH} characters."
         )
-    if not (_EMAIL_RE.match(cleaned) or _PAYPAL_HANDLE_RE.match(cleaned)):
-        raise PostError(
-            f"`{cleaned}` doesn't look like a valid PayPal email or @handle "
-            "(e.g. jane@example.com or @jane-doe)."
-        )
+
+    if method == "PayPal":
+        valid = _EMAIL_RE.match(cleaned) or _HANDLE_RE.match(cleaned)
+        hint = "e.g. jane@example.com or @jane-doe"
+    elif method == "Venmo":
+        valid = _HANDLE_RE.match(cleaned)
+        hint = "e.g. @jane-doe"
+    elif method == "Wise":
+        valid = _EMAIL_RE.match(cleaned)
+        hint = "e.g. jane@example.com"
+    else:
+        raise PostError(f"`{method}` isn't a supported payment method.")
+
+    if not valid:
+        raise PostError(f"`{cleaned}` doesn't look like a valid {method} contact ({hint}).")
     return cleaned
 
 
@@ -114,8 +142,9 @@ def receipt_text(
         "=" * 27,
         f"Agreement ID: #{record['id']}",
         f"Buyer: {buyer_label} (discord id {record['buyer_id']})",
-        f"PayPal Name: {record['paypal_name']}",
-        f"PayPal Contact: {record['paypal_contact']}",
+        f"Payer Name: {record['payer_name']}",
+        f"Payment Method: {record['payment_method']}",
+        f"Payment Contact: {record['payment_contact']}",
         f"Order Ref: {record['order_ref'] or '(none)'}",
     ]
 
@@ -144,8 +173,8 @@ def confirmation_embed(record, *, buyer_label: str) -> disnake.Embed:
     """The "please confirm your details" panel shown before a buyer can sign.
 
     Surfaces exactly what a mod typed in — the buyer's Discord identity, the
-    PayPal name, and the PayPal contact — so a typo or wrong-buyer mistake is
-    caught before it becomes a permanent signed record, not after.
+    payer name, and the payment method/contact — so a typo or wrong-buyer
+    mistake is caught before it becomes a permanent signed record, not after.
     """
     embed = disnake.Embed(
         title="Confirm Your Details",
@@ -155,13 +184,15 @@ def confirmation_embed(record, *, buyer_label: str) -> disnake.Embed:
         ),
         colour=AGREEMENT_EMBED_COLOUR,
     )
-    embed.add_field(name="Name", value=record["paypal_name"], inline=False)
+    embed.add_field(name="Name", value=record["payer_name"], inline=False)
     embed.add_field(
         name="Discord",
         value=f"{buyer_label} (<@{record['buyer_id']}>, id {record['buyer_id']})",
         inline=False,
     )
-    embed.add_field(name="PayPal Contact", value=record["paypal_contact"], inline=False)
+    embed.add_field(
+        name=f"{record['payment_method']} Contact", value=record["payment_contact"], inline=False
+    )
     return embed
 
 
@@ -232,7 +263,7 @@ def lookup_embed(buyer_id: int, rows) -> disnake.Embed:
         order = f" ({row['order_ref']})" if row["order_ref"] else ""
         lines.append(
             f"**#{row['id']}**{order} — {status}\n"
-            f"PayPal: {row['paypal_name']} ({row['paypal_contact']})"
+            f"{row['payment_method']}: {row['payer_name']} ({row['payment_contact']})"
         )
 
     embed = disnake.Embed(
@@ -247,9 +278,10 @@ def lookup_embed(buyer_id: int, rows) -> disnake.Embed:
 __all__ = [
     "AGREEMENT_EMBED_COLOUR",
     "MAX_ORDER_REF_LENGTH",
-    "MAX_PAYPAL_CONTACT_LENGTH",
-    "MAX_PAYPAL_NAME_LENGTH",
+    "MAX_PAYER_NAME_LENGTH",
+    "MAX_PAYMENT_CONTACT_LENGTH",
     "MAX_VOID_REASON_LENGTH",
+    "PAYMENT_METHODS",
     "VOIDED_EMBED_COLOUR",
     "confirmation_embed",
     "embed_for_record",
@@ -258,8 +290,9 @@ __all__ = [
     "receipt_text",
     "signed_embed",
     "validate_order_ref",
-    "validate_paypal_contact",
-    "validate_paypal_name",
+    "validate_payer_name",
+    "validate_payment_contact",
+    "validate_payment_method",
     "validate_void_reason",
     "voided_embed",
 ]

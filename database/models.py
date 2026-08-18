@@ -258,6 +258,9 @@ CREATE TABLE IF NOT EXISTS base_post_downloads (
 # until the buyer clicks "I Agree" (storage.sign_agreement enforces the NULL -> NOW()
 # transition, not SQL); a signed row is otherwise immutable — voiding only stamps the
 # voided_* columns alongside it, never touches the original signed fields.
+# payment_method + payment_contact are generic (PayPal / Venmo / Wise, ...) rather than
+# PayPal-specific, since payer_name is also just "name on the payment" regardless of
+# processor.
 CREATE_AGREEMENTS = """
 CREATE TABLE IF NOT EXISTS agreements (
     id SERIAL PRIMARY KEY,
@@ -266,8 +269,9 @@ CREATE TABLE IF NOT EXISTS agreements (
     message_id BIGINT UNIQUE,
     buyer_id BIGINT NOT NULL,
     sent_by BIGINT NOT NULL,
-    paypal_name VARCHAR(200) NOT NULL,
-    paypal_contact VARCHAR(320) NOT NULL,
+    payer_name VARCHAR(200) NOT NULL,
+    payment_method VARCHAR(20) NOT NULL DEFAULT 'PayPal',
+    payment_contact VARCHAR(320) NOT NULL,
     order_ref VARCHAR(200),
     agreement_text TEXT NOT NULL,
     signed_at TIMESTAMP,
@@ -278,21 +282,36 @@ CREATE TABLE IF NOT EXISTS agreements (
 );
 """
 
-# paypal_email was renamed to paypal_contact: PayPal accepts a $Cashtag-style
-# @handle as well as an email, so the column (and validation) now accept
-# either. RENAME COLUMN has no IF EXISTS form, and a fresh install's
-# CREATE TABLE above already names the column paypal_contact, so this is
-# guarded to only fire when the old column name is still present.
-MIGRATE_AGREEMENTS_PAYPAL_CONTACT = """
+# paypal_email was renamed to paypal_contact, which is now further renamed (with
+# payer_name) to the processor-agnostic payment_contact/payer_name so Venmo and Wise
+# can be recorded alongside PayPal. RENAME COLUMN has no IF EXISTS form, and a fresh
+# install's CREATE TABLE above already uses the new names, so each rename is guarded to
+# only fire when the old column name is still present. Existing rows predate
+# payment_method entirely (it didn't exist), so ADD COLUMN backfills 'PayPal' for them
+# via DEFAULT — accurate, since PayPal was the only option before this change.
+MIGRATE_AGREEMENTS_PAYMENT_FIELDS = """
 DO $$
 BEGIN
     IF EXISTS (
         SELECT 1 FROM information_schema.columns
         WHERE table_name = 'agreements' AND column_name = 'paypal_email'
     ) THEN
-        ALTER TABLE agreements RENAME COLUMN paypal_email TO paypal_contact;
+        ALTER TABLE agreements RENAME COLUMN paypal_email TO payment_contact;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'agreements' AND column_name = 'paypal_contact'
+    ) THEN
+        ALTER TABLE agreements RENAME COLUMN paypal_contact TO payment_contact;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'agreements' AND column_name = 'paypal_name'
+    ) THEN
+        ALTER TABLE agreements RENAME COLUMN paypal_name TO payer_name;
     END IF;
 END $$;
+ALTER TABLE agreements ADD COLUMN IF NOT EXISTS payment_method VARCHAR(20) NOT NULL DEFAULT 'PayPal';
 """
 
 ALL_TABLES = (
@@ -379,8 +398,8 @@ async def create_tables(pool: asyncpg.Pool) -> None:
 
         logger.info("Creating table agreements if not exists")
         await conn.execute(CREATE_AGREEMENTS)
-        logger.info("Applying agreements paypal_contact column migration if needed")
-        await conn.execute(MIGRATE_AGREEMENTS_PAYPAL_CONTACT)
+        logger.info("Applying agreements payment field migrations if needed")
+        await conn.execute(MIGRATE_AGREEMENTS_PAYMENT_FIELDS)
 
 
 async def drop_tables(pool: asyncpg.Pool) -> None:

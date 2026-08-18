@@ -30,32 +30,51 @@ def _fake_pool(conn) -> MagicMock:
 # --- validation ---------------------------------------------------------------
 
 
-def test_validate_paypal_name_strips_and_accepts() -> None:
-    assert validation.validate_paypal_name("  Jane Doe  ") == "Jane Doe"
+def test_validate_payer_name_strips_and_accepts() -> None:
+    assert validation.validate_payer_name("  Jane Doe  ") == "Jane Doe"
 
 
-def test_validate_paypal_name_rejects_empty() -> None:
+def test_validate_payer_name_rejects_empty() -> None:
     with pytest.raises(PostError):
-        validation.validate_paypal_name("   ")
+        validation.validate_payer_name("   ")
 
 
-def test_validate_paypal_name_rejects_overlong() -> None:
+def test_validate_payer_name_rejects_overlong() -> None:
     with pytest.raises(PostError):
-        validation.validate_paypal_name("a" * (validation.MAX_PAYPAL_NAME_LENGTH + 1))
+        validation.validate_payer_name("a" * (validation.MAX_PAYER_NAME_LENGTH + 1))
 
 
-def test_validate_paypal_contact_accepts_email() -> None:
-    assert validation.validate_paypal_contact(" jane@example.com ") == "jane@example.com"
+def test_validate_payment_method_accepts_known_methods() -> None:
+    for method in validation.PAYMENT_METHODS:
+        assert validation.validate_payment_method(method) == method
 
 
-def test_validate_paypal_contact_accepts_handle() -> None:
-    assert validation.validate_paypal_contact(" @jane-doe1 ") == "@jane-doe1"
+def test_validate_payment_method_rejects_unknown() -> None:
+    with pytest.raises(PostError):
+        validation.validate_payment_method("Zelle")
+
+
+def test_validate_payment_contact_paypal_accepts_email_or_handle() -> None:
+    assert validation.validate_payment_contact("PayPal", " jane@example.com ") == "jane@example.com"
+    assert validation.validate_payment_contact("PayPal", " @jane-doe1 ") == "@jane-doe1"
+
+
+def test_validate_payment_contact_venmo_requires_handle() -> None:
+    assert validation.validate_payment_contact("Venmo", "@jane-doe") == "@jane-doe"
+    with pytest.raises(PostError):
+        validation.validate_payment_contact("Venmo", "jane@example.com")
+
+
+def test_validate_payment_contact_wise_requires_email() -> None:
+    assert validation.validate_payment_contact("Wise", "jane@example.com") == "jane@example.com"
+    with pytest.raises(PostError):
+        validation.validate_payment_contact("Wise", "@jane-doe")
 
 
 @pytest.mark.parametrize("bad", ["", "   ", "not-an-email", "jane@", "jane@example", "@", "no-at-sign"])
-def test_validate_paypal_contact_rejects_junk(bad: str) -> None:
+def test_validate_payment_contact_rejects_junk_for_paypal(bad: str) -> None:
     with pytest.raises(PostError):
-        validation.validate_paypal_contact(bad)
+        validation.validate_payment_contact("PayPal", bad)
 
 
 def test_validate_order_ref_blank_becomes_none() -> None:
@@ -173,8 +192,9 @@ def test_lookup_embed_lists_status_per_row() -> None:
             "signed_at": when,
             "voided_at": None,
             "void_reason": None,
-            "paypal_name": "Jane Doe",
-            "paypal_contact": "jane@example.com",
+            "payer_name": "Jane Doe",
+            "payment_method": "PayPal",
+            "payment_contact": "jane@example.com",
         },
         {
             "id": 2,
@@ -182,8 +202,9 @@ def test_lookup_embed_lists_status_per_row() -> None:
             "signed_at": None,
             "voided_at": None,
             "void_reason": None,
-            "paypal_name": "John Roe",
-            "paypal_contact": "@john-roe",
+            "payer_name": "John Roe",
+            "payment_method": "Venmo",
+            "payment_contact": "@john-roe",
         },
     ]
     embed = validation.lookup_embed(99, rows)
@@ -202,8 +223,9 @@ def _signed_record(**overrides):
         "id": 14,
         "buyer_id": 111,
         "sent_by": 222,
-        "paypal_name": "Jane Doe",
-        "paypal_contact": "jane@example.com",
+        "payer_name": "Jane Doe",
+        "payment_method": "PayPal",
+        "payment_contact": "jane@example.com",
         "order_ref": "#1042",
         "agreement_text": "TERMS...",
         "signed_at": datetime(2026, 8, 17, 14, 32, 1, tzinfo=timezone.utc),
@@ -221,8 +243,9 @@ def test_receipt_text_includes_core_fields() -> None:
     )
     assert "Agreement ID: #14" in text
     assert "Buyer: janedoe#0 (discord id 111)" in text
-    assert "PayPal Name: Jane Doe" in text
-    assert "PayPal Contact: jane@example.com" in text
+    assert "Payer Name: Jane Doe" in text
+    assert "Payment Method: PayPal" in text
+    assert "Payment Contact: jane@example.com" in text
     assert "Order Ref: #1042" in text
     assert "Sent By: mod#0 (discord id 222)" in text
     assert "Status: SIGNED" in text
@@ -281,15 +304,16 @@ async def test_create_agreement_inserts_all_fields() -> None:
         channel_id=2,
         buyer_id=3,
         sent_by=4,
-        paypal_name="Jane Doe",
-        paypal_contact="jane@example.com",
+        payer_name="Jane Doe",
+        payment_method="PayPal",
+        payment_contact="jane@example.com",
         order_ref="#1",
         agreement_text="terms",
     )
 
     sql, *params = conn.fetchrow.await_args.args
     assert "INSERT INTO agreements" in sql
-    assert params == [1, 2, 3, 4, "Jane Doe", "jane@example.com", "#1", "terms"]
+    assert params == [1, 2, 3, 4, "Jane Doe", "PayPal", "jane@example.com", "#1", "terms"]
 
 
 @pytest.mark.asyncio
@@ -511,8 +535,9 @@ def test_agree_click_opens_confirmation_panel_not_a_sign() -> None:
             "buyer_id": 42,
             "voided_at": None,
             "signed_at": None,
-            "paypal_name": "Jane Doe",
-            "paypal_contact": "jane@example.com",
+            "payer_name": "Jane Doe",
+            "payment_method": "PayPal",
+            "payment_contact": "jane@example.com",
             "order_ref": None,
         }
         with patch.object(ac.storage, "get_agreement", AsyncMock(return_value=record)), \

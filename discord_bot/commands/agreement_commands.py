@@ -24,14 +24,16 @@ from disnake.ext import commands
 from modules.agreements import storage
 from modules.agreements.document import AGREEMENT_FULL_TEXT, AGREEMENT_PDF_PATH
 from modules.agreements.validation import (
+    PAYMENT_METHODS,
     confirmation_embed,
     lookup_embed,
     pending_embed,
     receipt_text,
     signed_embed,
     validate_order_ref,
-    validate_paypal_contact,
-    validate_paypal_name,
+    validate_payer_name,
+    validate_payment_contact,
+    validate_payment_method,
     validate_void_reason,
     voided_embed,
 )
@@ -209,17 +211,21 @@ class AgreementCommands(commands.Cog):
         self,
         inter: disnake.ApplicationCommandInteraction,
         member: disnake.Member = commands.Param(description="The buyer."),
-        paypal_name: str = commands.Param(description="Full name on the PayPal payment."),
-        paypal_contact: str = commands.Param(
-            description="Email or @handle on the PayPal payment."
+        payer_name: str = commands.Param(description="Full name on the payment."),
+        payment_method: str = commands.Param(
+            choices=PAYMENT_METHODS, description="How they paid."
+        ),
+        payment_contact: str = commands.Param(
+            description="Email or @handle for the chosen payment method."
         ),
         order_ref: str = commands.Param(default=None, description="Optional order reference."),
     ) -> None:
         await inter.response.defer(ephemeral=True)
 
         try:
-            clean_name = validate_paypal_name(paypal_name)
-            clean_contact = validate_paypal_contact(paypal_contact)
+            clean_method = validate_payment_method(payment_method)
+            clean_name = validate_payer_name(payer_name)
+            clean_contact = validate_payment_contact(clean_method, payment_contact)
             clean_ref = validate_order_ref(order_ref)
             validate_target(inter.channel, inter.guild)
         except PostError as exc:
@@ -240,8 +246,9 @@ class AgreementCommands(commands.Cog):
             channel_id=inter.channel.id,
             buyer_id=member.id,
             sent_by=inter.author.id,
-            paypal_name=clean_name,
-            paypal_contact=clean_contact,
+            payer_name=clean_name,
+            payment_method=clean_method,
+            payment_contact=clean_contact,
             order_ref=clean_ref,
             agreement_text=AGREEMENT_FULL_TEXT,
         )
