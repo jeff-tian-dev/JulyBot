@@ -140,6 +140,31 @@ def receipt_text(
     return "\n".join(lines)
 
 
+def confirmation_embed(record, *, buyer_label: str) -> disnake.Embed:
+    """The "please confirm your details" panel shown before a buyer can sign.
+
+    Surfaces exactly what a mod typed in — the buyer's Discord identity, the
+    PayPal name, and the PayPal contact — so a typo or wrong-buyer mistake is
+    caught before it becomes a permanent signed record, not after.
+    """
+    embed = disnake.Embed(
+        title="Confirm Your Details",
+        description=(
+            "Please confirm the details below are correct before signing the "
+            "purchase agreement."
+        ),
+        colour=AGREEMENT_EMBED_COLOUR,
+    )
+    embed.add_field(name="Name", value=record["paypal_name"], inline=False)
+    embed.add_field(
+        name="Discord",
+        value=f"{buyer_label} (<@{record['buyer_id']}>, id {record['buyer_id']})",
+        inline=False,
+    )
+    embed.add_field(name="PayPal Contact", value=record["paypal_contact"], inline=False)
+    return embed
+
+
 def pending_embed(*, buyer_id: int, order_ref: str | None) -> disnake.Embed:
     """The embed posted alongside the PDF attachment and the I Agree button."""
     embed = disnake.Embed(
@@ -226,6 +251,7 @@ __all__ = [
     "MAX_PAYPAL_NAME_LENGTH",
     "MAX_VOID_REASON_LENGTH",
     "VOIDED_EMBED_COLOUR",
+    "confirmation_embed",
     "embed_for_record",
     "lookup_embed",
     "pending_embed",

@@ -467,6 +467,123 @@ def test_voided_agreement_cannot_be_signed() -> None:
     asyncio.run(check())
 
 
+def test_already_signed_agreement_cannot_reopen_confirmation() -> None:
+    import asyncio
+
+    from discord_bot.commands import agreement_commands as ac
+
+    async def check():
+        view = ac.AgreementView(1)
+        inter = MagicMock()
+        inter.data.custom_id = "agreement:sign:1"
+        inter.author.id = 42
+        inter.bot.pool = MagicMock()
+        inter.response.send_message = AsyncMock()
+
+        record = {"id": 1, "buyer_id": 42, "voided_at": None, "signed_at": "already"}
+        with patch.object(ac.storage, "get_agreement", AsyncMock(return_value=record)):
+            await view._on_sign(inter)
+
+        inter.response.send_message.assert_awaited_once()
+        assert "already been signed" in inter.response.send_message.await_args.args[0]
+
+    asyncio.run(check())
+
+
+def test_agree_click_opens_confirmation_panel_not_a_sign() -> None:
+    """Clicking I Agree must NOT call sign_agreement directly — it shows a
+    confirmation panel first so the buyer can catch a mistyped name/contact."""
+    import asyncio
+
+    from discord_bot.commands import agreement_commands as ac
+
+    async def check():
+        view = ac.AgreementView(1)
+        inter = MagicMock()
+        inter.data.custom_id = "agreement:sign:1"
+        inter.author.id = 42
+        inter.author.__str__ = lambda self: "janedoe"
+        inter.bot.pool = MagicMock()
+        inter.response.send_message = AsyncMock()
+
+        record = {
+            "id": 1,
+            "buyer_id": 42,
+            "voided_at": None,
+            "signed_at": None,
+            "paypal_name": "Jane Doe",
+            "paypal_contact": "jane@example.com",
+            "order_ref": None,
+        }
+        with patch.object(ac.storage, "get_agreement", AsyncMock(return_value=record)), \
+             patch.object(ac.storage, "sign_agreement", AsyncMock()) as sign_mock:
+            await view._on_sign(inter)
+            sign_mock.assert_not_called()
+
+        inter.response.send_message.assert_awaited_once()
+        kwargs = inter.response.send_message.await_args.kwargs
+        assert isinstance(kwargs["view"], ac.ConfirmSignView)
+        assert kwargs["ephemeral"] is True
+        assert "Jane Doe" in kwargs["embed"].fields[0].value
+
+    asyncio.run(check())
+
+
+def test_confirm_button_signs_and_only_then_records() -> None:
+    import asyncio
+
+    from discord_bot.commands import agreement_commands as ac
+
+    async def check():
+        view = ac.ConfirmSignView(1)
+        inter = MagicMock()
+        inter.author.id = 42
+        inter.bot.pool = MagicMock()
+        inter.bot.get_channel = MagicMock(return_value=None)  # skip the public-message refresh
+        inter.response.edit_message = AsyncMock()
+
+        record = {"id": 1, "buyer_id": 42, "voided_at": None}
+        signed = {
+            "id": 1,
+            "buyer_id": 42,
+            "channel_id": 555,
+            "message_id": None,
+            "order_ref": None,
+            "signed_at": "now",
+        }
+        with patch.object(ac.storage, "get_agreement", AsyncMock(return_value=record)), \
+             patch.object(ac.storage, "sign_agreement", AsyncMock(return_value=signed)) as sign_mock:
+            await view._on_confirm(inter)
+            sign_mock.assert_awaited_once_with(inter.bot.pool, 1, 42)
+
+        inter.response.edit_message.assert_awaited_once()
+        assert "signed" in inter.response.edit_message.await_args.kwargs["content"].lower()
+
+    asyncio.run(check())
+
+
+def test_confirm_button_is_a_noop_on_double_click() -> None:
+    import asyncio
+
+    from discord_bot.commands import agreement_commands as ac
+
+    async def check():
+        view = ac.ConfirmSignView(1)
+        inter = MagicMock()
+        inter.author.id = 42
+        inter.bot.pool = MagicMock()
+        inter.response.edit_message = AsyncMock()
+
+        record = {"id": 1, "buyer_id": 42, "voided_at": None}
+        with patch.object(ac.storage, "get_agreement", AsyncMock(return_value=record)), \
+             patch.object(ac.storage, "sign_agreement", AsyncMock(return_value=None)):
+            await view._on_confirm(inter)
+
+        assert "already been signed" in inter.response.edit_message.await_args.kwargs["content"]
+
+    asyncio.run(check())
+
+
 # --- receipt command ---------------------------------------------------------
 
 

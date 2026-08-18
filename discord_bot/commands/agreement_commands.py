@@ -1,10 +1,13 @@
 """/agreement — digital signature on paid purchases.
 
 Posts the purchase agreement (a PDF attachment + summary embed) to a buyer with
-an "I Agree" button. Clicking it permanently records that Discord user's
-acceptance alongside the PayPal name/email a moderator typed in, for later
-lookup if a PayPal dispute needs a response. Not a technical block on PayPal
-disputes — an audit trail to cite when responding to one.
+an "I Agree" button. Clicking it does NOT sign immediately — it opens an
+ephemeral confirmation panel showing exactly what a moderator typed in (name,
+Discord identity, PayPal contact), so a typo or wrong-buyer mistake is caught
+before it becomes a permanent record rather than after. Only confirming there
+("I Confirm This Is Correct") calls sign_agreement. The resulting record is
+kept for later lookup if a PayPal dispute needs a response — not a technical
+block on PayPal disputes, an audit trail to cite when responding to one.
 
 The button is a *persistent* view: custom_ids carry the agreements row id and
 the view has no timeout, so it keeps working after a bot restart (see
@@ -21,6 +24,7 @@ from disnake.ext import commands
 from modules.agreements import storage
 from modules.agreements.document import AGREEMENT_FULL_TEXT, AGREEMENT_PDF_PATH
 from modules.agreements.validation import (
+    confirmation_embed,
     lookup_embed,
     pending_embed,
     receipt_text,
@@ -77,6 +81,9 @@ class AgreementView(disnake.ui.View):
             return self.agreement_id
 
     async def _on_sign(self, inter: disnake.MessageInteraction) -> None:
+        """The I Agree click doesn't sign yet — it opens an ephemeral
+        confirmation panel so the buyer can catch a wrong name/contact before
+        it becomes a permanent record."""
         agreement_id = self._id_from(inter)
         record = await storage.get_agreement(inter.bot.pool, agreement_id)
         if record is None:
@@ -94,21 +101,91 @@ class AgreementView(disnake.ui.View):
                 "This agreement isn't addressed to you.", ephemeral=True
             )
             return
-
-        signed = await storage.sign_agreement(inter.bot.pool, agreement_id, inter.author.id)
-        if signed is None:
+        if record["signed_at"] is not None:
             await inter.response.send_message(
                 "This agreement has already been signed.", ephemeral=True
             )
             return
 
-        view = AgreementView(agreement_id, signed=True)
-        await inter.response.edit_message(embed=signed_embed(signed), view=view)
-        await inter.followup.send(
-            "You've signed the agreement. Thanks!", ephemeral=True
+        await inter.response.send_message(
+            embed=confirmation_embed(record, buyer_label=str(inter.author)),
+            view=ConfirmSignView(agreement_id),
+            ephemeral=True,
         )
+
+
+class ConfirmSignView(disnake.ui.View):
+    """The ephemeral "I Confirm This Is Correct" step shown after "I Agree".
+
+    Not persistent — it's a short-lived confirmation prompt tied to the
+    interaction that opened it, unlike AgreementView's public button.
+    """
+
+    def __init__(self, agreement_id: int) -> None:
+        super().__init__(timeout=600)
+        self.agreement_id = agreement_id
+
+        confirm = disnake.ui.Button(
+            label="I Confirm This Is Correct",
+            emoji="✅",
+            style=disnake.ButtonStyle.success,
+            custom_id=f"{CUSTOM_ID_PREFIX}:confirm:{agreement_id}",
+        )
+        confirm.callback = self._on_confirm
+        self.add_item(confirm)
+
+    async def _on_confirm(self, inter: disnake.MessageInteraction) -> None:
+        record = await storage.get_agreement(inter.bot.pool, self.agreement_id)
+        if record is None:
+            await inter.response.edit_message(
+                content="This agreement's data is gone — it may have been deleted.",
+                embed=None,
+                view=None,
+            )
+            return
+        if record["voided_at"] is not None:
+            await inter.response.edit_message(
+                content="This agreement has been voided and can no longer be signed.",
+                embed=None,
+                view=None,
+            )
+            return
+        if inter.author.id != record["buyer_id"]:
+            # Can't realistically happen (the panel is ephemeral to the buyer
+            # who opened it), but never trust client-side scoping alone.
+            await inter.response.send_message(
+                "This agreement isn't addressed to you.", ephemeral=True
+            )
+            return
+
+        signed = await storage.sign_agreement(inter.bot.pool, self.agreement_id, inter.author.id)
+        if signed is None:
+            await inter.response.edit_message(
+                content="This agreement has already been signed.", embed=None, view=None
+            )
+            return
+
+        await inter.response.edit_message(
+            content="You've signed the agreement. Thanks!", embed=None, view=None
+        )
+
+        # Reflect the signature on the original public message too, so anyone
+        # looking at the channel can see it's been signed. Best-effort: the
+        # buyer's confirmation above is already recorded either way.
+        try:
+            channel = inter.bot.get_channel(signed["channel_id"])
+            if channel is not None and signed["message_id"] is not None:
+                message = await channel.fetch_message(signed["message_id"])
+                await message.edit(
+                    embed=signed_embed(signed), view=AgreementView(self.agreement_id, signed=True)
+                )
+        except disnake.HTTPException:
+            logger.warning(
+                "Couldn't refresh the public message for agreement id=%s", self.agreement_id
+            )
+
         logger.info(
-            "Agreement id=%s signed by buyer_id=%s", agreement_id, inter.author.id
+            "Agreement id=%s signed by buyer_id=%s", self.agreement_id, inter.author.id
         )
 
 
