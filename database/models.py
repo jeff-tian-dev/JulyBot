@@ -252,7 +252,34 @@ CREATE TABLE IF NOT EXISTS base_post_downloads (
 );
 """
 
+# A purchase agreement sent via /agreement send. `agreement_text` is copied from the
+# module's constant AT SEND TIME (not a pointer to it), so a later wording change never
+# retroactively alters what a past buyer is shown to have agreed to. `signed_at` is NULL
+# until the buyer clicks "I Agree" (storage.sign_agreement enforces the NULL -> NOW()
+# transition, not SQL); a signed row is otherwise immutable — voiding only stamps the
+# voided_* columns alongside it, never touches the original signed fields.
+CREATE_AGREEMENTS = """
+CREATE TABLE IF NOT EXISTS agreements (
+    id SERIAL PRIMARY KEY,
+    guild_id BIGINT NOT NULL,
+    channel_id BIGINT NOT NULL,
+    message_id BIGINT UNIQUE,
+    buyer_id BIGINT NOT NULL,
+    sent_by BIGINT NOT NULL,
+    paypal_name VARCHAR(200) NOT NULL,
+    paypal_email VARCHAR(320) NOT NULL,
+    order_ref VARCHAR(200),
+    agreement_text TEXT NOT NULL,
+    signed_at TIMESTAMP,
+    voided_at TIMESTAMP,
+    voided_by BIGINT,
+    void_reason VARCHAR(512),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+"""
+
 ALL_TABLES = (
+    "agreements",
     "base_post_downloads",
     "base_posts",
     "seen_tweets",
@@ -332,6 +359,9 @@ async def create_tables(pool: asyncpg.Pool) -> None:
         await conn.execute(ALTER_BASE_POSTS_STATS_ADMIN_ONLY)
         logger.info("Creating table base_post_downloads if not exists")
         await conn.execute(CREATE_BASE_POST_DOWNLOADS)
+
+        logger.info("Creating table agreements if not exists")
+        await conn.execute(CREATE_AGREEMENTS)
 
 
 async def drop_tables(pool: asyncpg.Pool) -> None:

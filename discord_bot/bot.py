@@ -12,7 +12,12 @@ import disnake
 from disnake.ext import commands
 
 from config.settings import settings
-from discord_bot.commands.base_post_commands import register_persistent_views
+from discord_bot.commands.base_post_commands import (
+    register_persistent_views as register_base_post_views,
+)
+from discord_bot.commands.agreement_commands import (
+    register_persistent_views as register_agreement_views,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +30,7 @@ COG_MODULES = (
     "discord_bot.commands.roster_commands",
     "discord_bot.commands.post_commands",
     "discord_bot.commands.base_post_commands",
+    "discord_bot.commands.agreement_commands",
 )
 
 # Disabled until wired up (still under development):
@@ -62,7 +68,8 @@ def create_bot(pool: asyncpg.Pool) -> commands.InteractionBot:
         logger.info("Discord bot ready as %s (id=%s)", bot.user, getattr(bot.user, "id", None))
         if not views_restored:
             views_restored = True
-            await register_persistent_views(bot)
+            await register_base_post_views(bot)
+            await register_agreement_views(bot)
 
     for module in COG_MODULES:
         bot.load_extension(module)

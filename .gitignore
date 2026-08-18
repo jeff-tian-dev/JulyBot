@@ -7,6 +7,9 @@ data/*
 !data/bases/
 data/bases/*
 !data/bases/.gitkeep
+!data/agreements/
+data/agreements/*
+!data/agreements/terms_and_conditions.pdf
 logs/
 *.egg-info/
 dist/
