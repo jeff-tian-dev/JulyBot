@@ -44,14 +44,18 @@ def test_validate_paypal_name_rejects_overlong() -> None:
         validation.validate_paypal_name("a" * (validation.MAX_PAYPAL_NAME_LENGTH + 1))
 
 
-def test_validate_paypal_email_accepts_valid() -> None:
-    assert validation.validate_paypal_email(" jane@example.com ") == "jane@example.com"
+def test_validate_paypal_contact_accepts_email() -> None:
+    assert validation.validate_paypal_contact(" jane@example.com ") == "jane@example.com"
 
 
-@pytest.mark.parametrize("bad", ["", "   ", "not-an-email", "jane@", "@example.com", "jane@example"])
-def test_validate_paypal_email_rejects_junk(bad: str) -> None:
+def test_validate_paypal_contact_accepts_handle() -> None:
+    assert validation.validate_paypal_contact(" @jane-doe1 ") == "@jane-doe1"
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "not-an-email", "jane@", "jane@example", "@", "no-at-sign"])
+def test_validate_paypal_contact_rejects_junk(bad: str) -> None:
     with pytest.raises(PostError):
-        validation.validate_paypal_email(bad)
+        validation.validate_paypal_contact(bad)
 
 
 def test_validate_order_ref_blank_becomes_none() -> None:
@@ -170,7 +174,7 @@ def test_lookup_embed_lists_status_per_row() -> None:
             "voided_at": None,
             "void_reason": None,
             "paypal_name": "Jane Doe",
-            "paypal_email": "jane@example.com",
+            "paypal_contact": "jane@example.com",
         },
         {
             "id": 2,
@@ -179,7 +183,7 @@ def test_lookup_embed_lists_status_per_row() -> None:
             "voided_at": None,
             "void_reason": None,
             "paypal_name": "John Roe",
-            "paypal_email": "john@example.com",
+            "paypal_contact": "@john-roe",
         },
     ]
     embed = validation.lookup_embed(99, rows)
@@ -206,7 +210,7 @@ async def test_create_agreement_inserts_all_fields() -> None:
         buyer_id=3,
         sent_by=4,
         paypal_name="Jane Doe",
-        paypal_email="jane@example.com",
+        paypal_contact="jane@example.com",
         order_ref="#1",
         agreement_text="terms",
     )

@@ -15,7 +15,7 @@ from modules.announce.poster import PostError
 from modules.agreements.document import AGREEMENT_SUMMARY
 
 MAX_PAYPAL_NAME_LENGTH = 200
-MAX_PAYPAL_EMAIL_LENGTH = 320
+MAX_PAYPAL_CONTACT_LENGTH = 320
 MAX_ORDER_REF_LENGTH = 200
 MAX_VOID_REASON_LENGTH = 512
 
@@ -23,6 +23,9 @@ MAX_VOID_REASON_LENGTH = 512
 # moderator can still enter a wrong-but-well-formed email; that's an accepted
 # limitation rather than something worth over-engineering around.
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+# PayPal also identifies accounts by a $Cashtag-style @handle (e.g. @jane-doe1),
+# separate from an email address — accept either.
+_PAYPAL_HANDLE_RE = re.compile(r"^@[A-Za-z0-9_.-]{1,50}$")
 
 AGREEMENT_EMBED_COLOUR = 0x2ECC71
 VOIDED_EMBED_COLOUR = 0x95A5A6
@@ -37,14 +40,20 @@ def validate_paypal_name(name: str) -> str:
     return cleaned
 
 
-def validate_paypal_email(email: str) -> str:
-    cleaned = (email or "").strip()
+def validate_paypal_contact(contact: str) -> str:
+    """Accept either a PayPal email address or a $Cashtag-style @handle."""
+    cleaned = (contact or "").strip()
     if not cleaned:
-        raise PostError("The PayPal email can't be empty.")
-    if len(cleaned) > MAX_PAYPAL_EMAIL_LENGTH:
-        raise PostError(f"The PayPal email is limited to {MAX_PAYPAL_EMAIL_LENGTH} characters.")
-    if not _EMAIL_RE.match(cleaned):
-        raise PostError(f"`{cleaned}` doesn't look like a valid email address.")
+        raise PostError("The PayPal email or @ can't be empty.")
+    if len(cleaned) > MAX_PAYPAL_CONTACT_LENGTH:
+        raise PostError(
+            f"The PayPal email or @ is limited to {MAX_PAYPAL_CONTACT_LENGTH} characters."
+        )
+    if not (_EMAIL_RE.match(cleaned) or _PAYPAL_HANDLE_RE.match(cleaned)):
+        raise PostError(
+            f"`{cleaned}` doesn't look like a valid PayPal email or @handle "
+            "(e.g. jane@example.com or @jane-doe)."
+        )
     return cleaned
 
 
@@ -146,7 +155,7 @@ def lookup_embed(buyer_id: int, rows) -> disnake.Embed:
         order = f" ({row['order_ref']})" if row["order_ref"] else ""
         lines.append(
             f"**#{row['id']}**{order} — {status}\n"
-            f"PayPal: {row['paypal_name']} <{row['paypal_email']}>"
+            f"PayPal: {row['paypal_name']} ({row['paypal_contact']})"
         )
 
     embed = disnake.Embed(
@@ -161,7 +170,7 @@ def lookup_embed(buyer_id: int, rows) -> disnake.Embed:
 __all__ = [
     "AGREEMENT_EMBED_COLOUR",
     "MAX_ORDER_REF_LENGTH",
-    "MAX_PAYPAL_EMAIL_LENGTH",
+    "MAX_PAYPAL_CONTACT_LENGTH",
     "MAX_PAYPAL_NAME_LENGTH",
     "MAX_VOID_REASON_LENGTH",
     "VOIDED_EMBED_COLOUR",
@@ -170,7 +179,7 @@ __all__ = [
     "pending_embed",
     "signed_embed",
     "validate_order_ref",
-    "validate_paypal_email",
+    "validate_paypal_contact",
     "validate_paypal_name",
     "validate_void_reason",
     "voided_embed",

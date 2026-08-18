@@ -267,7 +267,7 @@ CREATE TABLE IF NOT EXISTS agreements (
     buyer_id BIGINT NOT NULL,
     sent_by BIGINT NOT NULL,
     paypal_name VARCHAR(200) NOT NULL,
-    paypal_email VARCHAR(320) NOT NULL,
+    paypal_contact VARCHAR(320) NOT NULL,
     order_ref VARCHAR(200),
     agreement_text TEXT NOT NULL,
     signed_at TIMESTAMP,
@@ -276,6 +276,23 @@ CREATE TABLE IF NOT EXISTS agreements (
     void_reason VARCHAR(512),
     created_at TIMESTAMP DEFAULT NOW()
 );
+"""
+
+# paypal_email was renamed to paypal_contact: PayPal accepts a $Cashtag-style
+# @handle as well as an email, so the column (and validation) now accept
+# either. RENAME COLUMN has no IF EXISTS form, and a fresh install's
+# CREATE TABLE above already names the column paypal_contact, so this is
+# guarded to only fire when the old column name is still present.
+MIGRATE_AGREEMENTS_PAYPAL_CONTACT = """
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'agreements' AND column_name = 'paypal_email'
+    ) THEN
+        ALTER TABLE agreements RENAME COLUMN paypal_email TO paypal_contact;
+    END IF;
+END $$;
 """
 
 ALL_TABLES = (
@@ -362,6 +379,8 @@ async def create_tables(pool: asyncpg.Pool) -> None:
 
         logger.info("Creating table agreements if not exists")
         await conn.execute(CREATE_AGREEMENTS)
+        logger.info("Applying agreements paypal_contact column migration if needed")
+        await conn.execute(MIGRATE_AGREEMENTS_PAYPAL_CONTACT)
 
 
 async def drop_tables(pool: asyncpg.Pool) -> None:

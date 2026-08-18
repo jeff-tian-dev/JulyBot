@@ -24,7 +24,7 @@ from modules.agreements.validation import (
     pending_embed,
     signed_embed,
     validate_order_ref,
-    validate_paypal_email,
+    validate_paypal_contact,
     validate_paypal_name,
     validate_void_reason,
     voided_embed,
@@ -131,14 +131,16 @@ class AgreementCommands(commands.Cog):
         inter: disnake.ApplicationCommandInteraction,
         member: disnake.Member = commands.Param(description="The buyer."),
         paypal_name: str = commands.Param(description="Full name on the PayPal payment."),
-        paypal_email: str = commands.Param(description="Email on the PayPal payment."),
+        paypal_contact: str = commands.Param(
+            description="Email or @handle on the PayPal payment."
+        ),
         order_ref: str = commands.Param(default=None, description="Optional order reference."),
     ) -> None:
         await inter.response.defer(ephemeral=True)
 
         try:
             clean_name = validate_paypal_name(paypal_name)
-            clean_email = validate_paypal_email(paypal_email)
+            clean_contact = validate_paypal_contact(paypal_contact)
             clean_ref = validate_order_ref(order_ref)
             validate_target(inter.channel, inter.guild)
         except PostError as exc:
@@ -160,7 +162,7 @@ class AgreementCommands(commands.Cog):
             buyer_id=member.id,
             sent_by=inter.author.id,
             paypal_name=clean_name,
-            paypal_email=clean_email,
+            paypal_contact=clean_contact,
             order_ref=clean_ref,
             agreement_text=AGREEMENT_FULL_TEXT,
         )

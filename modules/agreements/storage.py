@@ -20,7 +20,7 @@ async def create_agreement(
     buyer_id: int,
     sent_by: int,
     paypal_name: str,
-    paypal_email: str,
+    paypal_contact: str,
     order_ref: str | None,
     agreement_text: str,
 ) -> asyncpg.Record:
@@ -30,7 +30,7 @@ async def create_agreement(
             """
             INSERT INTO agreements (
                 guild_id, channel_id, buyer_id, sent_by,
-                paypal_name, paypal_email, order_ref, agreement_text
+                paypal_name, paypal_contact, order_ref, agreement_text
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING *;
@@ -40,7 +40,7 @@ async def create_agreement(
             buyer_id,
             sent_by,
             paypal_name,
-            paypal_email,
+            paypal_contact,
             order_ref,
             agreement_text,
         )
