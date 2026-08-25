@@ -1,6 +1,6 @@
 # JulyBot — Clash of Clans Discord Bot
 
-A Discord bot for Clash of Clans clans, built around eight independent modules:
+A Discord bot for Clash of Clans clans, built around nine independent modules:
 
 - **Account linker** — verifies a Discord user owns a given CoC account using the in-game API token flow, and stores the link. Supports multiple accounts (alts) per Discord user.
 - **Legend tracker** — polls the official Clash of Clans API on a schedule, stores daily snapshots of every linked player's legend league stats, and computes day-over-day diffs.
@@ -10,6 +10,7 @@ A Discord bot for Clash of Clans clans, built around eight independent modules:
 - **YouTube feed tracker** — polls YouTube RSS feeds via `feedparser` and posts when a watched channel uploads a new video.
 - **Moderation** — admin-only `/kick`, `/ban`, `/unban` slash commands with pre-flight validation, public taunt messages, and an audit log embed to a mod-log channel.
 - **Roster** — admin-managed named groups of players (by Discord user or raw CoC tag). Optionally *watch* a roster to get alerts when a member leaves or rejoins the clan family (`COC_FAMILY_CLAN_TAGS`) and to track how long each member has been out.
+- **Ranked tracker** — looks up a player's current Ranked Battles weekly tournament group (`/group`) and renders a refreshable dashboard of defenses received this week, with no stored history — everything is fetched live from the CoC API on each refresh.
 
 The Discord layer (`disnake` Cogs) is a thin shim. Each module is a plain Python package, callable and testable without a running bot.
 
@@ -72,12 +73,15 @@ JulyBot/
 |   |   |-- validation.py     # pre-flight target checks + ModerationError
 |   |   |-- messages.py       # public taunt quips
 |   |   `-- logging.py        # mod-log channel embed
-|   `-- roster/
-|       |-- storage.py        # roster CRUD, membership, clan-membership state
-|       `-- watcher.py        # clan-watch poller: leave/rejoin alerts + absence
+|   |-- roster/
+|   |   |-- storage.py        # roster CRUD, membership, clan-membership state
+|   |   `-- watcher.py        # clan-watch poller: leave/rejoin alerts + absence
+|   `-- ranked_tracker/
+|       |-- poller.py         # CoC API client for /players and /leaguegroup
+|       `-- group.py          # group resolution, defense histogram, embed rendering
 |-- discord_bot/
 |   |-- bot.py                # create_bot() — InteractionBot factory
-|   `-- commands/             # one Cog per module (account, x, youtube, moderation, roster, + stub legend/base_finder/ping)
+|   `-- commands/             # one Cog per module (account, x, youtube, moderation, roster, post, base_post, agreement, ranked, + stub legend/base_finder/ping)
 |-- tests/
 |   |-- conftest.py           # stubs env vars before project imports
 |   |-- test_account_linker.py
@@ -223,7 +227,7 @@ Tests mock `asyncpg.Pool` and patch `aiohttp` calls — no Postgres or network a
 
 ## Slash commands
 
-Five Cogs are loaded today (see `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py)): **account, x, youtube, moderation, roster**. The legend, base_finder, and ping Cogs exist but are still stubs and are commented out of the load list.
+The Cogs listed in `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py) are loaded today: **x, youtube, moderation, account, roster, post, base_post, agreement, ranked**. The legend, base_finder, and ping Cogs exist but are still stubs and are commented out of the load list.
 
 | Command                          | Module             | State        |
 | -------------------------------- | ------------------ | ------------ |
@@ -252,6 +256,7 @@ Five Cogs are loaded today (see `COG_MODULES` in [discord_bot/bot.py](discord_bo
 | `/unban <user_id> [reason]`      | moderation (admin) | live         |
 | `/purgeword <member> <word>`     | moderation (admin) | live         |
 | `/post <image> <channel> [text] [ping_role]` | announce (admin) | live |
+| `/group <player_tag>`            | ranked_tracker     | live         |
 | `/legend`                        | legend_tracker     | stub, not loaded |
 | `/legend_history <days>`         | legend_tracker     | stub, not loaded |
 | `/leaderboard`                   | legend_tracker     | stub, not loaded |
@@ -267,7 +272,7 @@ Five Cogs are loaded today (see `COG_MODULES` in [discord_bot/bot.py](discord_bo
 
 Module logic is implemented end-to-end across all packages. The wiring gap is on the Discord side:
 
-- **Wired and live:** account linker, X monitor, YouTube feed tracker, moderation, roster, and announce (`/post`) Cogs delegate to their module functions.
+- **Wired and live:** account linker, X monitor, YouTube feed tracker, moderation, roster, announce (`/post`, `/postbase`), agreement, and ranked tracker (`/group`) Cogs delegate to their module functions.
 - **Stubs, not loaded:** the legend, base_finder, and ping Cogs still return placeholder text and are commented out of `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py). Their underlying module functions and scheduler jobs are implemented — only the Cog replies are stubbed.
 - The legend, base-finder, and YouTube scheduler jobs run unconditionally; the X poll job is registered only when `X_COOKIES` is set, and the clan-watch job only when a clan tag (`COC_FAMILY_CLAN_TAGS` or `COC_CLAN_TAG`) is set.
 - `modules/base_finder/detector.py` — CV thresholds are placeholders, marked `NOTE FOR CV ENGINEER`. Tune against real VOD frames.
