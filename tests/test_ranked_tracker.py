@@ -1,11 +1,32 @@
 """Unit tests for modules.ranked_tracker."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from modules.ranked_tracker import group, poller
+
+
+class _FakeResponse:
+    def __init__(self, status: int, body: str) -> None:
+        self.status = status
+        self._body = body
+
+    async def text(self) -> str:
+        return self._body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+class _FakeSession:
+    def __init__(self, response: _FakeResponse) -> None:
+        self._response = response
+        self.get = MagicMock(return_value=response)
 
 
 def _member(tag: str, wins: int = 0, losses: int = 0) -> dict:
@@ -82,8 +103,33 @@ async def test_fetch_group_failure_surfaces_status_and_body() -> None:
     error = poller.LeagueGroupFetchError(404, '{"reason":"notFound"}')
     with patch.object(poller, "get_league_group", AsyncMock(side_effect=error)):
         with pytest.raises(group.RankedGroupError, match="HTTP 404") as excinfo:
-            await group.fetch_group("#GROUP1", 2026008)
+            await group.fetch_group("#GROUP1", 2026008, "#2PP0JCCL")
     assert "notFound" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_get_league_group_includes_player_tag_query_param() -> None:
+    """Regression test: the CoC API 400s "Required parameter 'playerTag' missing"
+    without this — playerTag is a required query param, not optional."""
+    response = _FakeResponse(200, '{"members": [], "defenseLogs": []}')
+    session = _FakeSession(response)
+    with patch.object(poller, "get_session", AsyncMock(return_value=session)):
+        await poller.get_league_group("#GROUP1", 2026008, "#2PP0JCCL")
+
+    url = session.get.call_args.args[0]
+    assert "playerTag=%232PP0JCCL" in url or "playerTag=" in url
+    assert "2PP0JCCL" in url
+
+
+@pytest.mark.asyncio
+async def test_get_league_group_raises_on_non_200() -> None:
+    response = _FakeResponse(400, '{"reason":"badRequest","message":"Required parameter \'playerTag\' missing"}')
+    session = _FakeSession(response)
+    with patch.object(poller, "get_session", AsyncMock(return_value=session)):
+        with pytest.raises(poller.LeagueGroupFetchError) as excinfo:
+            await poller.get_league_group("#GROUP1", 2026008, "#2PP0JCCL")
+    assert excinfo.value.status == 400
+    assert "playerTag" in excinfo.value.body
 
 
 def test_detect_log_scope_group_wide() -> None:

@@ -68,8 +68,12 @@ async def resolve_current_group(coc_tag: str) -> tuple[str, str, str, int]:
     return player.get("name", tag), tag, group_tag, season_id
 
 
-async def fetch_group(group_tag: str, season_id: int) -> dict:
+async def fetch_group(group_tag: str, season_id: int, player_tag: str) -> dict:
     """Fetch a tournament group, raising RankedGroupError on failure.
+
+    player_tag is required by the CoC API as a query parameter on this
+    endpoint (confirmed live: it 400s "Required parameter 'playerTag' missing"
+    without it) — pass the tag whose group membership is being looked up.
 
     Surfaces the real CoC API status/body in the error message — this
     endpoint's shape was reverse-engineered from library source and never
@@ -77,7 +81,7 @@ async def fetch_group(group_tag: str, season_id: int) -> dict:
     hide exactly the detail needed to diagnose a schema/path mismatch.
     """
     try:
-        return await poller.get_league_group(group_tag, season_id)
+        return await poller.get_league_group(group_tag, season_id, player_tag)
     except poller.LeagueGroupFetchError as exc:
         logger.warning(
             "get_league_group failed for %s/%s: status=%s body=%s",
@@ -226,7 +230,7 @@ async def build_group_dashboard(coc_tag: str) -> disnake.Embed:
     so first-post and refreshed views can never drift apart.
     """
     player_name, tag, group_tag, season_id = await resolve_current_group(coc_tag)
-    group = await fetch_group(group_tag, season_id)
+    group = await fetch_group(group_tag, season_id, tag)
     members = group.get("members", [])
     defense_logs = group.get("defenseLogs", [])
     return build_group_embed(player_name, tag, group_tag, season_id, members, defense_logs)

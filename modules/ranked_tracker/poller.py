@@ -91,14 +91,18 @@ class LeagueGroupFetchError(Exception):
         super().__init__(f"HTTP {status}: {body[:300]}")
 
 
-async def get_league_group(group_tag: str, season_id: int | str) -> dict:
+async def get_league_group(group_tag: str, season_id: int | str, player_tag: str) -> dict:
     """Fetch a Ranked Battles tournament group from GET /leaguegroup/{tag}/{seasonId}.
 
     Only the group tag is URL-encoded; season_id is a bare path segment.
-    Raises LeagueGroupFetchError (never returns None) so the caller can show
-    the real status/body instead of a generic failure message.
+    player_tag is a REQUIRED query parameter — confirmed live against the API
+    (it 400s with "Required parameter 'playerTag' missing" without it), even
+    though the clashofclans.js typing that this endpoint was reverse-engineered
+    from marks it optional. Raises LeagueGroupFetchError (never returns None)
+    so the caller can show the real status/body instead of a generic message.
     """
-    url = f"{settings.COC_API_BASE_URL}/leaguegroup/{_encode_tag(group_tag)}/{season_id}"
+    query = f"?playerTag={_encode_tag(player_tag)}"
+    url = f"{settings.COC_API_BASE_URL}/leaguegroup/{_encode_tag(group_tag)}/{season_id}{query}"
     headers = {
         "Authorization": f"Bearer {settings.COC_API_TOKEN}",
         "Accept": "application/json",
