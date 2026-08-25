@@ -9,6 +9,7 @@ x_monitor/client.py and youtube_feed/fetcher.py as separate HTTP layers.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from urllib.parse import quote
 
@@ -74,10 +75,28 @@ async def get_player(coc_tag: str) -> dict | None:
         return None
 
 
-async def get_league_group(group_tag: str, season_id: int | str) -> dict | None:
+class LeagueGroupFetchError(Exception):
+    """Carries the raw CoC API failure (status + body) so callers can surface it.
+
+    Kept distinct from returning None (as get_player does) because the
+    /leaguegroup endpoint's shape/path was reverse-engineered from library
+    source and never confirmed against a live response — when it fails,
+    seeing the exact status/body is far more useful than a generic warning
+    buried in a log file the operator may not have access to.
+    """
+
+    def __init__(self, status: int, body: str) -> None:
+        self.status = status
+        self.body = body
+        super().__init__(f"HTTP {status}: {body[:300]}")
+
+
+async def get_league_group(group_tag: str, season_id: int | str) -> dict:
     """Fetch a Ranked Battles tournament group from GET /leaguegroup/{tag}/{seasonId}.
 
     Only the group tag is URL-encoded; season_id is a bare path segment.
+    Raises LeagueGroupFetchError (never returns None) so the caller can show
+    the real status/body instead of a generic failure message.
     """
     url = f"{settings.COC_API_BASE_URL}/leaguegroup/{_encode_tag(group_tag)}/{season_id}"
     headers = {
@@ -87,20 +106,17 @@ async def get_league_group(group_tag: str, season_id: int | str) -> dict | None:
     session = await get_session()
     try:
         async with session.get(url, headers=headers) as resp:
-            if resp.status == 403:
-                logger.error(
-                    "CoC API returned 403 for /leaguegroup/%s/%s — check the API token's "
-                    "whitelisted IP at developer.clashofclans.com.",
-                    group_tag,
-                    season_id,
-                )
-                return None
+            body_text = await resp.text()
             if resp.status != 200:
                 logger.warning(
-                    "CoC API GET /leaguegroup/%s/%s returned %s", group_tag, season_id, resp.status
+                    "CoC API GET /leaguegroup/%s/%s returned %s: %s",
+                    group_tag,
+                    season_id,
+                    resp.status,
+                    body_text[:500],
                 )
-                return None
-            return await resp.json()
+                raise LeagueGroupFetchError(resp.status, body_text)
+            return json.loads(body_text)
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         logger.warning("CoC API error fetching league group %s/%s: %s", group_tag, season_id, e)
-        return None
+        raise LeagueGroupFetchError(0, str(e)) from e

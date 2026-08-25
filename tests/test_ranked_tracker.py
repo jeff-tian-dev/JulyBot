@@ -78,10 +78,12 @@ async def test_resolve_current_group_api_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_group_failure() -> None:
-    with patch.object(poller, "get_league_group", AsyncMock(return_value=None)):
-        with pytest.raises(group.RankedGroupError, match="Couldn't load that Ranked Battles group"):
+async def test_fetch_group_failure_surfaces_status_and_body() -> None:
+    error = poller.LeagueGroupFetchError(404, '{"reason":"notFound"}')
+    with patch.object(poller, "get_league_group", AsyncMock(side_effect=error)):
+        with pytest.raises(group.RankedGroupError, match="HTTP 404") as excinfo:
             await group.fetch_group("#GROUP1", 2026008)
+    assert "notFound" in str(excinfo.value)
 
 
 def test_detect_log_scope_group_wide() -> None:

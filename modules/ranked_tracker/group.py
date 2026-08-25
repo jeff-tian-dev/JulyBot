@@ -69,11 +69,27 @@ async def resolve_current_group(coc_tag: str) -> tuple[str, str, str, int]:
 
 
 async def fetch_group(group_tag: str, season_id: int) -> dict:
-    """Fetch a tournament group, raising RankedGroupError on failure."""
-    group = await poller.get_league_group(group_tag, season_id)
-    if group is None:
-        raise RankedGroupError("Couldn't load that Ranked Battles group right now.")
-    return group
+    """Fetch a tournament group, raising RankedGroupError on failure.
+
+    Surfaces the real CoC API status/body in the error message — this
+    endpoint's shape was reverse-engineered from library source and never
+    confirmed against a live response, so a generic failure message would
+    hide exactly the detail needed to diagnose a schema/path mismatch.
+    """
+    try:
+        return await poller.get_league_group(group_tag, season_id)
+    except poller.LeagueGroupFetchError as exc:
+        logger.warning(
+            "get_league_group failed for %s/%s: status=%s body=%s",
+            group_tag,
+            season_id,
+            exc.status,
+            exc.body[:500],
+        )
+        raise RankedGroupError(
+            f"Couldn't load that Ranked Battles group right now "
+            f"(CoC API returned HTTP {exc.status}: {exc.body[:300]})."
+        ) from exc
 
 
 def compute_defense_histogram(members: list[dict]) -> list[tuple[int, int]]:
