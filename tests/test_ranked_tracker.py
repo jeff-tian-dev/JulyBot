@@ -67,6 +67,42 @@ def test_compute_defense_histogram_defaults_missing_keys() -> None:
     assert histogram == [(0, 1)]
 
 
+def test_is_likely_to_be_hit_next_flags_small_below_mode_pool() -> None:
+    # Mode is 10 defenses (60 members). Only 20 members (including the
+    # queried player) are at 9 or below -> pool < 40 -> flag.
+    members = (
+        [_member(f"#M{i}", 5, 5) for i in range(60)]  # mode: 10 defenses
+        + [_member(f"#L{i}", 4, 5) for i in range(19)]  # 9 defenses
+        + [_member("#QUERIED", 4, 5)]  # 9 defenses, this is who we're checking
+    )
+    assert group.is_likely_to_be_hit_next(members, "#QUERIED") is True
+
+
+def test_is_likely_to_be_hit_next_false_when_pool_is_large() -> None:
+    # Mode is 10 defenses (40 members). 60 members (including queried) are at
+    # 9 -> pool >= 40 -> not flagged, plenty of company left in that bucket.
+    members = (
+        [_member(f"#M{i}", 5, 5) for i in range(40)]  # mode: 10 defenses
+        + [_member(f"#L{i}", 4, 5) for i in range(59)]  # 9 defenses
+        + [_member("#QUERIED", 4, 5)]  # 9 defenses
+    )
+    assert group.is_likely_to_be_hit_next(members, "#QUERIED") is False
+
+
+def test_is_likely_to_be_hit_next_false_when_at_or_above_mode() -> None:
+    members = [_member(f"#M{i}", 5, 5) for i in range(60)] + [_member("#QUERIED", 5, 5)]
+    assert group.is_likely_to_be_hit_next(members, "#QUERIED") is False
+
+
+def test_is_likely_to_be_hit_next_false_when_player_not_found() -> None:
+    members = [_member(f"#M{i}", 5, 5) for i in range(10)]
+    assert group.is_likely_to_be_hit_next(members, "#MISSING") is False
+
+
+def test_is_likely_to_be_hit_next_false_on_empty_group() -> None:
+    assert group.is_likely_to_be_hit_next([], "#QUERIED") is False
+
+
 @pytest.mark.asyncio
 async def test_resolve_current_group_happy_path() -> None:
     player = {
@@ -204,3 +240,21 @@ async def test_build_group_dashboard_end_to_end() -> None:
     field_names = [f.name for f in embed.fields]
     assert "Defenses Received This Week" in field_names
     assert any("Defenses" in name for name in field_names)
+
+
+def test_build_group_embed_shows_likely_to_be_hit_flag() -> None:
+    members = (
+        [_member(f"#M{i}", 5, 5) for i in range(60)]  # mode: 10 defenses
+        + [_member(f"#L{i}", 4, 5) for i in range(19)]  # 9 defenses
+        + [_member("#QUERIED", 4, 5)]  # 9 defenses -> flagged
+    )
+    embed = group.build_group_embed("Jeff", "#QUERIED", "#GROUP1", 2026008, members, [])
+    histogram_field = next(f for f in embed.fields if f.name == "Defenses Received This Week")
+    assert "likely to be hit next" in histogram_field.value
+
+
+def test_build_group_embed_omits_flag_when_not_likely() -> None:
+    members = [_member(f"#M{i}", 5, 5) for i in range(60)] + [_member("#QUERIED", 5, 5)]
+    embed = group.build_group_embed("Jeff", "#QUERIED", "#GROUP1", 2026008, members, [])
+    histogram_field = next(f for f in embed.fields if f.name == "Defenses Received This Week")
+    assert "likely to be hit next" not in histogram_field.value

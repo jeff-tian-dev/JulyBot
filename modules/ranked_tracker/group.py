@@ -38,6 +38,13 @@ _SCOPE_MATCH_TOLERANCE = 0.3
 GROUP_WIDE = "group_wide"
 PLAYER_SCOPED = "player_scoped"
 
+# The matchmaker appears to try to keep defenses received even across the
+# group. Once the pool of members at-or-below a given (below-majority) defense
+# count shrinks under this many, that pool is a small target for the attacks
+# still left in the week, so anyone still in it is increasingly likely to be
+# picked next. Tune once real usage confirms the right cutoff.
+LOW_DEFENSE_POOL_THRESHOLD = 40
+
 
 class RankedGroupError(Exception):
     """A user-facing failure resolving or fetching a Ranked Battles group."""
@@ -105,6 +112,38 @@ def compute_defense_histogram(members: list[dict]) -> list[tuple[int, int]]:
     """
     counts = collections.Counter(_defense_count(m) for m in members)
     return sorted(counts.items(), key=lambda kv: kv[0], reverse=True)
+
+
+def is_likely_to_be_hit_next(members: list[dict], queried_tag: str) -> bool:
+    """Flag whether the queried player looks likely to be attacked next.
+
+    The matchmaker seems to keep defenses received roughly even across the
+    group, so members sitting below the majority (mode) defense count are
+    preferential targets. This flags the queried player specifically (not
+    the whole group) when both hold:
+      - their own defense count is below the group's mode, and
+      - the pool of members at or below that count is small (< threshold) —
+        a small pool means the remaining attacks this week are more likely
+        to land on someone still in it, including the queried player.
+    Returns False if the queried player isn't found in members, or if there's
+    no meaningful mode to compare against (e.g. an empty group).
+    """
+    own_count = next(
+        (_defense_count(m) for m in members if m.get("playerTag") == queried_tag), None
+    )
+    if own_count is None or not members:
+        return False
+
+    histogram = compute_defense_histogram(members)
+    if not histogram:
+        return False
+    mode_count = max(histogram, key=lambda kv: kv[1])[0]
+
+    if own_count >= mode_count:
+        return False
+
+    pool_size = sum(count for defenses, count in histogram if defenses <= own_count)
+    return pool_size < LOW_DEFENSE_POOL_THRESHOLD
 
 
 def detect_log_scope(defense_logs: list[dict], members: list[dict], queried_tag: str) -> str:
@@ -209,6 +248,8 @@ def build_group_embed(
     ]
     histogram_body = "\n".join(histogram_lines) if histogram_lines else "No data available."
     histogram_body += f"\n\n{len(members)} members total"
+    if is_likely_to_be_hit_next(members, queried_tag):
+        histogram_body += f"\n\n⚠️ {player_name} is likely to be hit next."
 
     scope = detect_log_scope(defense_logs, members, queried_tag)
     defenses_title, defenses_body = format_last_defenses(defense_logs, scope, player_name)
