@@ -78,7 +78,8 @@ JulyBot/
 |   |   `-- watcher.py        # clan-watch poller: leave/rejoin alerts + absence
 |   `-- ranked_tracker/
 |       |-- poller.py         # CoC API client for /players and /leaguegroup
-|       `-- group.py          # group resolution, defense histogram, embed rendering
+|       |-- group.py          # group resolution, defense histogram, embed rendering
+|       `-- extrapolate.py    # per-member 30-attack pace extrapolation (/groupextrapolate)
 |-- discord_bot/
 |   |-- bot.py                # create_bot() — InteractionBot factory
 |   `-- commands/             # one Cog per module (account, x, youtube, moderation, roster, post, base_post, agreement, ranked, + stub legend/base_finder/ping)
@@ -257,6 +258,7 @@ The Cogs listed in `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py) are
 | `/purgeword <member> <word>`     | moderation (admin) | live         |
 | `/post <image> <channel> [text] [ping_role]` | announce (admin) | live |
 | `/group <player_tag>`            | ranked_tracker     | live         |
+| `/groupextrapolate <player_tag>` | ranked_tracker     | live         |
 | `/legend`                        | legend_tracker     | stub, not loaded |
 | `/legend_history <days>`         | legend_tracker     | stub, not loaded |
 | `/leaderboard`                   | legend_tracker     | stub, not loaded |

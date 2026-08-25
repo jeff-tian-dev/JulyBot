@@ -1,4 +1,6 @@
-"""/group — refreshable Ranked Battles tournament group dashboard."""
+"""/group — refreshable Ranked Battles tournament group dashboard.
+/groupextrapolate — extrapolated 30-attack pace top 3 for the group.
+"""
 from __future__ import annotations
 
 import logging
@@ -6,6 +8,7 @@ import logging
 import disnake
 from disnake.ext import commands
 
+from modules.ranked_tracker.extrapolate import build_extrapolate_dashboard
 from modules.ranked_tracker.group import RankedGroupError, build_group_dashboard
 
 logger = logging.getLogger(__name__)
@@ -75,6 +78,28 @@ class RankedCommands(commands.Cog):
             await self._respond(inter, "Something went wrong looking that up.")
             return
         await inter.edit_original_response(embed=embed, view=RankedGroupView(player_tag))
+
+    @commands.slash_command(
+        name="groupextrapolate",
+        description="Extrapolate every eligible group member's pace to a full 30 attacks.",
+    )
+    async def groupextrapolate(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        player_tag: str = commands.Param(description="CoC player tag, e.g. #2PP0JCCL"),
+    ) -> None:
+        # ~100 CoC API calls at bounded concurrency — comfortably past the 3s deadline.
+        await inter.response.defer()
+        try:
+            embed = await build_extrapolate_dashboard(player_tag)
+        except RankedGroupError as exc:
+            await self._respond(inter, str(exc))
+            return
+        except Exception:
+            logger.exception("Unexpected error in /groupextrapolate for %s", player_tag)
+            await self._respond(inter, "Something went wrong computing that.")
+            return
+        await inter.edit_original_response(embed=embed)
 
     @staticmethod
     async def _respond(inter: disnake.ApplicationCommandInteraction, content: str) -> None:
