@@ -123,8 +123,9 @@ class RankedCommands(commands.Cog):
             await inter.response.send_message(str(exc), ephemeral=True)
             return
         await inter.response.send_message(
-            f"Tracking **{tag}** — I'll DM you here when its likely-to-be-hit status changes "
-            f"(checked every {settings.RANKED_TRACKING_POLL_INTERVAL_MINUTES} minutes).",
+            f"Tracking **{tag}** — I'll send you a direct message (not in this channel) when its "
+            f"likely-to-be-hit status changes (checked every "
+            f"{settings.RANKED_TRACKING_POLL_INTERVAL_MINUTES} minutes).",
             ephemeral=True,
         )
 
