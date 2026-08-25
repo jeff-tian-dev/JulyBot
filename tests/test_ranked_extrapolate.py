@@ -35,6 +35,13 @@ def test_eligible_members_requires_both_attack_and_defense_over_threshold() -> N
     assert result == [eligible]
 
 
+def test_eligible_members_respects_custom_min_battles() -> None:
+    early_week = _member("#A", attack_wins=2, attack_losses=2, defense_wins=2, defense_losses=2)  # 4/4
+    result = extrapolate.eligible_members([early_week], min_battles=3)
+    assert result == [early_week]
+    assert extrapolate.eligible_members([early_week], min_battles=10) == []
+
+
 def test_average_trophies_empty_logs_is_zero() -> None:
     assert extrapolate._average_trophies([]) == 0.0
 
@@ -111,6 +118,30 @@ async def test_extrapolate_group_raises_when_no_eligible_members() -> None:
     ):
         with pytest.raises(RankedGroupError, match="No members"):
             await extrapolate.extrapolate_group("#2PP0JCCL")
+
+
+@pytest.mark.asyncio
+async def test_extrapolate_group_honors_custom_min_battles() -> None:
+    """Early in the tournament week, lowering min_battles should surface
+    members that the default threshold of 10 would exclude."""
+    player = {"name": "Jeff", "currentLeagueGroupTag": "#GROUP1", "currentLeagueSeasonId": 2026008}
+    early_week_member = _member("#EARLY", 2, 2, 2, 2, name="Early")  # 4 attacks, 4 defenses
+    group_data = {"members": [early_week_member]}
+    member_logs = {"attackLogs": [_log(5)], "defenseLogs": [_log(-2)]}
+
+    async def fake_get_league_group(group_tag, season_id, player_tag):
+        return group_data if player_tag == "#2PP0JCCL" else member_logs
+
+    with patch.object(poller, "get_player", AsyncMock(return_value=player)), patch.object(
+        poller, "get_league_group", AsyncMock(side_effect=fake_get_league_group)
+    ):
+        with pytest.raises(RankedGroupError, match="No members"):
+            await extrapolate.extrapolate_group("#2PP0JCCL")  # default min_battles=10 excludes #EARLY
+
+        player_name, top = await extrapolate.extrapolate_group("#2PP0JCCL", min_battles=3)
+
+    assert player_name == "Jeff"
+    assert [r["name"] for r in top] == ["Early"]
 
 
 @pytest.mark.asyncio

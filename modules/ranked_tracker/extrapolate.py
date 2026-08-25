@@ -52,13 +52,10 @@ def _defense_count(member: dict) -> int:
     return member.get("defenseWinCount", 0) + member.get("defenseLoseCount", 0)
 
 
-def eligible_members(members: list[dict]) -> list[dict]:
-    """Members with more than MIN_BATTLES_FOR_EXTRAPOLATION attacks AND defenses."""
+def eligible_members(members: list[dict], min_battles: int = MIN_BATTLES_FOR_EXTRAPOLATION) -> list[dict]:
+    """Members with more than min_battles attacks AND more than min_battles defenses."""
     return [
-        m
-        for m in members
-        if _attack_count(m) > MIN_BATTLES_FOR_EXTRAPOLATION
-        and _defense_count(m) > MIN_BATTLES_FOR_EXTRAPOLATION
+        m for m in members if _attack_count(m) > min_battles and _defense_count(m) > min_battles
     ]
 
 
@@ -120,10 +117,16 @@ async def _extrapolate_member(
     }
 
 
-async def extrapolate_group(coc_tag: str) -> tuple[str, list[dict]]:
+async def extrapolate_group(
+    coc_tag: str, min_battles: int = MIN_BATTLES_FOR_EXTRAPOLATION
+) -> tuple[str, list[dict]]:
     """Fetch the queried player's group, then extrapolate every eligible
     member's 30-attack pace, returning (player_name, top TOP_N by
     extrapolated total).
+
+    min_battles sets the eligibility bar (a member needs more than this many
+    attacks AND more than this many defenses this week) — lower it early in
+    the tournament week when few members have crossed the default of 10.
 
     Raises RankedGroupError with a user-facing message on failure to resolve
     the group at all. Individual member fetch failures are skipped, not
@@ -140,11 +143,11 @@ async def extrapolate_group(coc_tag: str) -> tuple[str, list[dict]]:
         ) from exc
 
     members = group_data.get("members", [])
-    eligible = eligible_members(members)
+    eligible = eligible_members(members, min_battles)
     if not eligible:
         raise RankedGroupError(
             f"No members in {player_name}'s group have more than "
-            f"{MIN_BATTLES_FOR_EXTRAPOLATION} attacks and defenses yet this week."
+            f"{min_battles} attacks and defenses yet this week."
         )
 
     semaphore = asyncio.Semaphore(EXTRAPOLATE_CONCURRENCY)
@@ -156,7 +159,9 @@ async def extrapolate_group(coc_tag: str) -> tuple[str, list[dict]]:
     return player_name, scored[:TOP_N]
 
 
-def build_extrapolate_embed(player_name: str, top: list[dict]) -> disnake.Embed:
+def build_extrapolate_embed(
+    player_name: str, top: list[dict], min_battles: int = MIN_BATTLES_FOR_EXTRAPOLATION
+) -> disnake.Embed:
     """Render the extrapolated top-N as an embed."""
     embed = disnake.Embed(
         title=f"Extrapolated Ranked Battles Pace — {player_name}'s Group",
@@ -179,13 +184,14 @@ def build_extrapolate_embed(player_name: str, top: list[dict]) -> disnake.Embed:
         )
     embed.add_field(name=f"Top {len(top)}", value="\n".join(lines), inline=False)
     embed.set_footer(
-        text=f"Only members with more than {MIN_BATTLES_FOR_EXTRAPOLATION} "
-        "attacks and defenses this week are eligible."
+        text=f"Only members with more than {min_battles} attacks and defenses this week are eligible."
     )
     return embed
 
 
-async def build_extrapolate_dashboard(coc_tag: str) -> disnake.Embed:
+async def build_extrapolate_dashboard(
+    coc_tag: str, min_battles: int = MIN_BATTLES_FOR_EXTRAPOLATION
+) -> disnake.Embed:
     """The full /groupextrapolate pipeline: resolve -> extrapolate -> render."""
-    player_name, top = await extrapolate_group(coc_tag)
-    return build_extrapolate_embed(player_name, top)
+    player_name, top = await extrapolate_group(coc_tag, min_battles)
+    return build_extrapolate_embed(player_name, top, min_battles)

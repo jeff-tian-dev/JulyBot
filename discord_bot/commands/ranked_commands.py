@@ -87,11 +87,16 @@ class RankedCommands(commands.Cog):
         self,
         inter: disnake.ApplicationCommandInteraction,
         player_tag: str = commands.Param(description="CoC player tag, e.g. #2PP0JCCL"),
+        min_battles: int = commands.Param(
+            default=10,
+            min_value=0,
+            description="A member needs more than this many attacks AND defenses this week to count.",
+        ),
     ) -> None:
         # ~100 CoC API calls at bounded concurrency — comfortably past the 3s deadline.
         await inter.response.defer()
         try:
-            embed = await build_extrapolate_dashboard(player_tag)
+            embed = await build_extrapolate_dashboard(player_tag, min_battles)
         except RankedGroupError as exc:
             await self._respond(inter, str(exc))
             return
