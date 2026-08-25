@@ -8,8 +8,10 @@ import logging
 import disnake
 from disnake.ext import commands
 
+from config.settings import settings
 from modules.ranked_tracker.extrapolate import build_extrapolate_dashboard
 from modules.ranked_tracker.group import RankedGroupError, build_group_dashboard
+from modules.ranked_tracker.tracking import list_tracked, start_tracking, stop_tracking
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +107,58 @@ class RankedCommands(commands.Cog):
             await self._respond(inter, "Something went wrong computing that.")
             return
         await inter.edit_original_response(embed=embed)
+
+    @commands.slash_command(
+        name="trackingon",
+        description="Get DMed when a player's likely-to-be-hit status changes.",
+    )
+    async def trackingon(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        player_tag: str = commands.Param(description="CoC player tag, e.g. #2PP0JCCL"),
+    ) -> None:
+        try:
+            tag = await start_tracking(self.bot.pool, inter.author.id, player_tag)
+        except ValueError as exc:
+            await inter.response.send_message(str(exc), ephemeral=True)
+            return
+        await inter.response.send_message(
+            f"Tracking **{tag}** — I'll DM you here when its likely-to-be-hit status changes "
+            f"(checked every {settings.RANKED_TRACKING_POLL_INTERVAL_MINUTES} minutes).",
+            ephemeral=True,
+        )
+
+    @commands.slash_command(
+        name="trackingoff",
+        description="Stop DM alerts for a player's likely-to-be-hit status.",
+    )
+    async def trackingoff(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        player_tag: str = commands.Param(description="CoC player tag, e.g. #2PP0JCCL"),
+    ) -> None:
+        try:
+            removed = await stop_tracking(self.bot.pool, inter.author.id, player_tag)
+        except ValueError as exc:
+            await inter.response.send_message(str(exc), ephemeral=True)
+            return
+        message = (
+            f"Stopped tracking **{player_tag}**." if removed else f"You weren't tracking **{player_tag}**."
+        )
+        await inter.response.send_message(message, ephemeral=True)
+
+    @commands.slash_command(
+        name="trackinglist",
+        description="List the player tags you're currently tracking.",
+    )
+    async def trackinglist(self, inter: disnake.ApplicationCommandInteraction) -> None:
+        tags = await list_tracked(self.bot.pool, inter.author.id)
+        if not tags:
+            await inter.response.send_message("You aren't tracking any tags.", ephemeral=True)
+            return
+        await inter.response.send_message(
+            "You're tracking:\n" + "\n".join(f"- {tag}" for tag in tags), ephemeral=True
+        )
 
     @staticmethod
     async def _respond(inter: disnake.ApplicationCommandInteraction, content: str) -> None:

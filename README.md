@@ -79,7 +79,8 @@ JulyBot/
 |   `-- ranked_tracker/
 |       |-- poller.py         # CoC API client for /players and /leaguegroup
 |       |-- group.py          # group resolution, defense histogram, embed rendering
-|       `-- extrapolate.py    # per-member 30-attack pace extrapolation (/groupextrapolate)
+|       |-- extrapolate.py    # per-member 30-attack pace extrapolation (/groupextrapolate)
+|       `-- tracking.py       # /trackingon|off|list -- DM alerts on status change
 |-- discord_bot/
 |   |-- bot.py                # create_bot() — InteractionBot factory
 |   `-- commands/             # one Cog per module (account, x, youtube, moderation, roster, post, base_post, agreement, ranked, + stub legend/base_finder/ping)
@@ -166,6 +167,7 @@ cp .env.example .env   # only if setup.sh didn't already create it
 | `COC_CLAN_TAG`                   | no       | empty                                  | Optional single main-clan tag, merged into the family above (back-compat) |
 | `CLAN_WATCH_CHANNEL_ID`          | no       | `1528897151625592993`                  | Channel that clan-watch leave/rejoin alerts post to |
 | `CLAN_WATCH_POLL_INTERVAL_MINUTES` | no     | `10`                                   | How often watched rosters are checked against the clan family |
+| `RANKED_TRACKING_POLL_INTERVAL_MINUTES` | no | `20`                              | How often tracked players' likely-to-be-hit status is checked for `/trackingon` DM alerts |
 
 Missing any required variable raises a clear `ValueError` at startup.
 
@@ -211,6 +213,7 @@ Startup sequence: load settings -> open asyncpg pool -> ensure tables -> seed un
 | `roster_members`   | Roster membership — one row per Discord user **or** raw CoC tag            |
 | `clan_membership`  | Per-tag clan in/out state + accumulated absence, kept by the clan-watch poller |
 | `coc_player_cache` | Short-TTL cache of live CoC player name + current clan, shared across rosters |
+| `ranked_tracking`  | `/trackingon` subscriptions: Discord user + CoC tag pairs, with the last-seen likely-to-be-hit status |
 
 See [database/models.py](database/models.py) for the exact DDL.
 
@@ -259,6 +262,9 @@ The Cogs listed in `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py) are
 | `/post <image> <channel> [text] [ping_role]` | announce (admin) | live |
 | `/group <player_tag>`            | ranked_tracker     | live         |
 | `/groupextrapolate <player_tag>` | ranked_tracker     | live         |
+| `/trackingon <player_tag>`       | ranked_tracker     | live         |
+| `/trackingoff <player_tag>`      | ranked_tracker     | live         |
+| `/trackinglist`                  | ranked_tracker     | live         |
 | `/legend`                        | legend_tracker     | stub, not loaded |
 | `/legend_history <days>`         | legend_tracker     | stub, not loaded |
 | `/leaderboard`                   | legend_tracker     | stub, not loaded |

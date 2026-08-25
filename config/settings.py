@@ -95,6 +95,7 @@ class Settings:
     CLAN_WATCH_POLL_INTERVAL_MINUTES: int = 10
     CLAN_WATCH_DAILY_HOUR: int = 1
     CLAN_WATCH_TIMEZONE: str = "America/New_York"
+    RANKED_TRACKING_POLL_INTERVAL_MINUTES: int = 20
 
 
 def _load() -> Settings:
@@ -135,6 +136,7 @@ def _load() -> Settings:
         CLAN_WATCH_POLL_INTERVAL_MINUTES=_int("CLAN_WATCH_POLL_INTERVAL_MINUTES", 10),
         CLAN_WATCH_DAILY_HOUR=_int("CLAN_WATCH_DAILY_HOUR", 1),
         CLAN_WATCH_TIMEZONE=_optional("CLAN_WATCH_TIMEZONE", "America/New_York"),
+        RANKED_TRACKING_POLL_INTERVAL_MINUTES=_int("RANKED_TRACKING_POLL_INTERVAL_MINUTES", 20),
     )
 
 

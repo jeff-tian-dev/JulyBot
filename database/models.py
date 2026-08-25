@@ -282,6 +282,25 @@ CREATE TABLE IF NOT EXISTS agreements (
 );
 """
 
+# /trackingon subscribes a Discord user to DM alerts on a CoC player tag when
+# is_likely_to_be_hit_next()'s status crosses between LIKELY_TARGET and
+# NOT_FLAGGED (never on UNKNOWN or a same-status poll). last_status stores the
+# last-seen status string so the poller can diff it against the current
+# result each cycle; NULL means "never successfully checked yet" (distinct
+# from a real status), so the first successful check seeds it silently
+# without sending a spurious "changed" DM.
+CREATE_RANKED_TRACKING = """
+CREATE TABLE IF NOT EXISTS ranked_tracking (
+    id SERIAL PRIMARY KEY,
+    discord_id BIGINT NOT NULL,
+    coc_tag VARCHAR(20) NOT NULL,
+    last_status VARCHAR(20),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(discord_id, coc_tag)
+);
+"""
+
 # paypal_email was renamed to paypal_contact, which is now further renamed (with
 # payer_name) to the processor-agnostic payment_contact/payer_name so Venmo and Wise
 # can be recorded alongside PayPal. RENAME COLUMN has no IF EXISTS form, and a fresh
@@ -315,6 +334,7 @@ ALTER TABLE agreements ADD COLUMN IF NOT EXISTS payment_method VARCHAR(20) NOT N
 """
 
 ALL_TABLES = (
+    "ranked_tracking",
     "agreements",
     "base_post_downloads",
     "base_posts",
@@ -400,6 +420,9 @@ async def create_tables(pool: asyncpg.Pool) -> None:
         await conn.execute(CREATE_AGREEMENTS)
         logger.info("Applying agreements payment field migrations if needed")
         await conn.execute(MIGRATE_AGREEMENTS_PAYMENT_FIELDS)
+
+        logger.info("Creating table ranked_tracking if not exists")
+        await conn.execute(CREATE_RANKED_TRACKING)
 
 
 async def drop_tables(pool: asyncpg.Pool) -> None:

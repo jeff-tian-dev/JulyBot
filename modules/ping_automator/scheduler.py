@@ -13,6 +13,7 @@ from config.settings import settings
 from modules.base_finder.pipeline import run_pipeline
 from modules.legend_tracker.poller import poll_all_legend_players
 from modules.legend_tracker.snapshots import save_snapshot
+from modules.ranked_tracker.tracking import poll_ranked_tracking
 from modules.roster.watcher import poll_clan_watch, run_daily_watchlist
 from modules.x_monitor.poller import poll_x_accounts
 from modules.youtube_feed.poller import poll_youtube_channels
@@ -165,6 +166,16 @@ async def daily_watchlist_job(pool: asyncpg.Pool, bot: disnake.Client) -> None:
         logger.exception("run_daily_watchlist raised")
 
 
+async def ranked_tracking_job(pool: asyncpg.Pool, bot: disnake.Client) -> None:
+    """Scheduled job: DM subscribers on a likely-to-be-hit status change."""
+    try:
+        summary = await poll_ranked_tracking(pool, bot)
+        if summary["notified"] or summary["errors"]:
+            logger.info("Ranked tracking summary: %s", summary)
+    except Exception:
+        logger.exception("poll_ranked_tracking raised")
+
+
 def create_scheduler(pool: asyncpg.Pool, bot: disnake.Client) -> AsyncIOScheduler:
     """Build (but do not start) an AsyncIOScheduler with all recurring jobs."""
     scheduler = AsyncIOScheduler()
@@ -221,5 +232,13 @@ def create_scheduler(pool: asyncpg.Pool, bot: disnake.Client) -> AsyncIOSchedule
             id="daily_watchlist",
             replace_existing=True,
         )
+
+    scheduler.add_job(
+        ranked_tracking_job,
+        trigger=IntervalTrigger(minutes=settings.RANKED_TRACKING_POLL_INTERVAL_MINUTES),
+        kwargs={"pool": pool, "bot": bot},
+        id="poll_ranked_tracking",
+        replace_existing=True,
+    )
 
     return scheduler
