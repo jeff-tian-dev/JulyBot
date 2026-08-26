@@ -101,11 +101,12 @@ async def test_extrapolate_group_returns_top_3_sorted_descending() -> None:
     with patch.object(poller, "get_player", AsyncMock(return_value=player)), patch.object(
         poller, "get_league_group", AsyncMock(side_effect=fake_get_league_group)
     ):
-        player_name, top = await extrapolate.extrapolate_group("#2pp0jccl")
+        player_name, top, eligible_count = await extrapolate.extrapolate_group("#2pp0jccl")
 
     assert player_name == "Jeff"
     assert [r["name"] for r in top] == ["Top", "High", "Mid"]
     assert len(top) == extrapolate.TOP_N
+    assert eligible_count == 4
 
 
 @pytest.mark.asyncio
@@ -138,10 +139,13 @@ async def test_extrapolate_group_honors_custom_min_battles() -> None:
         with pytest.raises(RankedGroupError, match="No members"):
             await extrapolate.extrapolate_group("#2PP0JCCL")  # default min_battles=10 excludes #EARLY
 
-        player_name, top = await extrapolate.extrapolate_group("#2PP0JCCL", min_battles=3)
+        player_name, top, eligible_count = await extrapolate.extrapolate_group(
+            "#2PP0JCCL", min_battles=3
+        )
 
     assert player_name == "Jeff"
     assert [r["name"] for r in top] == ["Early"]
+    assert eligible_count == 1
 
 
 @pytest.mark.asyncio
@@ -160,12 +164,26 @@ def test_build_extrapolate_embed_lists_top_members() -> None:
     top = [
         {"tag": "#A", "name": "Alice", "avg_attack_trophies": 20.0, "avg_defense_trophies": -5.0, "extrapolated_total": 450.0},
     ]
-    embed = extrapolate.build_extrapolate_embed("Jeff", top)
+    embed = extrapolate.build_extrapolate_embed("Jeff", top, eligible_count=5)
     assert "Jeff" in embed.title
-    assert "Alice" in embed.fields[0].value
-    assert "450" in embed.fields[0].value
+    top_field = next(f for f in embed.fields if f.name.startswith("Top"))
+    assert "Alice" in top_field.value
+    assert "450" in top_field.value
+
+
+def test_build_extrapolate_embed_shows_eligible_count() -> None:
+    embed = extrapolate.build_extrapolate_embed("Jeff", [], eligible_count=7)
+    eligible_field = next(f for f in embed.fields if f.name == "Eligible Members")
+    assert "7" in eligible_field.value
+
+
+def test_build_extrapolate_embed_eligible_count_singular() -> None:
+    embed = extrapolate.build_extrapolate_embed("Jeff", [], eligible_count=1)
+    eligible_field = next(f for f in embed.fields if f.name == "Eligible Members")
+    assert "1 member eligible" in eligible_field.value
 
 
 def test_build_extrapolate_embed_handles_empty_top() -> None:
-    embed = extrapolate.build_extrapolate_embed("Jeff", [])
-    assert "No eligible members" in embed.fields[0].value
+    embed = extrapolate.build_extrapolate_embed("Jeff", [], eligible_count=0)
+    top_field = next(f for f in embed.fields if f.name == "Top 3")
+    assert "No eligible members" in top_field.value

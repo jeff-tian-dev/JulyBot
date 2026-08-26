@@ -119,10 +119,10 @@ async def _extrapolate_member(
 
 async def extrapolate_group(
     coc_tag: str, min_battles: int = MIN_BATTLES_FOR_EXTRAPOLATION
-) -> tuple[str, list[dict]]:
+) -> tuple[str, list[dict], int]:
     """Fetch the queried player's group, then extrapolate every eligible
     member's 30-attack pace, returning (player_name, top TOP_N by
-    extrapolated total).
+    extrapolated total, count of eligible members considered).
 
     min_battles sets the eligibility bar (a member needs more than this many
     attacks AND more than this many defenses this week) — lower it early in
@@ -156,11 +156,14 @@ async def extrapolate_group(
     )
     scored = [r for r in results if r is not None]
     scored.sort(key=lambda r: r["extrapolated_total"], reverse=True)
-    return player_name, scored[:TOP_N]
+    return player_name, scored[:TOP_N], len(eligible)
 
 
 def build_extrapolate_embed(
-    player_name: str, top: list[dict], min_battles: int = MIN_BATTLES_FOR_EXTRAPOLATION
+    player_name: str,
+    top: list[dict],
+    eligible_count: int,
+    min_battles: int = MIN_BATTLES_FOR_EXTRAPOLATION,
 ) -> disnake.Embed:
     """Render the extrapolated top-N as an embed."""
     embed = disnake.Embed(
@@ -170,6 +173,11 @@ def build_extrapolate_embed(
             f"average trophies per attack/defense so far this week."
         ),
         colour=GROUP_EMBED_COLOUR,
+    )
+    embed.add_field(
+        name="Eligible Members",
+        value=f"{eligible_count} member{'s' if eligible_count != 1 else ''} eligible for extrapolation",
+        inline=False,
     )
     if not top:
         embed.add_field(name="Top 3", value="No eligible members to rank.", inline=False)
@@ -193,5 +201,5 @@ async def build_extrapolate_dashboard(
     coc_tag: str, min_battles: int = MIN_BATTLES_FOR_EXTRAPOLATION
 ) -> disnake.Embed:
     """The full /groupextrapolate pipeline: resolve -> extrapolate -> render."""
-    player_name, top = await extrapolate_group(coc_tag, min_battles)
-    return build_extrapolate_embed(player_name, top, min_battles)
+    player_name, top, eligible_count = await extrapolate_group(coc_tag, min_battles)
+    return build_extrapolate_embed(player_name, top, eligible_count, min_battles)
