@@ -213,7 +213,9 @@ Background logs: `logs/julybot.stdout.log` and `logs/julybot.stderr.log`.
 
 Startup sequence: load settings -> open asyncpg pool -> ensure tables -> seed unseeded YouTube channels -> start APScheduler -> connect Discord. Ctrl-C (foreground) or `./deploy/stop.sh` (background) triggers an ordered shutdown.
 
-The subscription website is a **separate process** with its own start/stop scripts (`./deploy/start-web.sh`, `./deploy/install-service-web.sh`, `./deploy/stop-web.sh`) and its own launchd service — see [deploy/README.md](deploy/README.md#run-the-web-service-stripe-subscription-site) for the full setup, including Stripe webhook configuration and making the site publicly reachable. To restart the bot and the website together after a deploy, `./deploy/install-service-all.sh` runs both install scripts in one command (still two independent launchd services underneath); matching `stop-all.sh`/`uninstall-service-all.sh` wrappers also exist.
+The subscription website is a **separate process** with its own start/stop scripts (`./deploy/start-web.sh`, `./deploy/install-service-web.sh`, `./deploy/stop-web.sh`) and its own launchd service — see [deploy/README.md](deploy/README.md#run-the-web-service-stripe-subscription-site). To restart the bot and the website together after a deploy, `./deploy/install-service-all.sh` runs both install scripts in one command (still two independent launchd services underneath); matching `stop-all.sh`/`uninstall-service-all.sh` wrappers also exist.
+
+The site is not yet publicly reachable and Stripe is still in test mode — **[deploy/GOING-LIVE.md](deploy/GOING-LIVE.md)** is the step-by-step handoff for domain setup (seventhmonthlegends.fyi, via Porkbun DNS + Caddy) and switching Stripe to live.
 
 ### 6. Deploying a code update
 
