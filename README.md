@@ -222,12 +222,13 @@ Code reaches the Mac Studio via `git pull`:
 ```bash
 cd /Users/jefftian/JulyBot
 git pull
+chmod +x deploy/*.sh                        # only if the release added new scripts
 .venv/bin/pip install -r requirements.txt   # only if dependencies changed
 .venv/bin/python scripts/init_db.py         # only if the schema changed; idempotent
 ./deploy/install-service-all.sh             # restart both services
 ```
 
-`.env` is not in git — when a release adds new environment variables, copy the new keys from `.env.example` into the Mac Studio's `.env` before restarting, or startup fails with a `ValueError` naming the missing variable. See [deploy/README.md](deploy/README.md#deploying-a-code-update) for details.
+`.env` is not in git — when a release adds new environment variables, copy the new keys from `.env.example` into the Mac Studio's `.env` before restarting. Because both processes share [config/settings.py](config/settings.py), a missing **required** variable stops the **bot** as well as the website. See [deploy/README.md](deploy/README.md#deploying-a-code-update) for details.
 
 ---
 

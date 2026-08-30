@@ -29,6 +29,7 @@ Code reaches this machine via `git pull`. The full update sequence:
 ```bash
 cd /Users/jefftian/JulyBot
 git pull
+chmod +x deploy/*.sh                        # only if the release added new scripts
 .venv/bin/pip install -r requirements.txt   # only if dependencies changed
 .venv/bin/python scripts/init_db.py         # only if the schema changed; idempotent, safe to re-run
 ./deploy/install-service-all.sh             # restart both services
@@ -39,8 +40,13 @@ git pull
 changed.
 
 `.env` is **not** in git (it holds secrets) — when a release adds new environment variables,
-copy the new keys from `.env.example` into this machine's `.env` by hand before restarting,
-or the service will fail at startup with a `ValueError` naming the missing variable.
+copy the new keys from `.env.example` into this machine's `.env` by hand **before** restarting.
+
+⚠️ **A missing required variable stops the bot too, not just the website.** Both processes
+load the same [config/settings.py](../config/settings.py), which raises at import time if
+anything in `REQUIRED_VARS` is unset — so e.g. deploying the Stripe release without adding
+`STRIPE_SECRET_KEY` takes the Discord bot offline as well. The error names the missing
+variable; check `logs/julybot.stderr.log` and `logs/julybot-web.stderr.log`.
 
 ## Run the bot
 
