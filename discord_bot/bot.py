@@ -32,6 +32,7 @@ COG_MODULES = (
     "discord_bot.commands.base_post_commands",
     "discord_bot.commands.agreement_commands",
     "discord_bot.commands.ranked_commands",
+    "discord_bot.commands.subscribe_commands",
 )
 
 # Disabled until wired up (still under development):

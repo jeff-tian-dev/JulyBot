@@ -333,23 +333,22 @@ END $$;
 ALTER TABLE agreements ADD COLUMN IF NOT EXISTS payment_method VARCHAR(20) NOT NULL DEFAULT 'PayPal';
 """
 
-# A one-time Stripe purchase bought through the web/ package's checkout site.
-# Access is repurchased monthly by the buyer's own action (matching the
-# server's existing ticket-based resub workflow) rather than auto-renewed by
-# Stripe, so this is Checkout mode="payment", not mode="subscription" — there
-# is no Stripe subscription object to track. One row per purchase (not one row
-# per customer): the same buyer purchasing in consecutive months produces two
-# rows, giving a natural month-by-month purchase log via created_at (see
-# storage.get_by_month). Keyed on stripe_checkout_session_id (always present,
-# unique per checkout attempt) so a redelivered/duplicate webhook event
-# upserts idempotently instead of erroring or duplicating a row. `status`
-# mirrors Stripe Checkout's own payment_status strings verbatim (paid,
-# unpaid, no_payment_required) so the webhook handler can copy it directly
-# with no translation table. `discord_username_hint` is an unverified,
-# optional value the buyer typed on the pricing page (Stripe Checkout
-# metadata); `discord_id` is reserved but deliberately left unpopulated this
-# pass — Discord role-granting off a purchase is a deferred follow-up
-# feature, and reserving the column now avoids a migration when that lands.
+# A one-time Stripe purchase of subscriber access.
+#
+# NOT CURRENTLY WRITTEN TO. Purchases go through Stripe Payment Links posted by
+# /subscribe, which are hosted entirely by Stripe — the bot never sees them, so
+# the authoritative purchase record is the Stripe Dashboard. This table and
+# modules/subscriptions/storage.py are kept as the foundation for a future pass
+# that records purchases and grants Discord roles automatically; doing that
+# needs a publicly reachable webhook endpoint, which was deliberately dropped
+# (see the 2026-08-30 CLAUDE.md entries).
+#
+# Shape, for when that lands: one row per purchase, not per customer — the same
+# buyer purchasing in consecutive months gets two rows, giving a month-by-month
+# log via created_at (storage.get_by_month). Keyed on stripe_checkout_session_id
+# so a redelivered webhook upserts idempotently. `status` mirrors Stripe
+# Checkout's payment_status verbatim (paid / unpaid / no_payment_required).
+# `discord_id` is reserved for the role-granting pass.
 CREATE_SUBSCRIPTIONS = """
 CREATE TABLE IF NOT EXISTS subscriptions (
     id SERIAL PRIMARY KEY,

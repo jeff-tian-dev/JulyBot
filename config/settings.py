@@ -13,13 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-REQUIRED_VARS = (
-    "DISCORD_TOKEN",
-    "COC_API_TOKEN",
-    "DATABASE_URL",
-    "STRIPE_SECRET_KEY",
-    "STRIPE_WEBHOOK_SECRET",
-)
+REQUIRED_VARS = ("DISCORD_TOKEN", "COC_API_TOKEN", "DATABASE_URL")
 
 
 def _require(name: str) -> str:
@@ -102,14 +96,11 @@ class Settings:
     CLAN_WATCH_DAILY_HOUR: int = 1
     CLAN_WATCH_TIMEZONE: str = "America/New_York"
     RANKED_TRACKING_POLL_INTERVAL_MINUTES: int = 20
-    STRIPE_SECRET_KEY: str = ""
-    STRIPE_WEBHOOK_SECRET: str = ""
-    STRIPE_PUBLISHABLE_KEY: str = ""
-    STRIPE_PRICE_ID_L2_L3: str = ""
-    STRIPE_PRICE_ID_L1: str = ""
-    WEB_HOST: str = "127.0.0.1"
-    WEB_PORT: int = 8001
-    WEB_BASE_URL: str = "http://localhost:8001"
+    # Stripe Payment Links surfaced by /subscribe. Created in the Stripe
+    # Dashboard (Payment Links); empty means the tier is unavailable and
+    # /subscribe says so rather than posting a dead button.
+    STRIPE_PAYMENT_LINK_L2_L3: str = ""
+    STRIPE_PAYMENT_LINK_L1: str = ""
 
 
 def _load() -> Settings:
@@ -151,14 +142,8 @@ def _load() -> Settings:
         CLAN_WATCH_DAILY_HOUR=_int("CLAN_WATCH_DAILY_HOUR", 1),
         CLAN_WATCH_TIMEZONE=_optional("CLAN_WATCH_TIMEZONE", "America/New_York"),
         RANKED_TRACKING_POLL_INTERVAL_MINUTES=_int("RANKED_TRACKING_POLL_INTERVAL_MINUTES", 20),
-        STRIPE_SECRET_KEY=_require("STRIPE_SECRET_KEY"),
-        STRIPE_WEBHOOK_SECRET=_require("STRIPE_WEBHOOK_SECRET"),
-        STRIPE_PUBLISHABLE_KEY=_optional("STRIPE_PUBLISHABLE_KEY", ""),
-        STRIPE_PRICE_ID_L2_L3=_optional("STRIPE_PRICE_ID_L2_L3", ""),
-        STRIPE_PRICE_ID_L1=_optional("STRIPE_PRICE_ID_L1", ""),
-        WEB_HOST=_optional("WEB_HOST", "127.0.0.1"),
-        WEB_PORT=_int("WEB_PORT", 8001),
-        WEB_BASE_URL=_optional("WEB_BASE_URL", "http://localhost:8001"),
+        STRIPE_PAYMENT_LINK_L2_L3=_optional("STRIPE_PAYMENT_LINK_L2_L3", ""),
+        STRIPE_PAYMENT_LINK_L1=_optional("STRIPE_PAYMENT_LINK_L1", ""),
     )
 
 

@@ -1,13 +1,15 @@
-"""Persistence for Stripe-backed purchases (web/ package checkout site).
+"""Persistence for Stripe purchases of subscriber access.
 
-Raw asyncpg by design, pool-first, no Stripe or FastAPI imports here — this
-module only knows how to read/write the subscriptions table, so it stays
-testable with a mocked pool and no running web app (see
-modules/agreements/storage.py for the same pattern).
+NOT CURRENTLY CALLED. Purchases go through Stripe Payment Links posted by
+/subscribe, hosted entirely by Stripe — nothing in the bot observes them, so
+the Stripe Dashboard is the authoritative record. This module is kept as the
+foundation for a future pass that records purchases and grants Discord roles
+automatically, which needs a publicly reachable webhook endpoint (see
+CLAUDE.md). It is fully implemented and tested; only the caller is missing.
 
-Access is repurchased monthly by the buyer's own action, not auto-renewed by
-Stripe (Checkout mode="payment", not mode="subscription") — see CLAUDE.md for
-why. One row per purchase, not one row per customer.
+Raw asyncpg by design, pool-first, no Stripe or FastAPI imports — callable
+with a mocked pool and no running bot (see modules/agreements/storage.py for
+the same pattern). One row per purchase, not one row per customer.
 """
 from __future__ import annotations
 

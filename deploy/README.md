@@ -32,21 +32,13 @@ git pull
 chmod +x deploy/*.sh                        # only if the release added new scripts
 .venv/bin/pip install -r requirements.txt   # only if dependencies changed
 .venv/bin/python scripts/init_db.py         # only if the schema changed; idempotent, safe to re-run
-./deploy/install-service-all.sh             # restart both services
+./deploy/install-service.sh                 # restart the bot
 ```
-
-`install-service-all.sh` restarts the bot and the website together. Use
-`./deploy/install-service.sh` or `./deploy/install-service-web.sh` alone if only one side
-changed.
 
 `.env` is **not** in git (it holds secrets) — when a release adds new environment variables,
 copy the new keys from `.env.example` into this machine's `.env` by hand **before** restarting.
-
-⚠️ **A missing required variable stops the bot too, not just the website.** Both processes
-load the same [config/settings.py](../config/settings.py), which raises at import time if
-anything in `REQUIRED_VARS` is unset — so e.g. deploying the Stripe release without adding
-`STRIPE_SECRET_KEY` takes the Discord bot offline as well. The error names the missing
-variable; check `logs/julybot.stderr.log` and `logs/julybot-web.stderr.log`.
+[config/settings.py](../config/settings.py) raises at import time if a variable in
+`REQUIRED_VARS` is unset, naming the one that's missing; check `logs/julybot.stderr.log`.
 
 ## Run the bot
 
@@ -75,86 +67,6 @@ Remove the launchd agent entirely:
 ```bash
 ./deploy/uninstall-service.sh
 ```
-
-## Run the web service (Stripe subscription site)
-
-The subscription website (`web/`) is a **separate process** from the bot — its own launchd
-service, its own log files, started/stopped independently. Installing, restarting, or
-removing the bot's service has no effect on the website, and vice versa.
-
-**Foreground** (good for debugging):
-
-```bash
-./deploy/start-web.sh
-```
-
-**Background** (auto-start on login, restart on crash):
-
-```bash
-./deploy/install-service-web.sh
-```
-
-Logs go to `logs/julybot-web.stdout.log` and `logs/julybot-web.stderr.log`.
-
-Stop the background service:
-
-```bash
-./deploy/stop-web.sh
-```
-
-Remove the launchd agent entirely:
-
-```bash
-./deploy/uninstall-service-web.sh
-```
-
-### Restarting both services at once
-
-After a code deploy that touches both the bot and the website, `./deploy/install-service-all.sh`
-runs `install-service.sh` and `install-service-web.sh` in one command — a convenience wrapper
-only. The two remain independent launchd services underneath (`com.julybot` and
-`com.julybot.web`); this just saves typing both commands. Matching `./deploy/stop-all.sh` and
-`./deploy/uninstall-service-all.sh` wrappers also exist. Use the individual `*-web.sh` / plain
-`*.sh` scripts when you only need to restart one side (e.g. a website-only change).
-
-### Stripe webhook setup
-
-Once the site is publicly reachable (see below), create a webhook endpoint in the
-[Stripe Dashboard](https://dashboard.stripe.com/webhooks) pointing at:
-
-```
-https://<your-domain>/webhook/stripe
-```
-
-Select at least `checkout.session.completed` — that's the only event type this app currently
-handles (Checkout runs in one-time-payment mode, not a recurring Stripe subscription, so
-`customer.subscription.*` events never apply here; see the 2026-08-30 CLAUDE.md entry). Every
-other event Stripe sends is safely acknowledged and ignored. Copy the resulting signing secret
-into `STRIPE_WEBHOOK_SECRET`.
-
-For local testing without a public domain, use the [Stripe CLI](https://stripe.com/docs/stripe-cli):
-
-```bash
-stripe listen --forward-to localhost:8001/webhook/stripe
-```
-
-### Making the site publicly reachable / going live
-
-The site currently listens only on `127.0.0.1:8001`. Publishing it at
-**seventhmonthlegends.fyi** and switching Stripe from test mode to live is a one-time
-setup done entirely outside the app — router port forwarding, Porkbun DNS, Caddy for
-HTTPS, and Stripe account activation.
-
-**See [GOING-LIVE.md](GOING-LIVE.md)** for the full step-by-step handoff, including what
-to check after each phase.
-
-Two things from it worth knowing while working on the app itself:
-
-- **uvicorn stays bound to `127.0.0.1`.** Caddy terminates TLS in front of it, so the
-  application is never directly exposed. Don't set `WEB_HOST=0.0.0.0`.
-- **The pricing page makes no Stripe API calls**, so the UI can be loaded and reviewed
-  with placeholder Stripe keys in `.env` — only the Subscribe button needs real
-  credentials.
 
 ## Environment
 
