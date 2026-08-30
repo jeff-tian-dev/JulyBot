@@ -333,7 +333,54 @@ END $$;
 ALTER TABLE agreements ADD COLUMN IF NOT EXISTS payment_method VARCHAR(20) NOT NULL DEFAULT 'PayPal';
 """
 
+# A one-time Stripe purchase bought through the web/ package's checkout site.
+# Access is repurchased monthly by the buyer's own action (matching the
+# server's existing ticket-based resub workflow) rather than auto-renewed by
+# Stripe, so this is Checkout mode="payment", not mode="subscription" — there
+# is no Stripe subscription object to track. One row per purchase (not one row
+# per customer): the same buyer purchasing in consecutive months produces two
+# rows, giving a natural month-by-month purchase log via created_at (see
+# storage.get_by_month). Keyed on stripe_checkout_session_id (always present,
+# unique per checkout attempt) so a redelivered/duplicate webhook event
+# upserts idempotently instead of erroring or duplicating a row. `status`
+# mirrors Stripe Checkout's own payment_status strings verbatim (paid,
+# unpaid, no_payment_required) so the webhook handler can copy it directly
+# with no translation table. `discord_username_hint` is an unverified,
+# optional value the buyer typed on the pricing page (Stripe Checkout
+# metadata); `discord_id` is reserved but deliberately left unpopulated this
+# pass — Discord role-granting off a purchase is a deferred follow-up
+# feature, and reserving the column now avoids a migration when that lands.
+CREATE_SUBSCRIPTIONS = """
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id SERIAL PRIMARY KEY,
+    stripe_customer_id VARCHAR(255) NOT NULL,
+    stripe_checkout_session_id VARCHAR(255) UNIQUE,
+    tier VARCHAR(50) NOT NULL,
+    email VARCHAR(320) NOT NULL,
+    discord_username_hint VARCHAR(100),
+    discord_id BIGINT,
+    status VARCHAR(30) NOT NULL DEFAULT 'unpaid',
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_customer ON subscriptions (stripe_customer_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_discord_id ON subscriptions (discord_id) WHERE discord_id IS NOT NULL;
+"""
+
+# Converts a subscriptions table created by the original mode="subscription"
+# design (recurring Stripe subscriptions) into the one-time-payment shape
+# above. Only ever ran against test-mode data during development — no real
+# purchases are lost. RENAME/DROP have no IF EXISTS-safe single form across
+# repeated runs other than checking information_schema first, same pattern as
+# MIGRATE_AGREEMENTS_PAYMENT_FIELDS.
+MIGRATE_SUBSCRIPTIONS_ONE_TIME = """
+ALTER TABLE subscriptions DROP COLUMN IF EXISTS stripe_subscription_id;
+ALTER TABLE subscriptions DROP COLUMN IF EXISTS current_period_end;
+ALTER TABLE subscriptions DROP COLUMN IF EXISTS cancel_at_period_end;
+"""
+
 ALL_TABLES = (
+    "subscriptions",
     "ranked_tracking",
     "agreements",
     "base_post_downloads",
@@ -423,6 +470,11 @@ async def create_tables(pool: asyncpg.Pool) -> None:
 
         logger.info("Creating table ranked_tracking if not exists")
         await conn.execute(CREATE_RANKED_TRACKING)
+
+        logger.info("Creating table subscriptions if not exists")
+        await conn.execute(CREATE_SUBSCRIPTIONS)
+        logger.info("Applying subscriptions one-time-payment migration if needed")
+        await conn.execute(MIGRATE_SUBSCRIPTIONS_ONE_TIME)
 
 
 async def drop_tables(pool: asyncpg.Pool) -> None:

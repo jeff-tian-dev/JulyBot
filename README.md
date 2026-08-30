@@ -11,6 +11,7 @@ A Discord bot for Clash of Clans clans, built around nine independent modules:
 - **Moderation** — admin-only `/kick`, `/ban`, `/unban` slash commands with pre-flight validation, public taunt messages, and an audit log embed to a mod-log channel.
 - **Roster** — admin-managed named groups of players (by Discord user or raw CoC tag). Optionally *watch* a roster to get alerts when a member leaves or rejoins the clan family (`COC_FAMILY_CLAN_TAGS`) and to track how long each member has been out.
 - **Ranked tracker** — looks up a player's current Ranked Battles weekly tournament group (`/group`) and renders a refreshable dashboard of defenses received this week, with no stored history — everything is fetched live from the CoC API on each refresh.
+- **Subscriptions** — a small FastAPI website (`web/`) offering paid monthly access tiers via Stripe Checkout, purchased one time and repurchased each month by the buyer (not auto-renewing). Runs as its own process alongside the bot; handles checkout + webhook plumbing only (no Discord role granting yet).
 
 The Discord layer (`disnake` Cogs) is a thin shim. Each module is a plain Python package, callable and testable without a running bot.
 
@@ -76,11 +77,20 @@ JulyBot/
 |   |-- roster/
 |   |   |-- storage.py        # roster CRUD, membership, clan-membership state
 |   |   `-- watcher.py        # clan-watch poller: leave/rejoin alerts + absence
-|   `-- ranked_tracker/
-|       |-- poller.py         # CoC API client for /players and /leaguegroup
-|       |-- group.py          # group resolution, defense histogram, embed rendering
-|       |-- extrapolate.py    # per-member 30-attack pace extrapolation (/groupextrapolate)
-|       `-- tracking.py       # /trackingon|off|list -- DM alerts on status change
+|   |-- ranked_tracker/
+|   |   |-- poller.py         # CoC API client for /players and /leaguegroup
+|   |   |-- group.py          # group resolution, defense histogram, embed rendering
+|   |   |-- extrapolate.py    # per-member 30-attack pace extrapolation (/groupextrapolate)
+|   |   `-- tracking.py       # /trackingon|off|list -- DM alerts on status change
+|   `-- subscriptions/
+|       `-- storage.py        # subscriptions table CRUD (pool-first, no Stripe/FastAPI imports)
+|-- web/                      # subscription website -- separate process from the bot
+|   |-- app.py                # FastAPI app factory + lifespan (DB pool open/close)
+|   |-- main.py                # uvicorn entrypoint -- python web/main.py
+|   |-- tiers.py                # tier display config (name/price/description) + Price IDs from settings
+|   |-- stripe_client.py       # only module that imports `stripe`; wraps calls in asyncio.to_thread
+|   |-- routes/                # pages.py (pricing/success/cancel), checkout.py, webhook.py
+|   `-- templates/              # Jinja2 templates, no JS framework
 |-- discord_bot/
 |   |-- bot.py                # create_bot() — InteractionBot factory
 |   `-- commands/             # one Cog per module (account, x, youtube, moderation, roster, post, base_post, agreement, ranked, + stub legend/base_finder/ping)
@@ -168,6 +178,14 @@ cp .env.example .env   # only if setup.sh didn't already create it
 | `CLAN_WATCH_CHANNEL_ID`          | no       | `1528897151625592993`                  | Channel that clan-watch leave/rejoin alerts post to |
 | `CLAN_WATCH_POLL_INTERVAL_MINUTES` | no     | `10`                                   | How often watched rosters are checked against the clan family |
 | `RANKED_TRACKING_POLL_INTERVAL_MINUTES` | no | `20`                              | How often tracked players' likely-to-be-hit status is checked for `/trackingon` DM alerts |
+| `STRIPE_SECRET_KEY`              | yes      | —                                       | Secret key from the Stripe Dashboard (test or live mode)   |
+| `STRIPE_WEBHOOK_SECRET`          | yes      | —                                       | Signing secret for the `/webhook/stripe` endpoint (Stripe Dashboard or `stripe listen`) |
+| `STRIPE_PUBLISHABLE_KEY`         | no       | empty                                   | Unused by redirect-based Checkout; kept for future client-side Stripe.js use |
+| `STRIPE_PRICE_ID_L2_L3`          | no       | empty                                   | Stripe Price ID for the L2/L3 tier ($20/month)              |
+| `STRIPE_PRICE_ID_L1`             | no       | empty                                   | Stripe Price ID for the L1 tier ($30/month, highest)        |
+| `WEB_HOST`                       | no       | `127.0.0.1`                             | Bind address for the subscription website's uvicorn server  |
+| `WEB_PORT`                       | no       | `8001`                                  | Bind port for the subscription website                      |
+| `WEB_BASE_URL`                   | no       | `http://localhost:8001`                 | Public base URL used to build Stripe Checkout success/cancel redirect URLs — set to the real `https://<domain>` once deployed |
 
 Missing any required variable raises a clear `ValueError` at startup.
 
@@ -195,6 +213,8 @@ Background logs: `logs/julybot.stdout.log` and `logs/julybot.stderr.log`.
 
 Startup sequence: load settings -> open asyncpg pool -> ensure tables -> seed unseeded YouTube channels -> start APScheduler -> connect Discord. Ctrl-C (foreground) or `./deploy/stop.sh` (background) triggers an ordered shutdown.
 
+The subscription website is a **separate process** with its own start/stop scripts (`./deploy/start-web.sh`, `./deploy/install-service-web.sh`, `./deploy/stop-web.sh`) and its own launchd service — see [deploy/README.md](deploy/README.md#run-the-web-service-stripe-subscription-site) for the full setup, including Stripe webhook configuration and making the site publicly reachable. To restart the bot and the website together after a deploy, `./deploy/install-service-all.sh` runs both install scripts in one command (still two independent launchd services underneath); matching `stop-all.sh`/`uninstall-service-all.sh` wrappers also exist.
+
 ---
 
 ## Database schema
@@ -214,6 +234,7 @@ Startup sequence: load settings -> open asyncpg pool -> ensure tables -> seed un
 | `clan_membership`  | Per-tag clan in/out state + accumulated absence, kept by the clan-watch poller |
 | `coc_player_cache` | Short-TTL cache of live CoC player name + current clan, shared across rosters |
 | `ranked_tracking`  | `/trackingon` subscriptions: Discord user + CoC tag pairs, with the last-seen likely-to-be-hit status |
+| `subscriptions`    | Stripe one-time purchases bought through the `web/` checkout site (repurchased monthly, not auto-renewing): one row per purchase, customer ID, tier, email, status |
 
 See [database/models.py](database/models.py) for the exact DDL.
 
@@ -232,6 +253,8 @@ Tests mock `asyncpg.Pool` and patch `aiohttp` calls — no Postgres or network a
 ## Slash commands
 
 The Cogs listed in `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py) are loaded today: **x, youtube, moderation, account, roster, post, base_post, agreement, ranked**. The legend, base_finder, and ping Cogs exist but are still stubs and are commented out of the load list.
+
+The **subscriptions** feature has no Discord command surface — it's a separate website (`web/`, see below) reachable outside of Discord, not a slash command.
 
 | Command                          | Module             | State        |
 | -------------------------------- | ------------------ | ------------ |
@@ -281,6 +304,7 @@ The Cogs listed in `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py) are
 Module logic is implemented end-to-end across all packages. The wiring gap is on the Discord side:
 
 - **Wired and live:** account linker, X monitor, YouTube feed tracker, moderation, roster, announce (`/post`, `/postbase`), agreement, and ranked tracker (`/group`) Cogs delegate to their module functions.
+- **Subscriptions website (`web/`):** checkout + Stripe webhook plumbing is implemented and tested (one-time monthly purchase, not a recurring Stripe subscription — see the 2026-08-30 CLAUDE.md entry). Discord role granting off a purchase is explicitly **not** built yet — `subscriptions.discord_id` is a reserved, unpopulated column for that future pass. There's also no expiry-date tracking yet; `subscriptions` is currently just a purchase log.
 - **Stubs, not loaded:** the legend, base_finder, and ping Cogs still return placeholder text and are commented out of `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py). Their underlying module functions and scheduler jobs are implemented — only the Cog replies are stubbed.
 - The legend, base-finder, and YouTube scheduler jobs run unconditionally; the X poll job is registered only when `X_COOKIES` is set, and the clan-watch job only when a clan tag (`COC_FAMILY_CLAN_TAGS` or `COC_CLAN_TAG`) is set.
 - `modules/base_finder/detector.py` — CV thresholds are placeholders, marked `NOTE FOR CV ENGINEER`. Tune against real VOD frames.
