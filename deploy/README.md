@@ -22,6 +22,26 @@ Edit `.env` with your secrets, then initialize the database:
 .venv/bin/python scripts/init_db.py
 ```
 
+## Deploying a code update
+
+Code reaches this machine via `git pull`. The full update sequence:
+
+```bash
+cd /Users/jefftian/JulyBot
+git pull
+.venv/bin/pip install -r requirements.txt   # only if dependencies changed
+.venv/bin/python scripts/init_db.py         # only if the schema changed; idempotent, safe to re-run
+./deploy/install-service-all.sh             # restart both services
+```
+
+`install-service-all.sh` restarts the bot and the website together. Use
+`./deploy/install-service.sh` or `./deploy/install-service-web.sh` alone if only one side
+changed.
+
+`.env` is **not** in git (it holds secrets) — when a release adds new environment variables,
+copy the new keys from `.env.example` into this machine's `.env` by hand before restarting,
+or the service will fail at startup with a `ValueError` naming the missing variable.
+
 ## Run the bot
 
 **Foreground** (good for debugging):

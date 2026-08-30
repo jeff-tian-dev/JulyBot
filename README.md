@@ -215,6 +215,20 @@ Startup sequence: load settings -> open asyncpg pool -> ensure tables -> seed un
 
 The subscription website is a **separate process** with its own start/stop scripts (`./deploy/start-web.sh`, `./deploy/install-service-web.sh`, `./deploy/stop-web.sh`) and its own launchd service — see [deploy/README.md](deploy/README.md#run-the-web-service-stripe-subscription-site) for the full setup, including Stripe webhook configuration and making the site publicly reachable. To restart the bot and the website together after a deploy, `./deploy/install-service-all.sh` runs both install scripts in one command (still two independent launchd services underneath); matching `stop-all.sh`/`uninstall-service-all.sh` wrappers also exist.
 
+### 6. Deploying a code update
+
+Code reaches the Mac Studio via `git pull`:
+
+```bash
+cd /Users/jefftian/JulyBot
+git pull
+.venv/bin/pip install -r requirements.txt   # only if dependencies changed
+.venv/bin/python scripts/init_db.py         # only if the schema changed; idempotent
+./deploy/install-service-all.sh             # restart both services
+```
+
+`.env` is not in git — when a release adds new environment variables, copy the new keys from `.env.example` into the Mac Studio's `.env` before restarting, or startup fails with a `ValueError` naming the missing variable. See [deploy/README.md](deploy/README.md#deploying-a-code-update) for details.
+
 ---
 
 ## Database schema
