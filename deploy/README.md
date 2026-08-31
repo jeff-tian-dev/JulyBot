@@ -72,6 +72,11 @@ Two things to expect while running this:
 - **`init_db.py` drops the `subscriptions` table.** That is intended. It was built for the
   deleted FastAPI webhook, never held a real row, and is replaced by `subscribers`. The
   destructive `DROP TABLE` in the output is not an error.
+- **`init_db.py` also clears a stale `payment_method = 'PayPal'`** off agreements written by
+  `/subscribe`. The column carried a `DEFAULT 'PayPal'` from when PayPal was the only payment
+  option, so Stripe purchases were printing "Payment Method: PayPal" on their receipts. Rows
+  from the retired moderator flow keep their value — that one is real. Nothing to do; it just
+  explains the `UPDATE` in the log.
 - **`STRIPE_SECRET_KEY` is deliberately optional and *not* in `REQUIRED_VARS`.** Leaving it
   blank still starts the bot — Confirm Payment just reports that Stripe isn't configured, and
   the subscriber-status refresh job doesn't register. This is on purpose: a Stripe

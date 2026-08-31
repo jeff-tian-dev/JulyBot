@@ -429,3 +429,57 @@ async def test_set_payer_name_backfills_the_column() -> None:
     assert "UPDATE agreements" in sql
     assert "payer_name = $2" in sql
     assert args == [7, "Jane Doe"]
+
+
+# --- payment_method must not default to PayPal --------------------------------
+
+
+def test_receipt_for_a_stripe_purchase_never_says_paypal() -> None:
+    """Payment runs through Stripe. A receipt may be read by a payment
+    processor during a dispute, so naming the wrong one is a real problem.
+
+    The renderer was always conditional; the bug was in the schema, where
+    payment_method carried DEFAULT 'PayPal' and silently filled itself in.
+    """
+    text = validation.receipt_text(
+        _self_serve_row(payer_name="Jane Doe"), buyer_label="buyer#1"
+    )
+
+    assert "PayPal" not in text
+    assert "Payment Method" not in text
+    assert "Jane Doe" in text
+
+
+def test_payment_method_default_is_dropped_and_backfilled_rows_cleared() -> None:
+    """Pins both halves of the fix together, because either alone leaves
+    'PayPal' on a Stripe receipt: DROP DEFAULT stops new rows getting it, and
+    the UPDATE clears rows written while the default was still live."""
+    from database import models
+
+    assert (
+        "ALTER TABLE agreements ALTER COLUMN payment_method DROP DEFAULT;"
+        in models.MIGRATE_AGREEMENTS_SELF_SERVE
+    )
+    # Only self-serve rows — a moderator-flow row's 'PayPal' is real evidence
+    # of how that buyer actually paid, and must survive.
+    assert "payment_contact IS NULL" in models.CLEAR_DEFAULTED_PAYMENT_METHOD
+    assert "payment_method = 'PayPal'" in models.CLEAR_DEFAULTED_PAYMENT_METHOD
+
+
+def test_historical_paypal_rows_still_render() -> None:
+    """The cleanup must not erase genuine PayPal evidence from the old flow."""
+    text = validation.receipt_text(_moderator_row(), buyer_label="buyer#1")
+
+    assert "Payment Method: PayPal" in text
+    assert "jane@example.com" in text
+
+
+def test_agreement_text_describes_stripe_not_paypal() -> None:
+    """The signed terms are stored per-row as dispute evidence, so they must
+    describe the processor actually used."""
+    from modules.agreements import document
+
+    assert "PayPal" not in document.AGREEMENT_FULL_TEXT
+    assert "Paypal" not in document.AGREEMENT_FULL_TEXT
+    assert "PayPal" not in document.AGREEMENT_SUMMARY
+    assert "Stripe" in document.AGREEMENT_FULL_TEXT

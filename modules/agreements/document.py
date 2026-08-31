@@ -1,10 +1,19 @@
-"""The purchase agreement content shown by /agreement send.
+"""The purchase agreement content shown as step 1 of /subscribe.
 
 The full text is too long for a Discord embed (4096 char cap) or a modal
 TextDisplay (4000 char cap), so the buyer-facing display is the attached PDF
 itself plus a short summary embed. AGREEMENT_FULL_TEXT is a verbatim transcript
 of that PDF, stored per-row in agreements.agreement_text at send time so the DB
 record captures the exact terms text even if the PDF file changes later.
+
+*** THE PDF MUST BE RE-EXPORTED TO MATCH ANY EDIT MADE HERE. ***
+
+That transcript relationship is the whole point of this constant, and nothing
+enforces it — the buyer reads the PDF, but agreements.agreement_text stores this
+string, so a divergence means the row is not evidence of what they were shown.
+On 2026-08-30 the payment sections were rewritten from PayPal to Stripe; if
+data/agreements/terms_and_conditions.pdf still says PayPal, it is stale and
+outranks nothing — regenerate it before sending any further agreements.
 """
 from __future__ import annotations
 
@@ -18,7 +27,9 @@ AGREEMENT_SUMMARY = (
     "- All sales are final — payments are **non-refundable** once access is provided.\n"
     "- Content leaking, redistribution, or account sharing is prohibited and may result "
     "in termination without a refund.\n"
-    "- You agree not to make false or misleading statements to PayPal or another payment "
+    "- Subscriptions bill **monthly through Stripe** and renew automatically until you "
+    "cancel — message a moderator to cancel future renewals.\n"
+    "- You agree not to make false or misleading statements to Stripe or another payment "
     "processor to recover payment after receiving access.\n"
     "- We may share evidence of your purchase and acceptance of these Terms with a "
     "payment processor if a dispute is filed.\n\n"
@@ -26,7 +37,7 @@ AGREEMENT_SUMMARY = (
 )
 
 AGREEMENT_FULL_TEXT = """TERMS AND CONDITIONS
-Last Updated: 8/17/2026
+Last Updated: 8/30/2026
 
 These Terms and Conditions ("Terms") govern access to and use of the [JULY LEGENDS SUBSCRIPTION] ("Service," "we," "us," or "our"), including all subscription-only content, communities, files, media, resources, messages, downloads, and other materials made available through the Service.
 
@@ -46,7 +57,9 @@ We reserve the right to modify, replace, add, or remove content or features of t
 
 Payments must be made using the payment methods officially provided or approved by us at checkout.
 
-You are responsible for providing accurate payment information and for any fees or charges associated with your chosen payment method. (e.g. Paypal Goods and Services Fees)
+You are responsible for providing accurate payment information and for any fees or charges associated with your chosen payment method.
+
+Subscriptions are billed monthly through Stripe and renew automatically until cancelled. You may cancel future renewals at any time by contacting a moderator; cancellation stops future billing and does not refund payments already made.
 
 3. Refund Policy
 
@@ -94,11 +107,11 @@ We are not obligated to provide advance notice, disclose confidential evidence, 
 
 Termination for misconduct does not erase the Member's obligations under these Terms and does not entitle the Member to a refund.
 
-7. Payment Disputes, Chargebacks, and PayPal Claims
+7. Payment Disputes and Chargebacks
 
 Members retain any dispute rights that cannot legally be waived and any rights independently provided by their payment provider.
 
-However, you agree that you will not knowingly make false, misleading, or fraudulent statements to PayPal, a card issuer, bank, payment processor, or other financial institution in an attempt to recover payment after receiving access to the Service.
+However, you agree that you will not knowingly make false, misleading, or fraudulent statements to Stripe, a card issuer, bank, payment processor, or other financial institution in an attempt to recover payment after receiving access to the Service.
 
 In particular, termination of your account for violating these Terms does not mean that the Service was not delivered.
 

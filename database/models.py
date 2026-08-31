@@ -265,15 +265,20 @@ CREATE TABLE IF NOT EXISTS base_post_downloads (
 #      carry real dispute evidence, which is why the columns are kept rather than dropped.
 #   2. Rows written by `/subscribe`, where an admin opens the flow for a buyer in a ticket
 #      and the buyer accepts the terms before being shown the Stripe payment links. Stripe
-#      already knows who paid, so the payment columns are NULL.
+#      already knows who paid, so payment_method / payment_contact are NULL — the payment
+#      is a Stripe subscription, and calling it "PayPal" on a receipt would be wrong. See
+#      the DROP DEFAULT in MIGRATE_AGREEMENTS_SELF_SERVE, which is what keeps them NULL.
+#      payer_name IS populated on these, from the Stripe customer record at confirmation.
 #
 # A `/subscribe` row moves through three states: pending (created when the message is
 # posted, so the persistent button has an id to carry) -> signed (buyer clicked I Agree)
 # -> confirmed (an admin clicked Confirm Payment). It can be voided from any of them.
 #
-# `confirmed_at` / `confirmed_by` are an ADMIN'S ATTESTATION that they saw the payment in
-# the Stripe Dashboard — NOT a verified payment. There is no Stripe webhook, so the bot
-# never observes a charge; don't treat a confirmed row as proof of payment on its own.
+# `confirmed_at` / `confirmed_by` record WHO linked this agreement to a live Stripe
+# subscription, which the bot fetches from Stripe's API at confirmation time — so the
+# subscription's existence and status are verified, not attested. What remains human
+# judgement is WHICH Stripe subscription belongs to WHICH Discord user: Stripe has no
+# idea who its customers are on Discord. `subscribers.linked_by` records that call too.
 #
 # order_ref is NULL on self-serve rows. It is tempting to record the chosen tier there,
 # but the buyer signs BEFORE picking a tier and the payment buttons are Stripe-hosted
@@ -306,15 +311,37 @@ CREATE TABLE IF NOT EXISTS agreements (
 # self-serve `/subscribe` signatures have none of them. Relax the constraints on tables
 # created before that change. Idempotent: DROP NOT NULL on an already-nullable column is
 # a no-op, so this is safe to re-run.
+#
+# DROP DEFAULT on payment_method is load-bearing, not tidy-up. MIGRATE_AGREEMENTS_PAYMENT_FIELDS
+# adds that column with DEFAULT 'PayPal' to backfill pre-existing rows, which was accurate
+# when PayPal was the only option. Payment now runs through Stripe and `/subscribe` inserts
+# no payment_method at all — but the default silently filled it in anyway, so every new
+# receipt printed "Payment Method: PayPal" for a Stripe purchase. The column must actually
+# be NULL for receipt_text/lookup_embed to omit the line, which is what they already do.
+# Historical rows keep their stored value; only the default for new inserts goes away.
 MIGRATE_AGREEMENTS_SELF_SERVE = """
 ALTER TABLE agreements ALTER COLUMN payer_name DROP NOT NULL;
 ALTER TABLE agreements ALTER COLUMN payment_contact DROP NOT NULL;
 ALTER TABLE agreements ALTER COLUMN payment_method DROP NOT NULL;
+ALTER TABLE agreements ALTER COLUMN payment_method DROP DEFAULT;
 ALTER TABLE agreements ALTER COLUMN sent_by DROP NOT NULL;
 ALTER TABLE agreements ALTER COLUMN channel_id DROP NOT NULL;
 """
 
-# An admin's attestation that they saw the payment in Stripe — see the table comment.
+# Clear the 'PayPal' the DEFAULT above wrote onto `/subscribe` rows before it was dropped.
+#
+# Targets only rows with NO payment_contact: the retired moderator flow required one
+# (payment_contact was NOT NULL until MIGRATE_AGREEMENTS_SELF_SERVE), so its rows always
+# have it and are left untouched — their 'PayPal' is real dispute evidence. A `/subscribe`
+# row never sets it. That makes the split reliable without guessing from timestamps.
+CLEAR_DEFAULTED_PAYMENT_METHOD = """
+UPDATE agreements
+   SET payment_method = NULL
+ WHERE payment_method = 'PayPal'
+   AND payment_contact IS NULL;
+"""
+
+# Records who linked this agreement to a live Stripe subscription — see the table comment.
 MIGRATE_AGREEMENTS_CONFIRMATION = """
 ALTER TABLE agreements ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMP;
 ALTER TABLE agreements ADD COLUMN IF NOT EXISTS confirmed_by BIGINT;
@@ -508,6 +535,9 @@ async def create_tables(pool: asyncpg.Pool) -> None:
         await conn.execute(MIGRATE_AGREEMENTS_SELF_SERVE)
         logger.info("Applying agreements confirmation migration if needed")
         await conn.execute(MIGRATE_AGREEMENTS_CONFIRMATION)
+        # Must run AFTER the self-serve migration, which drops the DEFAULT that wrote these.
+        logger.info("Clearing defaulted PayPal payment_method from self-serve rows")
+        await conn.execute(CLEAR_DEFAULTED_PAYMENT_METHOD)
 
         logger.info("Creating table ranked_tracking if not exists")
         await conn.execute(CREATE_RANKED_TRACKING)
