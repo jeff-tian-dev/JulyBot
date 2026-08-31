@@ -1,108 +1,24 @@
-"""Validate + render /agreement content.
+"""Render purchase-agreement content.
 
-Pool-free and Discord-send-free where possible, so it's unit-testable without a
-bot or database. Persistence lives in storage.py; PDF attachment + sending live
-in the Cog.
+Pool-free and Discord-send-free, so it's unit-testable without a bot or
+database. Persistence lives in storage.py.
+
+Everything here must handle BOTH row shapes in the agreements table: historical
+rows from the retired moderator-driven flow (which carry payer_name /
+payment_method / payment_contact for a PayPal/Venmo/Wise payment) and
+self-serve rows from /subscribe (where those are NULL because Stripe knows who
+paid). See the table comment in database/models.py.
 """
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
 
 import disnake
 
-from modules.announce.poster import PostError
 from modules.agreements.document import AGREEMENT_SUMMARY
-
-MAX_PAYER_NAME_LENGTH = 200
-MAX_PAYMENT_CONTACT_LENGTH = 320
-MAX_ORDER_REF_LENGTH = 200
-MAX_VOID_REASON_LENGTH = 512
-
-PAYMENT_METHODS = ("PayPal", "Venmo", "Wise")
-
-# Not a full RFC 5322 validator — just enough to catch obvious typos. A
-# moderator can still enter a wrong-but-well-formed email; that's an accepted
-# limitation rather than something worth over-engineering around.
-_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
-# PayPal and Venmo identify accounts by a $Cashtag/@handle-style contact
-# (e.g. @jane-doe1) as well as (for PayPal) an email address.
-_HANDLE_RE = re.compile(r"^@[A-Za-z0-9_.-]{1,50}$")
-
 
 AGREEMENT_EMBED_COLOUR = 0x2ECC71
 VOIDED_EMBED_COLOUR = 0x95A5A6
-
-
-def validate_payer_name(name: str) -> str:
-    cleaned = (name or "").strip()
-    if not cleaned:
-        raise PostError("The payer name can't be empty.")
-    if len(cleaned) > MAX_PAYER_NAME_LENGTH:
-        raise PostError(f"The payer name is limited to {MAX_PAYER_NAME_LENGTH} characters.")
-    return cleaned
-
-
-def validate_payment_method(method: str) -> str:
-    cleaned = (method or "").strip()
-    if cleaned not in PAYMENT_METHODS:
-        raise PostError(
-            f"`{cleaned}` isn't a supported payment method "
-            f"(choose one of: {', '.join(PAYMENT_METHODS)})."
-        )
-    return cleaned
-
-
-def validate_payment_contact(method: str, contact: str) -> str:
-    """Validate a payment contact against the shape expected for `method`.
-
-    PayPal: email or a $Cashtag-style @handle. Venmo: an @handle. Wise: an
-    email. Not a full validator for any of these — just enough to catch
-    obvious typos before they end up in a permanent signed record.
-    """
-    cleaned = (contact or "").strip()
-    if not cleaned:
-        raise PostError(f"The {method} contact can't be empty.")
-    if len(cleaned) > MAX_PAYMENT_CONTACT_LENGTH:
-        raise PostError(
-            f"The {method} contact is limited to {MAX_PAYMENT_CONTACT_LENGTH} characters."
-        )
-
-    if method == "PayPal":
-        valid = _EMAIL_RE.match(cleaned) or _HANDLE_RE.match(cleaned)
-        hint = "e.g. jane@example.com or @jane-doe"
-    elif method == "Venmo":
-        valid = _HANDLE_RE.match(cleaned)
-        hint = "e.g. @jane-doe"
-    elif method == "Wise":
-        valid = _EMAIL_RE.match(cleaned)
-        hint = "e.g. jane@example.com"
-    else:
-        raise PostError(f"`{method}` isn't a supported payment method.")
-
-    if not valid:
-        raise PostError(f"`{cleaned}` doesn't look like a valid {method} contact ({hint}).")
-    return cleaned
-
-
-def validate_order_ref(order_ref: str | None) -> str | None:
-    if order_ref is None:
-        return None
-    cleaned = order_ref.strip()
-    if not cleaned:
-        return None
-    if len(cleaned) > MAX_ORDER_REF_LENGTH:
-        raise PostError(f"The order reference is limited to {MAX_ORDER_REF_LENGTH} characters.")
-    return cleaned
-
-
-def validate_void_reason(reason: str) -> str:
-    cleaned = (reason or "").strip()
-    if not cleaned:
-        raise PostError("A void reason is required.")
-    if len(cleaned) > MAX_VOID_REASON_LENGTH:
-        raise PostError(f"The void reason is limited to {MAX_VOID_REASON_LENGTH} characters.")
-    return cleaned
 
 
 def _relative_timestamp(dt: datetime) -> str:
@@ -124,11 +40,24 @@ def _absolute_utc(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
+def terms_embed() -> disnake.Embed:
+    """Step one of /subscribe: the terms the buyer must accept before paying.
+
+    The full text is too long for an embed, so this is the summary; the
+    complete Terms and Conditions PDF is attached to the same message.
+    """
+    return disnake.Embed(
+        title="Purchase Agreement",
+        description=AGREEMENT_SUMMARY,
+        colour=AGREEMENT_EMBED_COLOUR,
+    )
+
+
 def receipt_text(
     record,
     *,
     buyer_label: str,
-    sender_label: str,
+    sender_label: str | None = None,
     voided_by_label: str | None = None,
 ) -> str:
     """Plain-text proof-of-signature document for a signed (or voided) agreement.
@@ -136,17 +65,25 @@ def receipt_text(
     Not tied to Discord's embed limits — meant to be forwarded to a payment
     processor as an attachment, so it carries the exact agreement text the
     buyer saw rather than a pointer to a possibly-since-edited template.
+
+    Payment and sender lines are omitted entirely when NULL (a self-serve row)
+    rather than printed as "None".
     """
     lines = [
         "PURCHASE AGREEMENT RECEIPT",
         "=" * 27,
         f"Agreement ID: #{record['id']}",
         f"Buyer: {buyer_label} (discord id {record['buyer_id']})",
-        f"Payer Name: {record['payer_name']}",
-        f"Payment Method: {record['payment_method']}",
-        f"Payment Contact: {record['payment_contact']}",
-        f"Order Ref: {record['order_ref'] or '(none)'}",
     ]
+
+    if record["payer_name"]:
+        lines.append(f"Payer Name: {record['payer_name']}")
+    if record["payment_method"]:
+        lines.append(f"Payment Method: {record['payment_method']}")
+    if record["payment_contact"]:
+        lines.append(f"Payment Contact: {record['payment_contact']}")
+    if record["order_ref"]:
+        lines.append(f"Order Ref: {record['order_ref']}")
 
     if record["signed_at"]:
         lines.append(f"Signed At: {_absolute_utc(record['signed_at'])}")
@@ -154,7 +91,8 @@ def receipt_text(
     else:
         lines.append("Status: NOT YET SIGNED")
 
-    lines.append(f"Sent By: {sender_label} (discord id {record['sent_by']})")
+    if record["sent_by"]:
+        lines.append(f"Sent By: {sender_label or record['sent_by']} (discord id {record['sent_by']})")
 
     if record["voided_at"]:
         lines.append("")
@@ -169,82 +107,8 @@ def receipt_text(
     return "\n".join(lines)
 
 
-def confirmation_embed(record, *, buyer_label: str) -> disnake.Embed:
-    """The "please confirm your details" panel shown before a buyer can sign.
-
-    Surfaces exactly what a mod typed in — the buyer's Discord identity, the
-    payer name, and the payment method/contact — so a typo or wrong-buyer
-    mistake is caught before it becomes a permanent signed record, not after.
-    """
-    embed = disnake.Embed(
-        title="Confirm Your Details",
-        description=(
-            "Please confirm the details below are correct before signing the "
-            "purchase agreement."
-        ),
-        colour=AGREEMENT_EMBED_COLOUR,
-    )
-    embed.add_field(name="Name", value=record["payer_name"], inline=False)
-    embed.add_field(
-        name="Discord",
-        value=f"{buyer_label} (<@{record['buyer_id']}>, id {record['buyer_id']})",
-        inline=False,
-    )
-    embed.add_field(
-        name=f"{record['payment_method']} Contact", value=record["payment_contact"], inline=False
-    )
-    return embed
-
-
-def pending_embed(*, buyer_id: int, order_ref: str | None) -> disnake.Embed:
-    """The embed posted alongside the PDF attachment and the I Agree button."""
-    embed = disnake.Embed(
-        title="Purchase Agreement",
-        description=AGREEMENT_SUMMARY,
-        colour=AGREEMENT_EMBED_COLOUR,
-    )
-    embed.add_field(name="Buyer", value=f"<@{buyer_id}>", inline=True)
-    if order_ref:
-        embed.add_field(name="Order", value=order_ref, inline=True)
-    return embed
-
-
-def signed_embed(record) -> disnake.Embed:
-    """The embed shown after the buyer has clicked I Agree."""
-    embed = pending_embed(buyer_id=record["buyer_id"], order_ref=record["order_ref"])
-    embed.add_field(
-        name="Status",
-        value=f"✅ Signed {_relative_timestamp(record['signed_at'])}",
-        inline=False,
-    )
-    return embed
-
-
-def voided_embed(record) -> disnake.Embed:
-    """The embed shown after a moderator has voided the agreement."""
-    embed = pending_embed(buyer_id=record["buyer_id"], order_ref=record["order_ref"])
-    embed.colour = VOIDED_EMBED_COLOUR
-    status = "✅ Signed" if record["signed_at"] else "⌛ Not signed"
-    embed.add_field(name="Status", value=status, inline=False)
-    embed.add_field(
-        name="⚠️ Voided",
-        value=f"{_relative_timestamp(record['voided_at'])} — {record['void_reason']}",
-        inline=False,
-    )
-    return embed
-
-
-def embed_for_record(record) -> disnake.Embed:
-    """Rebuild the right embed for an agreement's current state."""
-    if record["voided_at"]:
-        return voided_embed(record)
-    if record["signed_at"]:
-        return signed_embed(record)
-    return pending_embed(buyer_id=record["buyer_id"], order_ref=record["order_ref"])
-
-
 def lookup_embed(buyer_id: int, rows) -> disnake.Embed:
-    """The /agreement lookup panel: every agreement sent to a buyer."""
+    """The /agreement lookup panel: every agreement signed by a buyer."""
     if not rows:
         return disnake.Embed(
             title="Agreements",
@@ -261,10 +125,13 @@ def lookup_embed(buyer_id: int, rows) -> disnake.Embed:
         else:
             status = "⌛ Pending"
         order = f" ({row['order_ref']})" if row["order_ref"] else ""
-        lines.append(
-            f"**#{row['id']}**{order} — {status}\n"
-            f"{row['payment_method']}: {row['payer_name']} ({row['payment_contact']})"
-        )
+        line = f"**#{row['id']}**{order} — {status}"
+        # Only historical moderator-flow rows carry payment details.
+        if row["payment_method"] and row["payer_name"]:
+            line += f"\n{row['payment_method']}: {row['payer_name']}"
+            if row["payment_contact"]:
+                line += f" ({row['payment_contact']})"
+        lines.append(line)
 
     embed = disnake.Embed(
         title="Agreements",
@@ -277,22 +144,8 @@ def lookup_embed(buyer_id: int, rows) -> disnake.Embed:
 
 __all__ = [
     "AGREEMENT_EMBED_COLOUR",
-    "MAX_ORDER_REF_LENGTH",
-    "MAX_PAYER_NAME_LENGTH",
-    "MAX_PAYMENT_CONTACT_LENGTH",
-    "MAX_VOID_REASON_LENGTH",
-    "PAYMENT_METHODS",
     "VOIDED_EMBED_COLOUR",
-    "confirmation_embed",
-    "embed_for_record",
     "lookup_embed",
-    "pending_embed",
     "receipt_text",
-    "signed_embed",
-    "validate_order_ref",
-    "validate_payer_name",
-    "validate_payment_contact",
-    "validate_payment_method",
-    "validate_void_reason",
-    "voided_embed",
+    "terms_embed",
 ]

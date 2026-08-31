@@ -252,26 +252,37 @@ CREATE TABLE IF NOT EXISTS base_post_downloads (
 );
 """
 
-# A purchase agreement sent via /agreement send. `agreement_text` is copied from the
-# module's constant AT SEND TIME (not a pointer to it), so a later wording change never
-# retroactively alters what a past buyer is shown to have agreed to. `signed_at` is NULL
-# until the buyer clicks "I Agree" (storage.sign_agreement enforces the NULL -> NOW()
-# transition, not SQL); a signed row is otherwise immutable — voiding only stamps the
-# voided_* columns alongside it, never touches the original signed fields.
-# payment_method + payment_contact are generic (PayPal / Venmo / Wise, ...) rather than
-# PayPal-specific, since payer_name is also just "name on the payment" regardless of
-# processor.
+# A signed purchase agreement. `agreement_text` is copied from the module's constant AT
+# SIGN TIME (not a pointer to it), so a later wording change never retroactively alters
+# what a past buyer is shown to have agreed to. A signed row is otherwise immutable —
+# voiding only stamps the voided_* columns alongside it, never touches the signed fields.
+#
+# TWO ROW SHAPES live here, and readers (validation.receipt_text / lookup_embed) must
+# render both:
+#   1. Historical rows from the retired moderator-driven `/agreement send` flow, where a
+#      mod typed payer_name / payment_method / payment_contact for a PayPal/Venmo/Wise
+#      payment, posted the agreement to a channel, and the buyer signed it there. These
+#      carry real dispute evidence, which is why the columns are kept rather than dropped.
+#   2. Self-serve rows written by `/subscribe`, where the buyer accepts the terms before
+#      being shown the Stripe payment links. Stripe already knows who paid, so the payment
+#      columns are NULL, as are sent_by / channel_id / message_id (nobody sent it and
+#      nothing is posted publicly — the whole flow is ephemeral).
+#
+# order_ref is NULL on self-serve rows. It is tempting to record the chosen tier there,
+# but the buyer signs BEFORE picking a tier and the payment buttons are Stripe-hosted
+# link buttons — the bot never observes which one was clicked, so any tier stored would
+# be a guess. Don't assume this field is populated.
 CREATE_AGREEMENTS = """
 CREATE TABLE IF NOT EXISTS agreements (
     id SERIAL PRIMARY KEY,
     guild_id BIGINT NOT NULL,
-    channel_id BIGINT NOT NULL,
+    channel_id BIGINT,
     message_id BIGINT UNIQUE,
     buyer_id BIGINT NOT NULL,
-    sent_by BIGINT NOT NULL,
-    payer_name VARCHAR(200) NOT NULL,
-    payment_method VARCHAR(20) NOT NULL DEFAULT 'PayPal',
-    payment_contact VARCHAR(320) NOT NULL,
+    sent_by BIGINT,
+    payer_name VARCHAR(200),
+    payment_method VARCHAR(20),
+    payment_contact VARCHAR(320),
     order_ref VARCHAR(200),
     agreement_text TEXT NOT NULL,
     signed_at TIMESTAMP,
@@ -280,6 +291,18 @@ CREATE TABLE IF NOT EXISTS agreements (
     void_reason VARCHAR(512),
     created_at TIMESTAMP DEFAULT NOW()
 );
+"""
+
+# The moderator-driven flow required payer_name / payment_contact / sent_by / channel_id;
+# self-serve `/subscribe` signatures have none of them. Relax the constraints on tables
+# created before that change. Idempotent: DROP NOT NULL on an already-nullable column is
+# a no-op, so this is safe to re-run.
+MIGRATE_AGREEMENTS_SELF_SERVE = """
+ALTER TABLE agreements ALTER COLUMN payer_name DROP NOT NULL;
+ALTER TABLE agreements ALTER COLUMN payment_contact DROP NOT NULL;
+ALTER TABLE agreements ALTER COLUMN payment_method DROP NOT NULL;
+ALTER TABLE agreements ALTER COLUMN sent_by DROP NOT NULL;
+ALTER TABLE agreements ALTER COLUMN channel_id DROP NOT NULL;
 """
 
 # /trackingon subscribes a Discord user to DM alerts on a CoC player tag when
@@ -466,6 +489,9 @@ async def create_tables(pool: asyncpg.Pool) -> None:
         await conn.execute(CREATE_AGREEMENTS)
         logger.info("Applying agreements payment field migrations if needed")
         await conn.execute(MIGRATE_AGREEMENTS_PAYMENT_FIELDS)
+        # Must run AFTER the line above, which re-adds payment_method as NOT NULL.
+        logger.info("Applying agreements self-serve migration if needed")
+        await conn.execute(MIGRATE_AGREEMENTS_SELF_SERVE)
 
         logger.info("Creating table ranked_tracking if not exists")
         await conn.execute(CREATE_RANKED_TRACKING)

@@ -12,6 +12,38 @@ import asyncpg
 logger = logging.getLogger(__name__)
 
 
+async def create_signed_agreement(
+    pool: asyncpg.Pool,
+    *,
+    guild_id: int,
+    buyer_id: int,
+    agreement_text: str,
+) -> asyncpg.Record:
+    """Insert an already-signed agreement for a self-serve /subscribe buyer.
+
+    One statement rather than create-then-sign: that split existed because a
+    moderator created the row before the buyer signed it, leaving a pending
+    window. Here the row only exists because the buyer just clicked I Agree,
+    so there is nothing to wait for.
+
+    The payment columns (payer_name / payment_method / payment_contact) and
+    sent_by / channel_id / message_id are left NULL — Stripe knows who paid,
+    nobody sent this, and the whole flow is ephemeral. See the agreements
+    table comment in database/models.py.
+    """
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            """
+            INSERT INTO agreements (guild_id, buyer_id, agreement_text, signed_at)
+            VALUES ($1, $2, $3, NOW())
+            RETURNING *;
+            """,
+            guild_id,
+            buyer_id,
+            agreement_text,
+        )
+
+
 async def create_agreement(
     pool: asyncpg.Pool,
     *,
@@ -121,19 +153,3 @@ async def list_agreements_for_buyer(
         )
 
 
-async def list_views_to_restore(pool: asyncpg.Pool) -> list[asyncpg.Record]:
-    """Every published, unsigned agreement — the only ones needing a live button.
-
-    A signed or voided agreement's message already shows its final state and has
-    no further interaction to handle, so restoring a view for it would only waste
-    a registration; unsigned ones need the "I Agree" button re-attached after a
-    restart.
-    """
-    async with pool.acquire() as conn:
-        return await conn.fetch(
-            """
-            SELECT id, buyer_id FROM agreements
-            WHERE message_id IS NOT NULL AND signed_at IS NULL AND voided_at IS NULL
-            ORDER BY id;
-            """
-        )

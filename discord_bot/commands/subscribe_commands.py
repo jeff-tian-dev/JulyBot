@@ -1,19 +1,29 @@
-"""/subscribe — show the subscription tiers and their Stripe payment links.
+"""/subscribe — accept the purchase agreement, then show the Stripe payment links.
 
-The buttons are disnake.ButtonStyle.link buttons, which carry a URL instead
-of a custom_id. Discord opens them client-side, so there's no callback, no
-interaction to ack, and nothing to restore after a restart — unlike the
-persistent views in base_post_commands.py / agreement_commands.py.
+Two ephemeral steps, both private to the buyer:
 
-Checkout is hosted entirely by Stripe (Payment Links), so the bot never sees
-the payment. Subscriptions are recorded in the Stripe Dashboard, not in this
-bot's database, and Discord access is still granted manually.
+  1. The terms panel — a summary embed, the full Terms and Conditions PDF, and
+     an "I Agree" button.
+  2. Clicking I Agree records a signed agreement row (Discord ID + timestamp +
+     the verbatim terms text) and then reveals the tier buttons.
 
-The links are recurring monthly subscriptions — Stripe re-bills the buyer
-each month until they cancel. The embed says so explicitly: an unexpected
-second charge is what generates chargebacks. Cancellation is manual too
-(there's no Stripe customer portal wired up), so the copy points buyers at a
-moderator.
+**The signature is evidence, not a gate.** Checkout is a Stripe-hosted Payment
+Link, so the bot never observes the payment and cannot verify that a signature
+preceded one — anyone holding the link URL can pay without running /subscribe.
+The row exists so a chargeback can be answered with proof the buyer accepted
+the terms. Don't describe it as enforcement.
+
+The payment buttons are disnake.ButtonStyle.link buttons, which carry a URL
+instead of a custom_id. Discord opens them client-side, so there's no callback
+and nothing to restore after a restart. The I Agree button does have a
+callback, but its view is deliberately short-lived rather than persistent
+(unlike base_post_commands.py): it lives inside one ephemeral interaction, and
+if it times out the user just runs /subscribe again.
+
+The links are recurring monthly subscriptions — Stripe re-bills the buyer each
+month until they cancel. The embed says so explicitly: an unexpected second
+charge is what generates chargebacks. Cancellation is manual too (there's no
+Stripe customer portal wired up), so the copy points buyers at a moderator.
 """
 from __future__ import annotations
 
@@ -22,11 +32,16 @@ import logging
 import disnake
 from disnake.ext import commands
 
+from modules.agreements import storage
+from modules.agreements.document import AGREEMENT_FULL_TEXT, AGREEMENT_PDF_PATH
+from modules.agreements.validation import terms_embed
 from modules.subscriptions.tiers import TIERS
 
 logger = logging.getLogger(__name__)
 
 EMBED_COLOUR = 0x5865F2
+# The buyer is mid-purchase; if they wander off, re-running /subscribe is cheap.
+AGREE_TIMEOUT_SECONDS = 600
 
 
 def build_subscribe_embed() -> disnake.Embed:
@@ -73,17 +88,74 @@ def build_subscribe_view() -> disnake.ui.View | None:
     return view
 
 
+class AgreeView(disnake.ui.View):
+    """The "I Agree" button under the terms panel.
+
+    Short-lived and non-persistent on purpose — see the module docstring.
+    """
+
+    def __init__(self, bot: commands.InteractionBot) -> None:
+        super().__init__(timeout=AGREE_TIMEOUT_SECONDS)
+        self.bot = bot
+
+        button = disnake.ui.Button(
+            label="I Agree",
+            style=disnake.ButtonStyle.success,
+        )
+        button.callback = self._on_agree
+        self.add_item(button)
+
+    async def _on_agree(self, inter: disnake.MessageInteraction) -> None:
+        try:
+            record = await storage.create_signed_agreement(
+                self.bot.pool,
+                guild_id=inter.guild.id if inter.guild else 0,
+                buyer_id=inter.author.id,
+                agreement_text=AGREEMENT_FULL_TEXT,
+            )
+        except Exception as exc:  # noqa: BLE001 — surface it, don't fail silently
+            logger.exception("Failed to record agreement for buyer=%s", inter.author.id)
+            await inter.response.send_message(
+                f"Couldn't record your agreement: {type(exc).__name__}. "
+                "Nothing was charged — please try again or contact a moderator.",
+                ephemeral=True,
+            )
+            return
+
+        logger.info(
+            "Agreement id=%s signed by buyer_id=%s via /subscribe",
+            record["id"],
+            inter.author.id,
+        )
+
+        # The terms message carries a PDF attachment, which an edit can't remove,
+        # so the payment panel is a separate follow-up. Disable the button on the
+        # original so it reads as done and can't be double-signed.
+        for item in self.children:
+            item.disabled = True
+            item.label = "Agreed"
+        self.stop()
+
+        await inter.response.edit_message(view=self)
+        await inter.followup.send(
+            embed=build_subscribe_embed(),
+            view=build_subscribe_view(),
+            ephemeral=True,
+        )
+
+
 class SubscribeCommands(commands.Cog):
     def __init__(self, bot: commands.InteractionBot) -> None:
         self.bot = bot
 
     @commands.slash_command(
         name="subscribe",
-        description="Show the subscription tiers and how to buy one.",
+        description="Read the purchase agreement and subscribe.",
     )
     async def subscribe(self, inter: disnake.ApplicationCommandInteraction) -> None:
-        view = build_subscribe_view()
-        if view is None:
+        # Check purchasability before showing the terms, so nobody signs an
+        # agreement for something they can't actually buy.
+        if build_subscribe_view() is None:
             logger.warning("/subscribe used with no payment links configured")
             await inter.response.send_message(
                 "Subscriptions aren't set up yet — please contact a moderator.",
@@ -91,8 +163,19 @@ class SubscribeCommands(commands.Cog):
             )
             return
 
+        if not AGREEMENT_PDF_PATH.exists():
+            logger.error("Agreement PDF missing at %s", AGREEMENT_PDF_PATH)
+            await inter.response.send_message(
+                "The purchase agreement is unavailable right now — please contact a moderator.",
+                ephemeral=True,
+            )
+            return
+
         await inter.response.send_message(
-            embed=build_subscribe_embed(), view=view, ephemeral=True
+            embed=terms_embed(),
+            file=disnake.File(AGREEMENT_PDF_PATH, filename="terms_and_conditions.pdf"),
+            view=AgreeView(self.bot),
+            ephemeral=True,
         )
 
 
