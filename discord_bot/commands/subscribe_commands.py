@@ -6,8 +6,14 @@ interaction to ack, and nothing to restore after a restart — unlike the
 persistent views in base_post_commands.py / agreement_commands.py.
 
 Checkout is hosted entirely by Stripe (Payment Links), so the bot never sees
-the payment. Purchases are recorded in the Stripe Dashboard, not in this
+the payment. Subscriptions are recorded in the Stripe Dashboard, not in this
 bot's database, and Discord access is still granted manually.
+
+The links are recurring monthly subscriptions — Stripe re-bills the buyer
+each month until they cancel. The embed says so explicitly: an unexpected
+second charge is what generates chargebacks. Cancellation is manual too
+(there's no Stripe customer portal wired up), so the copy points buyers at a
+moderator.
 """
 from __future__ import annotations
 
@@ -28,9 +34,9 @@ def build_subscribe_embed() -> disnake.Embed:
     embed = disnake.Embed(
         title="Subscriptions",
         description=(
-            "Pick a tier below to pay securely through Stripe.\n"
-            "Each purchase covers **one month** — there's no automatic renewal, "
-            "so grab it again next month when you want to continue."
+            "Pick a tier below to subscribe securely through Stripe.\n"
+            "This is a **monthly subscription** — you'll be billed automatically "
+            "each month until you cancel. To cancel, message a moderator."
         ),
         colour=EMBED_COLOUR,
     )
@@ -39,7 +45,7 @@ def build_subscribe_embed() -> disnake.Embed:
         if not tier.available:
             value += "\n*Currently unavailable — ask a moderator.*"
         embed.add_field(name=tier.name, value=value, inline=True)
-    embed.set_footer(text="After paying, open a ticket so a moderator can set up your access.")
+    embed.set_footer(text="After subscribing, open a ticket so a moderator can set up your access.")
     return embed
 
 

@@ -88,3 +88,18 @@ async def test_view_omits_unavailable_tier() -> None:
 async def test_view_is_none_when_nothing_configured() -> None:
     with patch.object(subscribe_commands, "TIERS", _tiers(l2_link="", l1_link="")):
         assert subscribe_commands.build_subscribe_view() is None
+
+
+def test_embed_discloses_automatic_monthly_billing() -> None:
+    """The auto-renewal disclosure is load-bearing, not decoration: an
+    unexpected second charge is what produces chargebacks, and a dispute
+    cites what the buyer was shown. If the billing model changes, this
+    assertion should fail and force the copy to change with it."""
+    with patch.object(subscribe_commands, "TIERS", _tiers()):
+        embed = subscribe_commands.build_subscribe_embed()
+
+    description = embed.description.lower()
+    assert "monthly subscription" in description
+    assert "billed automatically" in description
+    # Cancellation is manual — no Stripe customer portal is wired up.
+    assert "cancel" in description

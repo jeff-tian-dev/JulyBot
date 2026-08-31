@@ -7,8 +7,8 @@ structural, code-adjacent config. Adding or renaming a tier means an .env
 addition plus a small change here — accepted given the tier count is small
 and fixed.
 
-Access is a one-time monthly purchase the buyer repeats each month, not an
-auto-renewing Stripe subscription — see CLAUDE.md.
+These are recurring monthly Stripe subscriptions — the buyer is billed
+automatically each month until they cancel. See CLAUDE.md.
 """
 from __future__ import annotations
 
@@ -36,14 +36,14 @@ TIERS: dict[str, TierConfig] = {
         key="l2_l3",
         name="L2/L3",
         price_usd=20,
-        description="L2/L3 base access for one month.",
+        description="L2/L3 base access, billed monthly.",
         payment_link=settings.STRIPE_PAYMENT_LINK_L2_L3,
     ),
     "l1": TierConfig(
         key="l1",
         name="L1",
         price_usd=30,
-        description="L1 base access for one month — our highest tier.",
+        description="L1 base access, billed monthly — our highest tier.",
         payment_link=settings.STRIPE_PAYMENT_LINK_L1,
     ),
 }

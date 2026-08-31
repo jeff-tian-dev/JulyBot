@@ -11,7 +11,7 @@ A Discord bot for Clash of Clans clans, built around nine independent modules:
 - **Moderation** — admin-only `/kick`, `/ban`, `/unban` slash commands with pre-flight validation, public taunt messages, and an audit log embed to a mod-log channel.
 - **Roster** — admin-managed named groups of players (by Discord user or raw CoC tag). Optionally *watch* a roster to get alerts when a member leaves or rejoins the clan family (`COC_FAMILY_CLAN_TAGS`) and to track how long each member has been out.
 - **Ranked tracker** — looks up a player's current Ranked Battles weekly tournament group (`/group`) and renders a refreshable dashboard of defenses received this week, with no stored history — everything is fetched live from the CoC API on each refresh.
-- **Subscriptions** — `/subscribe` posts the paid access tiers with Stripe Payment Link buttons. Checkout is hosted entirely by Stripe; purchases are one-time and repurchased monthly by the buyer (no auto-renewal), and access is granted manually.
+- **Subscriptions** — `/subscribe` posts the paid access tiers with Stripe Payment Link buttons. Checkout is hosted entirely by Stripe; the links are recurring monthly subscriptions (Stripe re-bills until the buyer cancels), and both access and cancellation are handled manually.
 
 The Discord layer (`disnake` Cogs) is a thin shim. Each module is a plain Python package, callable and testable without a running bot.
 
@@ -235,7 +235,7 @@ chmod +x deploy/*.sh                        # only if the release added new scri
 | `clan_membership`  | Per-tag clan in/out state + accumulated absence, kept by the clan-watch poller |
 | `coc_player_cache` | Short-TTL cache of live CoC player name + current clan, shared across rosters |
 | `ranked_tracking`  | `/trackingon` subscriptions: Discord user + CoC tag pairs, with the last-seen likely-to-be-hit status |
-| `subscriptions`    | Purchase log for Stripe subscriptions — **created but unused**; `/subscribe` sends buyers to Stripe-hosted Payment Links, which the bot never observes |
+| `subscriptions`    | Subscription log — **created but unused**; `/subscribe` sends buyers to Stripe-hosted Payment Links, which the bot never observes |
 
 See [database/models.py](database/models.py) for the exact DDL.
 
