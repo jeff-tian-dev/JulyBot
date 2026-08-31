@@ -263,10 +263,17 @@ CREATE TABLE IF NOT EXISTS base_post_downloads (
 #      mod typed payer_name / payment_method / payment_contact for a PayPal/Venmo/Wise
 #      payment, posted the agreement to a channel, and the buyer signed it there. These
 #      carry real dispute evidence, which is why the columns are kept rather than dropped.
-#   2. Self-serve rows written by `/subscribe`, where the buyer accepts the terms before
-#      being shown the Stripe payment links. Stripe already knows who paid, so the payment
-#      columns are NULL, as are sent_by / channel_id / message_id (nobody sent it and
-#      nothing is posted publicly — the whole flow is ephemeral).
+#   2. Rows written by `/subscribe`, where an admin opens the flow for a buyer in a ticket
+#      and the buyer accepts the terms before being shown the Stripe payment links. Stripe
+#      already knows who paid, so the payment columns are NULL.
+#
+# A `/subscribe` row moves through three states: pending (created when the message is
+# posted, so the persistent button has an id to carry) -> signed (buyer clicked I Agree)
+# -> confirmed (an admin clicked Confirm Payment). It can be voided from any of them.
+#
+# `confirmed_at` / `confirmed_by` are an ADMIN'S ATTESTATION that they saw the payment in
+# the Stripe Dashboard — NOT a verified payment. There is no Stripe webhook, so the bot
+# never observes a charge; don't treat a confirmed row as proof of payment on its own.
 #
 # order_ref is NULL on self-serve rows. It is tempting to record the chosen tier there,
 # but the buyer signs BEFORE picking a tier and the payment buttons are Stripe-hosted
@@ -289,6 +296,8 @@ CREATE TABLE IF NOT EXISTS agreements (
     voided_at TIMESTAMP,
     voided_by BIGINT,
     void_reason VARCHAR(512),
+    confirmed_at TIMESTAMP,
+    confirmed_by BIGINT,
     created_at TIMESTAMP DEFAULT NOW()
 );
 """
@@ -303,6 +312,12 @@ ALTER TABLE agreements ALTER COLUMN payment_contact DROP NOT NULL;
 ALTER TABLE agreements ALTER COLUMN payment_method DROP NOT NULL;
 ALTER TABLE agreements ALTER COLUMN sent_by DROP NOT NULL;
 ALTER TABLE agreements ALTER COLUMN channel_id DROP NOT NULL;
+"""
+
+# An admin's attestation that they saw the payment in Stripe — see the table comment.
+MIGRATE_AGREEMENTS_CONFIRMATION = """
+ALTER TABLE agreements ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMP;
+ALTER TABLE agreements ADD COLUMN IF NOT EXISTS confirmed_by BIGINT;
 """
 
 # /trackingon subscribes a Discord user to DM alerts on a CoC player tag when
@@ -492,6 +507,8 @@ async def create_tables(pool: asyncpg.Pool) -> None:
         # Must run AFTER the line above, which re-adds payment_method as NOT NULL.
         logger.info("Applying agreements self-serve migration if needed")
         await conn.execute(MIGRATE_AGREEMENTS_SELF_SERVE)
+        logger.info("Applying agreements confirmation migration if needed")
+        await conn.execute(MIGRATE_AGREEMENTS_CONFIRMATION)
 
         logger.info("Creating table ranked_tracking if not exists")
         await conn.execute(CREATE_RANKED_TRACKING)

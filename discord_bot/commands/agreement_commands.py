@@ -82,6 +82,11 @@ class AgreementCommands(commands.Cog):
                 if record["voided_by"] is not None
                 else None
             ),
+            confirmed_by_label=(
+                await self._user_label(record["confirmed_by"])
+                if record["confirmed_by"] is not None
+                else None
+            ),
         )
         file = disnake.File(
             io.BytesIO(text.encode("utf-8")), filename=f"agreement_{agreement_id}_receipt.txt"

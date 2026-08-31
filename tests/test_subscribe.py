@@ -1,6 +1,7 @@
-"""Unit tests for the /subscribe embed + link-button rendering."""
+"""Unit tests for /subscribe: tier rendering and the ticket purchase flow."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import disnake
@@ -8,6 +9,8 @@ import pytest
 
 from discord_bot.commands import subscribe_commands
 from modules.subscriptions.tiers import TierConfig
+
+SIGNED = datetime(2026, 8, 30, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def _tiers(l2_link: str = "https://buy.stripe.com/l2", l1_link: str = "https://buy.stripe.com/l1"):
@@ -105,124 +108,251 @@ def test_embed_discloses_automatic_monthly_billing() -> None:
     assert "cancel" in description
 
 
-# --- the two-step agreement-then-pay flow -------------------------------------
+# --- the ticket purchase flow -------------------------------------------------
 
 
-def _interaction(*, guild_id: int | None = 1, author_id: int = 4242) -> MagicMock:
+def _row(**overrides):
+    row = {
+        "id": 7,
+        "guild_id": 1,
+        "channel_id": 99,
+        "message_id": 100,
+        "buyer_id": 4242,
+        "sent_by": 555,
+        "signed_at": None,
+        "confirmed_at": None,
+        "confirmed_by": None,
+        "voided_at": None,
+        "void_reason": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def _button_interaction(*, custom_id: str, author_id: int, admin: bool = False):
     inter = MagicMock()
     inter.author.id = author_id
-    inter.guild = MagicMock(id=guild_id) if guild_id is not None else None
+    inter.author.guild_permissions = disnake.Permissions(administrator=admin)
+    inter.data.custom_id = custom_id
+    inter.bot.pool = MagicMock()
     inter.response.send_message = AsyncMock()
     inter.response.edit_message = AsyncMock()
-    inter.followup.send = AsyncMock()
+    inter.response.send_modal = AsyncMock()
     return inter
 
 
 @pytest.mark.asyncio
-async def test_subscribe_shows_terms_first_not_payment_buttons() -> None:
-    """Step one is the agreement. The payment links must not be reachable
-    before the buyer has accepted the terms."""
-    bot = MagicMock()
-    cog = subscribe_commands.SubscribeCommands(bot)
-    inter = _interaction()
+async def test_pending_view_hides_payment_links_until_signed() -> None:
+    """The payment links must not be reachable before the buyer agrees."""
+    with patch.object(subscribe_commands, "TIERS", _tiers()):
+        view = subscribe_commands.PurchaseView(_row())
+
+    labels = [item.label for item in view.children]
+    assert "I Agree" in labels
+    assert not any(getattr(item, "url", None) for item in view.children)
+    confirm = next(i for i in view.children if i.label == "Confirm Payment")
+    assert confirm.disabled is True
+
+
+@pytest.mark.asyncio
+async def test_signed_view_reveals_payment_links_and_enables_confirm() -> None:
+    with patch.object(subscribe_commands, "TIERS", _tiers()):
+        view = subscribe_commands.PurchaseView(_row(signed_at=SIGNED))
+
+    urls = [i.url for i in view.children if getattr(i, "url", None)]
+    assert urls == ["https://buy.stripe.com/l2", "https://buy.stripe.com/l1"]
+    confirm = next(i for i in view.children if i.label == "Confirm Payment")
+    assert confirm.disabled is False
+    agree = next(i for i in view.children if i.label == "Agreed")
+    assert agree.disabled is True
+
+
+@pytest.mark.asyncio
+async def test_confirmed_view_is_terminal() -> None:
+    with patch.object(subscribe_commands, "TIERS", _tiers()):
+        view = subscribe_commands.PurchaseView(
+            _row(signed_at=SIGNED, confirmed_at=SIGNED, confirmed_by=555)
+        )
+
+    labels = [i.label for i in view.children]
+    assert "Confirm Payment" not in labels
+    assert "Cancel" not in labels
+    assert view.is_finished()
+
+
+@pytest.mark.asyncio
+async def test_only_the_named_buyer_can_agree() -> None:
+    inter = _button_interaction(custom_id="purchase:agree:7", author_id=9999)
+
+    with patch.object(subscribe_commands, "TIERS", _tiers()), \
+         patch.object(
+             subscribe_commands.storage, "get_agreement", new=AsyncMock(return_value=_row())
+         ), \
+         patch.object(subscribe_commands.storage, "sign_agreement", new=AsyncMock()) as sign:
+        view = subscribe_commands.PurchaseView(_row())
+        await view.children[0].callback(inter)
+
+    sign.assert_not_awaited()
+    assert "addressed to you" in inter.response.send_message.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_buyer_agreeing_advances_the_message() -> None:
+    inter = _button_interaction(custom_id="purchase:agree:7", author_id=4242)
+    signed = _row(signed_at=SIGNED)
+
+    with patch.object(subscribe_commands, "TIERS", _tiers()), \
+         patch.object(
+             subscribe_commands.storage, "get_agreement", new=AsyncMock(return_value=_row())
+         ), \
+         patch.object(
+             subscribe_commands.storage, "sign_agreement", new=AsyncMock(return_value=signed)
+         ) as sign:
+        view = subscribe_commands.PurchaseView(_row())
+        await view.children[0].callback(inter)
+
+    sign.assert_awaited_once()
+    kwargs = inter.response.edit_message.call_args.kwargs
+    assert "Signed" in kwargs["embed"].title
+    assert any(getattr(i, "url", None) for i in kwargs["view"].children)
+
+
+@pytest.mark.asyncio
+async def test_non_admin_cannot_confirm_payment() -> None:
+    inter = _button_interaction(custom_id="purchase:confirm:7", author_id=4242, admin=False)
+
+    with patch.object(subscribe_commands, "TIERS", _tiers()), \
+         patch.object(subscribe_commands.storage, "confirm_agreement", new=AsyncMock()) as confirm:
+        view = subscribe_commands.PurchaseView(_row(signed_at=SIGNED))
+        button = next(i for i in view.children if i.label == "Confirm Payment")
+        await button.callback(inter)
+
+    confirm.assert_not_awaited()
+    assert "Only a moderator" in inter.response.send_message.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_admin_confirming_stamps_the_row_and_ends_the_view() -> None:
+    inter = _button_interaction(custom_id="purchase:confirm:7", author_id=555, admin=True)
+    confirmed = _row(signed_at=SIGNED, confirmed_at=SIGNED, confirmed_by=555)
+
+    with patch.object(subscribe_commands, "TIERS", _tiers()), \
+         patch.object(
+             subscribe_commands.storage,
+             "confirm_agreement",
+             new=AsyncMock(return_value=confirmed),
+         ) as confirm:
+        view = subscribe_commands.PurchaseView(_row(signed_at=SIGNED))
+        button = next(i for i in view.children if i.label == "Confirm Payment")
+        await button.callback(inter)
+
+    assert confirm.await_args.kwargs["confirmed_by"] == 555
+    kwargs = inter.response.edit_message.call_args.kwargs
+    assert kwargs["embed"].title == "Purchase Confirmed"
+    assert kwargs["view"].is_finished()
+
+
+@pytest.mark.asyncio
+async def test_confirm_reports_an_ineligible_purchase() -> None:
+    """The SQL guards refuse an unsigned/already-confirmed/cancelled row; the
+    handler has to say so rather than silently editing."""
+    inter = _button_interaction(custom_id="purchase:confirm:7", author_id=555, admin=True)
+
+    with patch.object(subscribe_commands, "TIERS", _tiers()), \
+         patch.object(
+             subscribe_commands.storage, "confirm_agreement", new=AsyncMock(return_value=None)
+         ):
+        view = subscribe_commands.PurchaseView(_row(signed_at=SIGNED))
+        button = next(i for i in view.children if i.label == "Confirm Payment")
+        await button.callback(inter)
+
+    inter.response.edit_message.assert_not_awaited()
+    assert "confirmed" in inter.response.send_message.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_non_admin_cannot_cancel() -> None:
+    inter = _button_interaction(custom_id="purchase:cancel:7", author_id=4242, admin=False)
 
     with patch.object(subscribe_commands, "TIERS", _tiers()):
-        await cog.subscribe.callback(cog, inter)
+        view = subscribe_commands.PurchaseView(_row(signed_at=SIGNED))
+        button = next(i for i in view.children if i.label == "Cancel")
+        await button.callback(inter)
 
-    kwargs = inter.response.send_message.call_args.kwargs
-    assert kwargs["ephemeral"] is True
-    assert kwargs["embed"].title == "Purchase Agreement"
-    assert kwargs["file"] is not None  # the T&C PDF
-    assert isinstance(kwargs["view"], subscribe_commands.AgreeView)
-
-    labels = [item.label for item in kwargs["view"].children]
-    assert labels == ["I Agree"]
+    inter.response.send_modal.assert_not_awaited()
+    assert "Only a moderator" in inter.response.send_message.call_args.args[0]
 
 
 @pytest.mark.asyncio
-async def test_subscribe_short_circuits_before_writing_an_agreement() -> None:
-    """With nothing purchasable, nobody should be asked to sign anything."""
+async def test_id_comes_from_the_clicked_button_not_the_instance() -> None:
+    """A persistent view dispatches to whichever registered instance disnake
+    picks, so its self.agreement_id is often a different purchase's. Reading it
+    instead of the custom_id is exactly the bug /postbase hit."""
+    inter = _button_interaction(custom_id="purchase:agree:99", author_id=4242)
+
+    with patch.object(subscribe_commands, "TIERS", _tiers()):
+        view = subscribe_commands.PurchaseView(_row(id=7))
+        assert view._id_from(inter) == 99
+
+
+@pytest.mark.asyncio
+async def test_unparsable_custom_id_falls_back_to_the_instance() -> None:
+    inter = _button_interaction(custom_id="garbage", author_id=4242)
+
+    with patch.object(subscribe_commands, "TIERS", _tiers()):
+        view = subscribe_commands.PurchaseView(_row(id=7))
+        assert view._id_from(inter) == 7
+
+
+@pytest.mark.asyncio
+async def test_subscribe_rolls_back_when_the_send_fails() -> None:
+    """No orphan row should point at a message that never existed."""
+    bot = MagicMock()
+    bot.pool = MagicMock()
+    cog = subscribe_commands.SubscribeCommands(bot)
+
+    inter = MagicMock()
+    inter.guild.id = 1
+    inter.channel.id = 99
+    inter.author.id = 555
+    inter.response.defer = AsyncMock()
+    inter.edit_original_response = AsyncMock()
+    inter.channel.send = AsyncMock(side_effect=RuntimeError("no perms"))
+    member = MagicMock(id=4242, mention="<@4242>")
+
+    with patch.object(subscribe_commands, "TIERS", _tiers()), \
+         patch.object(
+             subscribe_commands.storage,
+             "create_pending_agreement",
+             new=AsyncMock(return_value=_row()),
+         ), \
+         patch.object(subscribe_commands.storage, "delete_agreement", new=AsyncMock()) as delete, \
+         patch.object(subscribe_commands.storage, "attach_message", new=AsyncMock()) as attach:
+        await cog.subscribe.callback(cog, inter, member)
+
+    delete.assert_awaited_once()
+    attach.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_subscribe_refuses_when_no_tiers_are_purchasable() -> None:
+    """Nobody should be asked to sign for something they cannot buy."""
     bot = MagicMock()
     cog = subscribe_commands.SubscribeCommands(bot)
-    inter = _interaction()
+
+    inter = MagicMock()
+    inter.response.defer = AsyncMock()
+    inter.edit_original_response = AsyncMock()
+    inter.channel.send = AsyncMock()
+    member = MagicMock(id=4242)
 
     with patch.object(subscribe_commands, "TIERS", _tiers(l2_link="", l1_link="")), \
-         patch.object(subscribe_commands.storage, "create_signed_agreement", new=AsyncMock()) as create:
-        await cog.subscribe.callback(cog, inter)
-
-    kwargs = inter.response.send_message.call_args.kwargs
-    assert "aren't set up yet" in inter.response.send_message.call_args.args[0]
-    assert "view" not in kwargs or kwargs.get("view") is None
-    create.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_agree_records_the_signature_then_reveals_payment_links() -> None:
-    bot = MagicMock()
-    bot.pool = MagicMock()
-    inter = _interaction()
-
-    with patch.object(subscribe_commands, "TIERS", _tiers()), \
          patch.object(
-             subscribe_commands.storage,
-             "create_signed_agreement",
-             new=AsyncMock(return_value={"id": 7}),
+             subscribe_commands.storage, "create_pending_agreement", new=AsyncMock()
          ) as create:
-        view = subscribe_commands.AgreeView(bot)
-        await view.children[0].callback(inter)
+        await cog.subscribe.callback(cog, inter, member)
 
-    # Recorded against the clicking user, with the verbatim terms text.
-    kwargs = create.await_args.kwargs
-    assert kwargs["buyer_id"] == 4242
-    assert kwargs["guild_id"] == 1
-    assert kwargs["agreement_text"] == subscribe_commands.AGREEMENT_FULL_TEXT
-
-    # Only then are the payment links sent.
-    follow_up = inter.followup.send.call_args.kwargs
-    assert follow_up["ephemeral"] is True
-    assert follow_up["embed"].title == "Subscriptions"
-    urls = [item.url for item in follow_up["view"].children]
-    assert urls == ["https://buy.stripe.com/l2", "https://buy.stripe.com/l1"]
+    create.assert_not_awaited()
+    inter.channel.send.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_agree_button_is_disabled_after_signing() -> None:
-    """Stops a double-click writing a second row for one purchase."""
-    bot = MagicMock()
-    bot.pool = MagicMock()
-    inter = _interaction()
-
-    with patch.object(subscribe_commands, "TIERS", _tiers()), \
-         patch.object(
-             subscribe_commands.storage,
-             "create_signed_agreement",
-             new=AsyncMock(return_value={"id": 7}),
-         ):
-        view = subscribe_commands.AgreeView(bot)
-        await view.children[0].callback(inter)
-
-    assert view.children[0].disabled is True
-    assert view.is_finished()
-    inter.response.edit_message.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_agree_surfaces_a_storage_failure_without_showing_links() -> None:
-    """If the signature can't be recorded there's no evidence for a dispute,
-    so the buyer must not be handed payment links."""
-    bot = MagicMock()
-    bot.pool = MagicMock()
-    inter = _interaction()
-
-    with patch.object(subscribe_commands, "TIERS", _tiers()), \
-         patch.object(
-             subscribe_commands.storage,
-             "create_signed_agreement",
-             new=AsyncMock(side_effect=RuntimeError("db down")),
-         ):
-        view = subscribe_commands.AgreeView(bot)
-        await view.children[0].callback(inter)
-
-    inter.followup.send.assert_not_awaited()
-    message = inter.response.send_message.call_args.args[0]
-    assert "Couldn't record your agreement" in message

@@ -53,12 +53,84 @@ def terms_embed() -> disnake.Embed:
     )
 
 
+def status_embed(record) -> disnake.Embed:
+    """The purchase status message, rendered for whichever stage the row is in.
+
+    One embed edited in place as the purchase progresses, so the ticket shows a
+    single running record rather than a pile of messages: pending -> signed ->
+    confirmed, or voided from any of them.
+    """
+    buyer = f"<@{record['buyer_id']}>"
+
+    if record["voided_at"]:
+        embed = disnake.Embed(
+            title="Purchase Cancelled",
+            description=f"This purchase for {buyer} was cancelled.",
+            colour=VOIDED_EMBED_COLOUR,
+        )
+        embed.add_field(
+            name="Cancelled",
+            value=f"{_relative_timestamp(record['voided_at'])} — {record['void_reason']}",
+            inline=False,
+        )
+        return embed
+
+    if record["confirmed_at"]:
+        embed = disnake.Embed(
+            title="Purchase Confirmed",
+            description=f"{buyer}'s payment has been confirmed. Access can now be set up.",
+            colour=AGREEMENT_EMBED_COLOUR,
+        )
+        embed.add_field(
+            name="Agreed",
+            value=_relative_timestamp(record["signed_at"]),
+            inline=True,
+        )
+        embed.add_field(
+            name="Confirmed",
+            value=(
+                f"{_relative_timestamp(record['confirmed_at'])}"
+                f" by <@{record['confirmed_by']}>"
+            ),
+            inline=True,
+        )
+        return embed
+
+    if record["signed_at"]:
+        embed = disnake.Embed(
+            title="Purchase Agreement — Signed",
+            description=(
+                f"{buyer} has accepted the Terms and Conditions.\n\n"
+                "**Next:** pick a tier below and pay through Stripe. Once the payment "
+                "shows up in Stripe, a moderator will confirm it here."
+            ),
+            colour=AGREEMENT_EMBED_COLOUR,
+        )
+        embed.add_field(
+            name="Agreed", value=_relative_timestamp(record["signed_at"]), inline=False
+        )
+        return embed
+
+    embed = disnake.Embed(
+        title="Purchase Agreement",
+        description=AGREEMENT_SUMMARY,
+        colour=AGREEMENT_EMBED_COLOUR,
+    )
+    embed.add_field(
+        name="Waiting on",
+        value=f"{buyer} to read the attached Terms and Conditions and click **I Agree**.",
+        inline=False,
+    )
+    return embed
+
+
 def receipt_text(
     record,
     *,
     buyer_label: str,
     sender_label: str | None = None,
     voided_by_label: str | None = None,
+    confirmed_by_label: str | None = None,
 ) -> str:
     """Plain-text proof-of-signature document for a signed (or voided) agreement.
 
@@ -91,6 +163,17 @@ def receipt_text(
     else:
         lines.append("Status: NOT YET SIGNED")
 
+    if record["confirmed_at"]:
+        lines.append(f"Payment Confirmed At: {_absolute_utc(record['confirmed_at'])}")
+        lines.append(
+            f"Payment Confirmed By: {confirmed_by_label or record['confirmed_by']} "
+            f"(discord id {record['confirmed_by']})"
+        )
+        lines.append(
+            "  (Attested by a moderator who checked the Stripe Dashboard;"
+        )
+        lines.append("   this service does not receive Stripe webhooks.)")
+
     if record["sent_by"]:
         lines.append(f"Sent By: {sender_label or record['sent_by']} (discord id {record['sent_by']})")
 
@@ -120,8 +203,10 @@ def lookup_embed(buyer_id: int, rows) -> disnake.Embed:
     for row in rows:
         if row["voided_at"]:
             status = f"⚠️ VOIDED — {row['void_reason']}"
+        elif row["confirmed_at"]:
+            status = f"💳 Paid — confirmed {_relative_timestamp(row['confirmed_at'])}"
         elif row["signed_at"]:
-            status = f"✅ Signed {_relative_timestamp(row['signed_at'])}"
+            status = f"✅ Signed {_relative_timestamp(row['signed_at'])} — payment unconfirmed"
         else:
             status = "⌛ Pending"
         order = f" ({row['order_ref']})" if row["order_ref"] else ""
@@ -147,5 +232,6 @@ __all__ = [
     "VOIDED_EMBED_COLOUR",
     "lookup_embed",
     "receipt_text",
+    "status_embed",
     "terms_embed",
 ]

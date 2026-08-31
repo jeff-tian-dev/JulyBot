@@ -12,70 +12,36 @@ import asyncpg
 logger = logging.getLogger(__name__)
 
 
-async def create_signed_agreement(
-    pool: asyncpg.Pool,
-    *,
-    guild_id: int,
-    buyer_id: int,
-    agreement_text: str,
-) -> asyncpg.Record:
-    """Insert an already-signed agreement for a self-serve /subscribe buyer.
-
-    One statement rather than create-then-sign: that split existed because a
-    moderator created the row before the buyer signed it, leaving a pending
-    window. Here the row only exists because the buyer just clicked I Agree,
-    so there is nothing to wait for.
-
-    The payment columns (payer_name / payment_method / payment_contact) and
-    sent_by / channel_id / message_id are left NULL — Stripe knows who paid,
-    nobody sent this, and the whole flow is ephemeral. See the agreements
-    table comment in database/models.py.
-    """
-    async with pool.acquire() as conn:
-        return await conn.fetchrow(
-            """
-            INSERT INTO agreements (guild_id, buyer_id, agreement_text, signed_at)
-            VALUES ($1, $2, $3, NOW())
-            RETURNING *;
-            """,
-            guild_id,
-            buyer_id,
-            agreement_text,
-        )
-
-
-async def create_agreement(
+async def create_pending_agreement(
     pool: asyncpg.Pool,
     *,
     guild_id: int,
     channel_id: int,
     buyer_id: int,
     sent_by: int,
-    payer_name: str,
-    payment_method: str,
-    payment_contact: str,
-    order_ref: str | None,
     agreement_text: str,
 ) -> asyncpg.Record:
-    """Insert an agreement before it's sent; message_id is attached afterwards."""
+    """Insert an unsigned agreement, before the status message is posted.
+
+    The row exists first because the message carries a *persistent* view whose
+    custom_ids need an agreement id to encode. `attach_message` fills in
+    message_id once the send succeeds.
+
+    The payment columns (payer_name / payment_method / payment_contact) stay
+    NULL — Stripe knows who paid. See the agreements table comment in
+    database/models.py.
+    """
     async with pool.acquire() as conn:
         return await conn.fetchrow(
             """
-            INSERT INTO agreements (
-                guild_id, channel_id, buyer_id, sent_by,
-                payer_name, payment_method, payment_contact, order_ref, agreement_text
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            INSERT INTO agreements (guild_id, channel_id, buyer_id, sent_by, agreement_text)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING *;
             """,
             guild_id,
             channel_id,
             buyer_id,
             sent_by,
-            payer_name,
-            payment_method,
-            payment_contact,
-            order_ref,
             agreement_text,
         )
 
@@ -107,20 +73,51 @@ async def sign_agreement(
 ) -> asyncpg.Record | None:
     """Mark an agreement signed by the addressed buyer; None if not eligible.
 
-    The buyer_id match stops anyone but the addressed buyer from signing, and the
+    The buyer_id match stops anyone but the addressed buyer from signing, the
     signed_at IS NULL guard makes a double-click (or a race between two clicks) a
-    no-op — only the first successful UPDATE returns a row.
+    no-op — only the first successful UPDATE returns a row — and the voided_at
+    guard stops a buyer signing a purchase an admin cancelled while they had the
+    message open.
     """
     async with pool.acquire() as conn:
         return await conn.fetchrow(
             """
             UPDATE agreements
             SET signed_at = NOW()
-            WHERE id = $1 AND buyer_id = $2 AND signed_at IS NULL
+            WHERE id = $1 AND buyer_id = $2 AND signed_at IS NULL AND voided_at IS NULL
             RETURNING *;
             """,
             agreement_id,
             buyer_id,
+        )
+
+
+async def confirm_agreement(
+    pool: asyncpg.Pool, agreement_id: int, *, confirmed_by: int
+) -> asyncpg.Record | None:
+    """Stamp an admin's confirmation that they saw the payment; None if not eligible.
+
+    This is an ATTESTATION, not a verified payment — there's no Stripe webhook,
+    so the bot never observes the charge. The admin checked the Stripe Dashboard
+    themselves.
+
+    The guards live in SQL rather than only in the handler: signed_at NOT NULL
+    stops confirming a purchase nobody agreed to, confirmed_at IS NULL makes a
+    double-click a no-op, and voided_at IS NULL stops confirming a cancelled one.
+    """
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            """
+            UPDATE agreements
+            SET confirmed_at = NOW(), confirmed_by = $2
+            WHERE id = $1
+              AND signed_at IS NOT NULL
+              AND confirmed_at IS NULL
+              AND voided_at IS NULL
+            RETURNING *;
+            """,
+            agreement_id,
+            confirmed_by,
         )
 
 
@@ -150,6 +147,23 @@ async def list_agreements_for_buyer(
         return await conn.fetch(
             "SELECT * FROM agreements WHERE buyer_id = $1 ORDER BY created_at DESC;",
             buyer_id,
+        )
+
+
+async def list_views_to_restore(pool: asyncpg.Pool) -> list[asyncpg.Record]:
+    """Every posted purchase still awaiting action — the only ones needing live buttons.
+
+    A confirmed or voided purchase is terminal: its message already shows the
+    final state with every button disabled, so restoring a view for it would
+    only waste a registration.
+    """
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT id, buyer_id, signed_at FROM agreements
+            WHERE message_id IS NOT NULL AND voided_at IS NULL AND confirmed_at IS NULL
+            ORDER BY id;
+            """
         )
 
 
