@@ -40,6 +40,59 @@ copy the new keys from `.env.example` into this machine's `.env` by hand **befor
 [config/settings.py](../config/settings.py) raises at import time if a variable in
 `REQUIRED_VARS` is unset, naming the one that's missing; check `logs/julybot.stderr.log`.
 
+## Pending update — `/subscribe` purchase flow (commit `295af9a`, 2026-08-30)
+
+This release is **not yet deployed to this machine.** It needs all four optional steps
+above, so run the sequence in full:
+
+```bash
+cd /Users/jefftian/JulyBot
+git pull
+.venv/bin/pip install -r requirements.txt   # `stripe` is a dependency again
+# --- edit .env by hand first, see the table below ---
+.venv/bin/python scripts/init_db.py         # creates `subscribers`, drops `subscriptions`
+./deploy/install-service.sh                 # restart
+```
+
+**New `.env` keys** (add by hand — `.env` is not in git; all four are also in `.env.example`):
+
+| Variable | Value | Required? |
+|----------|-------|-----------|
+| `STRIPE_PAYMENT_LINK_L2_L3` | Payment Link URL for the $20 L2/L3 tier | Tier is hidden if unset |
+| `STRIPE_PAYMENT_LINK_L1` | Payment Link URL for the $30 L1 tier | Tier is hidden if unset |
+| `STRIPE_SECRET_KEY` | `sk_live_…` (or `sk_test_…` to rehearse) | Optional — see below |
+| `SUBSCRIBER_REFRESH_INTERVAL_MINUTES` | `60` | Optional, defaults to 60 |
+
+Both Payment Links must be created in the Stripe Dashboard as **recurring monthly**
+subscriptions, and both must be **live-mode** links if `STRIPE_SECRET_KEY` is a live key —
+a test link paired with a live key produces subscriptions the confirm step cannot find.
+
+Two things to expect while running this:
+
+- **`init_db.py` drops the `subscriptions` table.** That is intended. It was built for the
+  deleted FastAPI webhook, never held a real row, and is replaced by `subscribers`. The
+  destructive `DROP TABLE` in the output is not an error.
+- **`STRIPE_SECRET_KEY` is deliberately optional and *not* in `REQUIRED_VARS`.** Leaving it
+  blank still starts the bot — Confirm Payment just reports that Stripe isn't configured, and
+  the subscriber-status refresh job doesn't register. This is on purpose: a Stripe
+  misconfiguration must never take the whole Discord bot down.
+
+**What changed for users:** `/subscribe` is now **admin-only** and takes a member argument
+(`/subscribe @buyer`), posting a public status message in the ticket instead of an ephemeral
+one. `/agreement send` is gone — the agreement is step 1 of `/subscribe`; `/agreement lookup`
+and `/agreement receipt` still work and still render the older moderator-flow rows.
+
+**Verifying it took**, after the restart:
+
+```bash
+tail -n 40 logs/julybot.stderr.log     # should show a clean login, no settings error
+```
+
+Then in Discord: `/subscribe @someone` → the buyer clicks I Agree → payment link buttons
+appear → an admin clicks Confirm Payment and picks the buyer's subscription from the Stripe
+dropdown. If the dropdown is empty, the key and the Payment Links are in different modes
+(one live, one test).
+
 ## Run the bot
 
 **Foreground** (good for debugging):
