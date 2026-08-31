@@ -78,9 +78,14 @@ def status_embed(record) -> disnake.Embed:
     if record["confirmed_at"]:
         embed = disnake.Embed(
             title="Purchase Confirmed",
-            description=f"{buyer}'s payment has been confirmed. Access can now be set up.",
+            description=(
+                f"{buyer}'s payment has been matched to a Stripe subscription. "
+                "Access can now be set up."
+            ),
             colour=AGREEMENT_EMBED_COLOUR,
         )
+        if record["payer_name"]:
+            embed.add_field(name="Paid by", value=record["payer_name"], inline=False)
         embed.add_field(
             name="Agreed",
             value=_relative_timestamp(record["signed_at"]),
@@ -170,9 +175,9 @@ def receipt_text(
             f"(discord id {record['confirmed_by']})"
         )
         lines.append(
-            "  (Attested by a moderator who checked the Stripe Dashboard;"
+            "  (Matched to a live Stripe subscription at confirmation time by"
         )
-        lines.append("   this service does not receive Stripe webhooks.)")
+        lines.append("   the moderator named above.)")
 
     if record["sent_by"]:
         lines.append(f"Sent By: {sender_label or record['sent_by']} (discord id {record['sent_by']})")

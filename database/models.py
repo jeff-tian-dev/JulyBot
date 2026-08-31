@@ -371,53 +371,52 @@ END $$;
 ALTER TABLE agreements ADD COLUMN IF NOT EXISTS payment_method VARCHAR(20) NOT NULL DEFAULT 'PayPal';
 """
 
-# A one-time Stripe purchase of subscriber access.
+# One row per subscription period bought through /subscribe, created when an admin
+# confirms a payment and picks the matching subscription out of Stripe.
 #
-# NOT CURRENTLY WRITTEN TO. Purchases go through Stripe Payment Links posted by
-# /subscribe, which are hosted entirely by Stripe — the bot never sees them, so
-# the authoritative purchase record is the Stripe Dashboard. This table and
-# modules/subscriptions/storage.py are kept as the foundation for a future pass
-# that records purchases and grants Discord roles automatically; doing that
-# needs a publicly reachable webhook endpoint, which was deliberately dropped
-# (see the 2026-08-30 CLAUDE.md entries).
+# A RESUB CREATES A NEW ROW — the table is a history, not current state per person.
+# Ask "is this user subscribed?" by looking for any row of theirs whose status is
+# still live, not by expecting one row per Discord user.
 #
-# Shape, for when that lands: one row per purchase, not per customer — the same
-# buyer purchasing in consecutive months gets two rows, giving a month-by-month
-# log via created_at (storage.get_by_month). Keyed on stripe_checkout_session_id
-# so a redelivered webhook upserts idempotently. `status` mirrors Stripe
-# Checkout's payment_status verbatim (paid / unpaid / no_payment_required).
-# `discord_id` is reserved for the role-granting pass.
-CREATE_SUBSCRIPTIONS = """
-CREATE TABLE IF NOT EXISTS subscriptions (
+# `status` and `current_period_end` mirror Stripe's own subscription fields verbatim
+# (active, past_due, canceled, unpaid, incomplete, ...) so the refresh job copies them
+# across with no translation table. They are refreshed on a schedule rather than pushed:
+# there is no Stripe webhook, so a status here is only as fresh as the last poll.
+#
+# The unique index on stripe_subscription_id is what stops one Stripe subscription
+# being attributed to two different Discord users. `linked_by` records the admin who
+# made that match — Stripe has no idea who its customers are on Discord, so the
+# mapping is human judgement, and this is the audit trail for it.
+CREATE_SUBSCRIBERS = """
+CREATE TABLE IF NOT EXISTS subscribers (
     id SERIAL PRIMARY KEY,
+    discord_id BIGINT NOT NULL,
+    guild_id BIGINT NOT NULL,
+    agreement_id INTEGER REFERENCES agreements(id) ON DELETE SET NULL,
+    stripe_subscription_id VARCHAR(255) NOT NULL,
     stripe_customer_id VARCHAR(255) NOT NULL,
-    stripe_checkout_session_id VARCHAR(255) UNIQUE,
-    tier VARCHAR(50) NOT NULL,
-    email VARCHAR(320) NOT NULL,
-    discord_username_hint VARCHAR(100),
-    discord_id BIGINT,
-    status VARCHAR(30) NOT NULL DEFAULT 'unpaid',
+    payer_name VARCHAR(200),
+    email VARCHAR(320),
+    tier VARCHAR(50),
+    status VARCHAR(30) NOT NULL,
+    current_period_end TIMESTAMP,
+    linked_by BIGINT NOT NULL,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_subscriptions_customer ON subscriptions (stripe_customer_id);
-CREATE INDEX IF NOT EXISTS idx_subscriptions_discord_id ON subscriptions (discord_id) WHERE discord_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_subscribers_stripe_sub ON subscribers (stripe_subscription_id);
+CREATE INDEX IF NOT EXISTS idx_subscribers_discord ON subscribers (discord_id);
 """
 
-# Converts a subscriptions table created by the original mode="subscription"
-# design (recurring Stripe subscriptions) into the one-time-payment shape
-# above. Only ever ran against test-mode data during development — no real
-# purchases are lost. RENAME/DROP have no IF EXISTS-safe single form across
-# repeated runs other than checking information_schema first, same pattern as
-# MIGRATE_AGREEMENTS_PAYMENT_FIELDS.
-MIGRATE_SUBSCRIPTIONS_ONE_TIME = """
-ALTER TABLE subscriptions DROP COLUMN IF EXISTS stripe_subscription_id;
-ALTER TABLE subscriptions DROP COLUMN IF EXISTS current_period_end;
-ALTER TABLE subscriptions DROP COLUMN IF EXISTS cancel_at_period_end;
+# The old `subscriptions` table was shaped for the deleted FastAPI checkout site's
+# webhook (keyed on a checkout session id). That site is gone and the table never held
+# a real row; `subscribers` replaces it. Dropping it keeps one purchase table, not two.
+DROP_LEGACY_SUBSCRIPTIONS = """
+DROP TABLE IF EXISTS subscriptions;
 """
 
 ALL_TABLES = (
-    "subscriptions",
+    "subscribers",
     "ranked_tracking",
     "agreements",
     "base_post_downloads",
@@ -513,10 +512,10 @@ async def create_tables(pool: asyncpg.Pool) -> None:
         logger.info("Creating table ranked_tracking if not exists")
         await conn.execute(CREATE_RANKED_TRACKING)
 
-        logger.info("Creating table subscriptions if not exists")
-        await conn.execute(CREATE_SUBSCRIPTIONS)
-        logger.info("Applying subscriptions one-time-payment migration if needed")
-        await conn.execute(MIGRATE_SUBSCRIPTIONS_ONE_TIME)
+        logger.info("Creating table subscribers if not exists")
+        await conn.execute(CREATE_SUBSCRIBERS)
+        logger.info("Dropping legacy subscriptions table if present")
+        await conn.execute(DROP_LEGACY_SUBSCRIPTIONS)
 
 
 async def drop_tables(pool: asyncpg.Pool) -> None:

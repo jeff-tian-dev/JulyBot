@@ -6,15 +6,18 @@ so the moderator watching the ticket can see exactly how far along the buyer is:
 
     pending  → buyer reads the T&C PDF and clicks I Agree
     signed   → Stripe payment link buttons appear
-    confirmed→ an admin clicks Confirm Payment after checking Stripe
+    confirmed→ an admin picks the buyer's subscription out of Stripe
 
 Each stage is gated: only the named buyer can click I Agree, only an admin can
 Confirm or Cancel. The gates are enforced against the database row rather than
 the in-memory view, since a persistent view outlives the process.
 
-**Confirm is an attestation, not verification.** There is no Stripe webhook, so
-the bot never observes a payment — the admin checked the Stripe Dashboard
-themselves. Don't describe a confirmed purchase as proven paid.
+**Confirming requires linking a real Stripe subscription** — there is no
+attestation-only path. The bot pulls the live subscription list from Stripe's
+API (no webhook needed, since that is an outbound call), the admin says which
+one belongs to this buyer, and the result is stored in `subscribers` along with
+who made that call. Stripe has no idea who its customers are on Discord, so
+that match is human judgement; everything around it is verified.
 
 The payment buttons are disnake.ButtonStyle.link buttons, which carry a URL
 instead of a custom_id: Discord opens them client-side, so there is no callback
@@ -30,12 +33,16 @@ from __future__ import annotations
 
 import logging
 
+import asyncpg
 import disnake
 from disnake.ext import commands
 
 from modules.agreements import storage
+from modules.agreements import storage as agreement_storage
 from modules.agreements.document import AGREEMENT_FULL_TEXT, AGREEMENT_PDF_PATH
 from modules.agreements.validation import status_embed
+from modules.subscriptions import stripe_api
+from modules.subscriptions import storage as subscriber_storage
 from modules.subscriptions.tiers import TIERS
 
 logger = logging.getLogger(__name__)
@@ -45,6 +52,9 @@ ADMIN_PERMS = disnake.Permissions(administrator=True)
 NO_PINGS = disnake.AllowedMentions.none()
 CUSTOM_ID_PREFIX = "purchase"
 MAX_CANCEL_REASON_LENGTH = 512
+MAX_PAYER_NAME_LENGTH = 200
+# The admin is mid-confirmation; if they wander off, clicking Confirm again is cheap.
+PICKER_TIMEOUT_SECONDS = 300
 
 
 def build_subscribe_embed() -> disnake.Embed:
@@ -130,6 +140,171 @@ class CancelReasonModal(disnake.ui.Modal):
         )
         await inter.response.edit_message(
             embed=status_embed(record), view=PurchaseView(record), attachments=[]
+        )
+
+
+async def finalize_confirmation(
+    inter: disnake.Interaction,
+    *,
+    agreement_id: int,
+    subscription,
+    payer_name: str,
+    message: disnake.Message | None,
+) -> None:
+    """Confirm the agreement, record the subscriber, and advance the message.
+
+    Order matters: confirm_agreement first, because its SQL guards are what
+    stop an unsigned/cancelled/already-confirmed purchase being recorded. Only
+    once that succeeds is a subscriber row written.
+    """
+    confirmed = await storage.confirm_agreement(
+        inter.bot.pool, agreement_id, confirmed_by=inter.author.id
+    )
+    if confirmed is None:
+        await inter.response.send_message(
+            "That purchase can't be confirmed — it's unsigned, already confirmed, "
+            "or cancelled.",
+            ephemeral=True,
+        )
+        return
+
+    await agreement_storage.set_payer_name(inter.bot.pool, agreement_id, payer_name)
+
+    try:
+        await subscriber_storage.create_subscriber(
+            inter.bot.pool,
+            discord_id=confirmed["buyer_id"],
+            guild_id=confirmed["guild_id"],
+            agreement_id=agreement_id,
+            stripe_subscription_id=subscription.subscription_id,
+            stripe_customer_id=subscription.customer_id,
+            payer_name=payer_name,
+            email=subscription.email,
+            tier=None,
+            status=subscription.status,
+            current_period_end=subscription.current_period_end,
+            linked_by=inter.author.id,
+        )
+    except asyncpg.UniqueViolationError:
+        # Already attributed to someone — say who rather than silently
+        # re-pointing a payment at a second Discord user.
+        existing = await subscriber_storage.get_subscriber_by_stripe_id(
+            inter.bot.pool, subscription.subscription_id
+        )
+        owner = f"<@{existing['discord_id']}>" if existing else "another member"
+        await inter.response.send_message(
+            f"That Stripe subscription is already linked to {owner}. "
+            "The agreement was confirmed, but no new subscriber record was created.",
+            ephemeral=True,
+            allowed_mentions=NO_PINGS,
+        )
+        return
+
+    logger.info(
+        "Purchase id=%s confirmed by %s, linked to Stripe subscription %s",
+        agreement_id,
+        inter.author.id,
+        subscription.subscription_id,
+    )
+
+    # Refresh the record so the embed shows the name that was just stored.
+    updated = await storage.get_agreement(inter.bot.pool, agreement_id) or confirmed
+    if message is not None:
+        await message.edit(embed=status_embed(updated), view=PurchaseView(updated))
+
+    await inter.response.send_message(
+        f"Confirmed — linked to `{subscription.subscription_id}` for **{payer_name}**.",
+        ephemeral=True,
+    )
+
+
+class PayerNameModal(disnake.ui.Modal):
+    """Asks for the buyer's full name when Stripe has none on file."""
+
+    def __init__(self, agreement_id: int, subscription, message) -> None:
+        self.agreement_id = agreement_id
+        self.subscription = subscription
+        self.message = message
+        super().__init__(
+            title="Buyer's Full Name",
+            custom_id=f"{CUSTOM_ID_PREFIX}:namemodal:{agreement_id}",
+            components=[
+                disnake.ui.TextInput(
+                    label="Full name",
+                    custom_id="payer_name",
+                    style=disnake.TextInputStyle.short,
+                    max_length=MAX_PAYER_NAME_LENGTH,
+                    placeholder="As it appears on the payment",
+                )
+            ],
+        )
+
+    async def callback(self, inter: disnake.ModalInteraction) -> None:
+        name = inter.text_values["payer_name"].strip()
+        if not name:
+            await inter.response.send_message("A name is required.", ephemeral=True)
+            return
+        await finalize_confirmation(
+            inter,
+            agreement_id=self.agreement_id,
+            subscription=self.subscription,
+            payer_name=name,
+            message=self.message,
+        )
+
+
+class StripePickerView(disnake.ui.View):
+    """Lets an admin pick which Stripe subscription belongs to this buyer.
+
+    Stripe has no idea who its customers are on Discord, so this match is human
+    judgement — recorded in subscribers.linked_by rather than left implicit.
+
+    Short-lived and ephemeral, so unlike PurchaseView it needs no persistent
+    registration: if it expires the admin clicks Confirm Payment again.
+    """
+
+    def __init__(self, agreement_id: int, subscriptions, *, message) -> None:
+        super().__init__(timeout=PICKER_TIMEOUT_SECONDS)
+        self.agreement_id = agreement_id
+        self.message = message
+        self._by_id = {s.subscription_id: s for s in subscriptions}
+
+        select = disnake.ui.StringSelect(
+            placeholder="Which Stripe subscription?",
+            options=[
+                disnake.SelectOption(
+                    label=s.label()[:100],
+                    value=s.subscription_id,
+                    description=(s.email or s.subscription_id)[:100],
+                )
+                for s in subscriptions
+            ],
+        )
+        select.callback = self._on_pick
+        self.add_item(select)
+
+    async def _on_pick(self, inter: disnake.MessageInteraction) -> None:
+        subscription = self._by_id.get(inter.data.values[0])
+        if subscription is None:
+            await inter.response.send_message(
+                "That subscription is no longer in the list — try again.", ephemeral=True
+            )
+            return
+
+        # Stripe's name is the one actually on the payment, so prefer it; only
+        # ask the admin when Stripe has none.
+        if subscription.name:
+            await finalize_confirmation(
+                inter,
+                agreement_id=self.agreement_id,
+                subscription=subscription,
+                payer_name=subscription.name,
+                message=self.message,
+            )
+            return
+
+        await inter.response.send_modal(
+            PayerNameModal(self.agreement_id, subscription, self.message)
         )
 
 
@@ -235,6 +410,7 @@ class PurchaseView(disnake.ui.View):
         await inter.response.edit_message(embed=status_embed(signed), view=PurchaseView(signed))
 
     async def _on_confirm(self, inter: disnake.MessageInteraction) -> None:
+        """Open the Stripe picker. Confirming requires choosing a real subscription."""
         if not self._is_admin(inter):
             await inter.response.send_message(
                 "Only a moderator can confirm a payment.", ephemeral=True
@@ -242,22 +418,36 @@ class PurchaseView(disnake.ui.View):
             return
 
         agreement_id = self._id_from(inter)
-        confirmed = await storage.confirm_agreement(
-            inter.bot.pool, agreement_id, confirmed_by=inter.author.id
-        )
-        if confirmed is None:
+
+        try:
+            subscriptions = await stripe_api.list_recent_subscriptions()
+        except stripe_api.StripeNotConfiguredError:
             await inter.response.send_message(
-                "That purchase can't be confirmed — it's unsigned, already confirmed, "
-                "or cancelled.",
+                "Stripe isn't configured (`STRIPE_SECRET_KEY` is unset), so payments "
+                "can't be verified. Ask whoever runs the bot to add it.",
+                ephemeral=True,
+            )
+            return
+        except stripe_api.StripeApiError as exc:
+            logger.warning("Stripe lookup failed while confirming id=%s: %s", agreement_id, exc)
+            await inter.response.send_message(
+                f"Couldn't reach Stripe: {exc}", ephemeral=True
+            )
+            return
+
+        if not subscriptions:
+            await inter.response.send_message(
+                "Stripe has no active subscriptions to link. If the payment just went "
+                "through, give it a moment and try again.",
                 ephemeral=True,
             )
             return
 
-        logger.info(
-            "Purchase id=%s payment confirmed by %s", agreement_id, inter.author.id
-        )
-        await inter.response.edit_message(
-            embed=status_embed(confirmed), view=PurchaseView(confirmed)
+        # Ephemeral: only the admin needs this, and it carries buyer emails.
+        await inter.response.send_message(
+            "Pick the Stripe subscription for this buyer:",
+            view=StripePickerView(agreement_id, subscriptions, message=inter.message),
+            ephemeral=True,
         )
 
     async def _on_cancel(self, inter: disnake.MessageInteraction) -> None:

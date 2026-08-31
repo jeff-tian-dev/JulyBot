@@ -11,7 +11,7 @@ A Discord bot for Clash of Clans clans, built around nine independent modules:
 - **Moderation** — admin-only `/kick`, `/ban`, `/unban` slash commands with pre-flight validation, public taunt messages, and an audit log embed to a mod-log channel.
 - **Roster** — admin-managed named groups of players (by Discord user or raw CoC tag). Optionally *watch* a roster to get alerts when a member leaves or rejoins the clan family (`COC_FAMILY_CLAN_TAGS`) and to track how long each member has been out.
 - **Ranked tracker** — looks up a player's current Ranked Battles weekly tournament group (`/group`) and renders a refreshable dashboard of defenses received this week, with no stored history — everything is fetched live from the CoC API on each refresh.
-- **Subscriptions** — `/subscribe <member>` runs a purchase through a ticket: one message walks from the purchase agreement, to the Stripe Payment Link buttons once the buyer accepts, to an admin confirming the payment. Checkout is hosted entirely by Stripe (recurring monthly links), so the bot never sees the charge — confirmation is a moderator attesting they checked the Stripe Dashboard. Access and cancellation are handled manually.
+- **Subscriptions** — `/subscribe <member>` runs a purchase through a ticket: one message walks from the purchase agreement, to the Stripe Payment Link buttons once the buyer accepts, to an admin confirming the payment by picking the buyer's subscription out of Stripe. Confirmed subscriptions are recorded in `subscribers` and re-checked against Stripe on a schedule, so cancellations and failed renewals show up on their own. Granting Discord access is still manual.
 
 The Discord layer (`disnake` Cogs) is a thin shim. Each module is a plain Python package, callable and testable without a running bot.
 
@@ -84,7 +84,9 @@ JulyBot/
 |   |   `-- tracking.py       # /trackingon|off|list -- DM alerts on status change
 |   |-- subscriptions/
 |   |   |-- tiers.py         # tier display copy + Stripe Payment Links from settings
-|   |   `-- storage.py       # subscriptions table CRUD -- unused, kept for a future pass
+|   |   |-- stripe_api.py    # the only module importing `stripe`; read-only lookups
+|   |   |-- refresh.py       # scheduled re-check of stored subscriptions
+|   |   `-- storage.py       # subscribers CRUD
 |   `-- agreements/
 |       |-- document.py      # the terms text + the T&C PDF path
 |       |-- storage.py       # agreements CRUD: pending -> signed -> confirmed / voided
@@ -178,6 +180,8 @@ cp .env.example .env   # only if setup.sh didn't already create it
 | `RANKED_TRACKING_POLL_INTERVAL_MINUTES` | no | `20`                              | How often tracked players' likely-to-be-hit status is checked for `/trackingon` DM alerts |
 | `STRIPE_PAYMENT_LINK_L2_L3`      | no       | empty                                   | Stripe Payment Link for the L2/L3 tier ($20/month); empty marks it unavailable in `/subscribe` |
 | `STRIPE_PAYMENT_LINK_L1`         | no       | empty                                   | Stripe Payment Link for the L1 tier ($30/month, highest)    |
+| `STRIPE_SECRET_KEY`              | no       | empty                                   | Secret key used read-only to look up subscriptions when confirming a payment and to refresh subscriber status. Empty disables both; the bot still runs |
+| `SUBSCRIBER_REFRESH_INTERVAL_MINUTES` | no  | `60`                                    | How often stored subscriptions are re-checked against Stripe |
 
 Missing any required variable raises a clear `ValueError` at startup.
 
@@ -240,7 +244,7 @@ chmod +x deploy/*.sh                        # only if the release added new scri
 | `coc_player_cache` | Short-TTL cache of live CoC player name + current clan, shared across rosters |
 | `ranked_tracking`  | `/trackingon` subscriptions: Discord user + CoC tag pairs, with the last-seen likely-to-be-hit status |
 | `agreements`       | The purchase record `/subscribe` writes: buyer, the verbatim terms they accepted, and `signed_at` / `confirmed_at` / `voided_at` for each stage |
-| `subscriptions`    | Subscription log — **created but unused**; Stripe-hosted Payment Links are never observed by the bot. `/subscribe` records purchases in `agreements` instead |
+| `subscribers`      | One row per subscription period (a resub adds a row, so it's a history): who, which Stripe subscription, and its status refreshed from Stripe |
 
 See [database/models.py](database/models.py) for the exact DDL.
 
@@ -313,7 +317,7 @@ The Cogs listed in `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py) are
 Module logic is implemented end-to-end across all packages. The wiring gap is on the Discord side:
 
 - **Wired and live:** account linker, X monitor, YouTube feed tracker, moderation, roster, announce (`/post`, `/postbase`), agreement, and ranked tracker (`/group`) Cogs delegate to their module functions.
-- **Subscriptions:** `/subscribe <member>` posts a purchase status message in the ticket — agreement, then Stripe Payment Link buttons, then admin confirmation — recording each step in `agreements`. Stripe hosts checkout end to end, so the bot never sees a payment: confirmation is a moderator's attestation that they checked the Stripe Dashboard, not a verified charge, and Discord access is still granted manually. The `subscriptions` table and `modules/subscriptions/storage.py` are built and tested but **unused**, kept as the foundation for a future pass that records payments automatically (which needs a publicly reachable webhook endpoint). See the 2026-08-30 CLAUDE.md entries.
+- **Subscriptions:** `/subscribe <member>` posts a purchase status message in the ticket — agreement, then Stripe Payment Link buttons, then admin confirmation — recording each step in `agreements`. Confirming requires the admin to pick the buyer's subscription from Stripe, which is then tracked in `subscribers` and refreshed on a schedule. The bot reads Stripe over its API rather than receiving webhooks, so status is as fresh as the last poll and which subscription belongs to which Discord user remains a human match (recorded in `subscribers.linked_by`). Granting Discord roles off an active subscription is **not** built yet. See the 2026-08-30 CLAUDE.md entries.
 - **Stubs, not loaded:** the legend, base_finder, and ping Cogs still return placeholder text and are commented out of `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py). Their underlying module functions and scheduler jobs are implemented — only the Cog replies are stubbed.
 - The legend, base-finder, and YouTube scheduler jobs run unconditionally; the X poll job is registered only when `X_COOKIES` is set, and the clan-watch job only when a clan tag (`COC_FAMILY_CLAN_TAGS` or `COC_CLAN_TAG`) is set.
 - `modules/base_finder/detector.py` — CV thresholds are placeholders, marked `NOTE FOR CV ENGINEER`. Tune against real VOD frames.

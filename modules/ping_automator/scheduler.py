@@ -15,6 +15,7 @@ from modules.legend_tracker.poller import poll_all_legend_players
 from modules.legend_tracker.snapshots import save_snapshot
 from modules.ranked_tracker.tracking import poll_ranked_tracking
 from modules.roster.watcher import poll_clan_watch, run_daily_watchlist
+from modules.subscriptions.refresh import refresh_subscribers
 from modules.x_monitor.poller import poll_x_accounts
 from modules.youtube_feed.poller import poll_youtube_channels
 
@@ -176,6 +177,16 @@ async def ranked_tracking_job(pool: asyncpg.Pool, bot: disnake.Client) -> None:
         logger.exception("poll_ranked_tracking raised")
 
 
+async def subscriber_refresh_job(pool: asyncpg.Pool) -> None:
+    """Scheduled job: re-check stored subscriptions against Stripe."""
+    try:
+        summary = await refresh_subscribers(pool)
+        if summary["changed"] or summary["errors"]:
+            logger.info("Subscriber refresh summary: %s", summary)
+    except Exception:
+        logger.exception("refresh_subscribers raised")
+
+
 def create_scheduler(pool: asyncpg.Pool, bot: disnake.Client) -> AsyncIOScheduler:
     """Build (but do not start) an AsyncIOScheduler with all recurring jobs."""
     scheduler = AsyncIOScheduler()
@@ -240,5 +251,18 @@ def create_scheduler(pool: asyncpg.Pool, bot: disnake.Client) -> AsyncIOSchedule
         id="poll_ranked_tracking",
         replace_existing=True,
     )
+
+    # Gated on the Stripe key like the X poller is on cookies: without it every
+    # lookup would fail, so the job would just log errors on a timer.
+    if settings.STRIPE_SECRET_KEY:
+        scheduler.add_job(
+            subscriber_refresh_job,
+            trigger=IntervalTrigger(minutes=settings.SUBSCRIBER_REFRESH_INTERVAL_MINUTES),
+            kwargs={"pool": pool},
+            id="refresh_subscribers",
+            replace_existing=True,
+        )
+    else:
+        logger.info("STRIPE_SECRET_KEY not set; subscriber refresh job not registered")
 
     return scheduler

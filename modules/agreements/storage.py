@@ -56,6 +56,25 @@ async def attach_message(pool: asyncpg.Pool, agreement_id: int, message_id: int)
         )
 
 
+async def set_payer_name(
+    pool: asyncpg.Pool, agreement_id: int, payer_name: str
+) -> asyncpg.Record | None:
+    """Record the buyer's real name on the agreement.
+
+    Backfills the column the retired moderator flow left behind, using the name
+    on the Stripe customer record (or one an admin supplied when Stripe had
+    none). receipt_text and lookup_embed already render payer_name when it's
+    present, so this is what puts a real person on a dispute document rather
+    than only a Discord ID.
+    """
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "UPDATE agreements SET payer_name = $2 WHERE id = $1 RETURNING *;",
+            agreement_id,
+            payer_name,
+        )
+
+
 async def delete_agreement(pool: asyncpg.Pool, agreement_id: int) -> None:
     """Remove an agreement (used to roll back when the send fails)."""
     async with pool.acquire() as conn:

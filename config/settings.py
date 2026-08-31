@@ -101,6 +101,11 @@ class Settings:
     # /subscribe says so rather than posting a dead button.
     STRIPE_PAYMENT_LINK_L2_L3: str = ""
     STRIPE_PAYMENT_LINK_L1: str = ""
+    # Read-only use: looking up subscriptions when an admin confirms a payment,
+    # and re-checking their status on a schedule. Deliberately NOT required —
+    # a missing key must never stop the Discord bot, only disable these lookups.
+    STRIPE_SECRET_KEY: str = ""
+    SUBSCRIBER_REFRESH_INTERVAL_MINUTES: int = 60
 
 
 def _load() -> Settings:
@@ -144,6 +149,8 @@ def _load() -> Settings:
         RANKED_TRACKING_POLL_INTERVAL_MINUTES=_int("RANKED_TRACKING_POLL_INTERVAL_MINUTES", 20),
         STRIPE_PAYMENT_LINK_L2_L3=_optional("STRIPE_PAYMENT_LINK_L2_L3", ""),
         STRIPE_PAYMENT_LINK_L1=_optional("STRIPE_PAYMENT_LINK_L1", ""),
+        STRIPE_SECRET_KEY=_optional("STRIPE_SECRET_KEY", ""),
+        SUBSCRIBER_REFRESH_INTERVAL_MINUTES=_int("SUBSCRIBER_REFRESH_INTERVAL_MINUTES", 60),
     )
 
 

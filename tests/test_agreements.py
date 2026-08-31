@@ -258,10 +258,10 @@ async def test_void_agreement_never_touches_signed_at() -> None:
 # --- confirmation -------------------------------------------------------------
 
 
-def test_receipt_text_includes_confirmation_and_says_it_is_an_attestation() -> None:
-    """A confirmed row is the strongest dispute evidence available, but it's a
-    moderator's attestation rather than a verified payment — the receipt must
-    not overstate it, since it may be read by a payment processor."""
+def test_receipt_text_records_who_matched_the_stripe_subscription() -> None:
+    """The receipt may be read by a payment processor, so it has to say exactly
+    what happened: a named moderator matched this to a live Stripe
+    subscription."""
     row = _self_serve_row(
         confirmed_at=datetime(2026, 8, 30, 13, 0, 0, tzinfo=timezone.utc),
         confirmed_by=555,
@@ -272,8 +272,7 @@ def test_receipt_text_includes_confirmation_and_says_it_is_an_attestation() -> N
 
     assert "Payment Confirmed At: 2026-08-30 13:00:00 UTC" in text
     assert "Payment Confirmed By: mod#2" in text
-    assert "checked the Stripe Dashboard" in text
-    assert "does not receive Stripe webhooks" in text
+    assert "live Stripe subscription" in text
 
 
 def test_receipt_text_omits_confirmation_when_unconfirmed() -> None:
@@ -414,3 +413,19 @@ async def test_list_views_to_restore_excludes_terminal_rows() -> None:
     assert "message_id IS NOT NULL" in sql
     assert "voided_at IS NULL" in sql
     assert "confirmed_at IS NULL" in sql
+
+
+@pytest.mark.asyncio
+async def test_set_payer_name_backfills_the_column() -> None:
+    """The retired moderator flow left payer_name behind; linking a Stripe
+    subscription fills it, which is what puts a real person on the receipt."""
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_self_serve_row(payer_name="Jane Doe"))
+
+    result = await storage.set_payer_name(_fake_pool(conn), 7, "Jane Doe")
+
+    assert result["payer_name"] == "Jane Doe"
+    sql, *args = conn.fetchrow.await_args.args
+    assert "UPDATE agreements" in sql
+    assert "payer_name = $2" in sql
+    assert args == [7, "Jane Doe"]
