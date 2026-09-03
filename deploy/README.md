@@ -40,7 +40,7 @@ copy the new keys from `.env.example` into this machine's `.env` by hand **befor
 [config/settings.py](../config/settings.py) raises at import time if a variable in
 `REQUIRED_VARS` is unset, naming the one that's missing; check `logs/julybot.stderr.log`.
 
-## Pending update — `/subscribe` purchase flow (commit `295af9a`, 2026-08-30)
+## Pending update — `/subscribe` purchase flow (2026-09-03)
 
 This release is **not yet deployed to this machine.** It needs all four optional steps
 above, so run the sequence in full:
@@ -84,8 +84,13 @@ Two things to expect while running this:
 
 **What changed for users:** `/subscribe` is now **admin-only** and takes a member argument
 (`/subscribe @buyer`), posting a public status message in the ticket instead of an ephemeral
-one. `/agreement send` is gone — the agreement is step 1 of `/subscribe`; `/agreement lookup`
-and `/agreement receipt` still work and still render the older moderator-flow rows.
+one. `/agreement send` and the in-Discord "I Agree" step are both gone — buyers accept the
+Terms inside Stripe Checkout now, so the payment buttons appear immediately. `/agreement
+lookup` and `/agreement receipt` still work and still render the older rows in full.
+
+**Note on dispute evidence:** for purchases made from here on, the record of the buyer
+accepting the Terms lives in **Stripe**, not in this database. Answer a chargeback from the
+Stripe Dashboard. Receipts for older purchases still carry the full signed agreement text.
 
 **Verifying it took**, after the restart:
 
@@ -93,10 +98,10 @@ and `/agreement receipt` still work and still render the older moderator-flow ro
 tail -n 40 logs/julybot.stderr.log     # should show a clean login, no settings error
 ```
 
-Then in Discord: `/subscribe @someone` → the buyer clicks I Agree → payment link buttons
-appear → an admin clicks Confirm Payment and picks the buyer's subscription from the Stripe
-dropdown. If the dropdown is empty, the key and the Payment Links are in different modes
-(one live, one test).
+Then in Discord: `/subscribe @someone` → payment link buttons appear straight away → the
+buyer pays (accepting the Terms during Stripe's checkout) → an admin clicks Confirm Payment
+and picks the buyer's subscription from the Stripe dropdown. If the dropdown is empty, the
+key and the Payment Links are in different modes (one live, one test).
 
 ## Run the bot
 

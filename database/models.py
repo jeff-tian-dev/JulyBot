@@ -270,9 +270,14 @@ CREATE TABLE IF NOT EXISTS base_post_downloads (
 #      the DROP DEFAULT in MIGRATE_AGREEMENTS_SELF_SERVE, which is what keeps them NULL.
 #      payer_name IS populated on these, from the Stripe customer record at confirmation.
 #
-# A `/subscribe` row moves through three states: pending (created when the message is
-# posted, so the persistent button has an id to carry) -> signed (buyer clicked I Agree)
-# -> confirmed (an admin clicked Confirm Payment). It can be voided from any of them.
+# A `/subscribe` row moves through two states: pending (created when the message is
+# posted, so the persistent button has an id to carry) -> confirmed (an admin matched it
+# to a Stripe subscription). It can be voided from either.
+#
+# There was previously a `signed` state between them, where the buyer clicked I Agree on a
+# T&C PDF. That was removed once Stripe Checkout was configured to collect the same
+# consent, so `signed_at` and `agreement_text` are NULL/empty on rows written since. Older
+# rows still carry both and remain dispute evidence — readers must handle both shapes.
 #
 # `confirmed_at` / `confirmed_by` record WHO linked this agreement to a live Stripe
 # subscription, which the bot fetches from Stripe's API at confirmation time — so the

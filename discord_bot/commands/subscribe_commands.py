@@ -1,16 +1,25 @@
-"""/subscribe — run a purchase through a ticket, from agreement to confirmation.
+"""/subscribe — run a purchase through a ticket, from payment to confirmation.
 
 An admin opens the flow for a buyer with `/subscribe <member>`. That posts ONE
 public message in the ticket which is edited in place as the purchase advances,
 so the moderator watching the ticket can see exactly how far along the buyer is:
 
-    pending  → buyer reads the T&C PDF and clicks I Agree
-    signed   → Stripe payment link buttons appear
+    pending  → Stripe payment link buttons, waiting on the buyer to pay
     confirmed→ an admin picks the buyer's subscription out of Stripe
 
-Each stage is gated: only the named buyer can click I Agree, only an admin can
-Confirm or Cancel. The gates are enforced against the database row rather than
-the in-memory view, since a persistent view outlives the process.
+**Terms are accepted inside Stripe Checkout, not here.** There was previously an
+in-Discord "I Agree" step gating the payment links, backed by a T&C PDF; it was
+removed once Stripe's own checkout was configured to collect that consent, since
+it made buyers accept the same terms twice. Consequences worth knowing:
+  - `agreements.signed_at` and `agreement_text` are NULL/empty on new rows.
+    Historical rows still carry both and must keep rendering — see validation.py.
+  - The consent record for a new purchase lives in Stripe, not in this database,
+    so a dispute is answered from the Stripe Dashboard.
+The row itself is kept: it is what every button's custom_id is keyed to, and it
+carries the purchase's state and the confirmation audit trail.
+
+Only an admin can Confirm or Cancel. That gate is enforced against the database
+row rather than the in-memory view, since a persistent view outlives the process.
 
 **Confirming requires linking a real Stripe subscription** — there is no
 attestation-only path. The bot pulls the live subscription list from Stripe's
@@ -39,7 +48,6 @@ from disnake.ext import commands
 
 from modules.agreements import storage
 from modules.agreements import storage as agreement_storage
-from modules.agreements.document import AGREEMENT_FULL_TEXT, AGREEMENT_PDF_PATH
 from modules.agreements.validation import status_embed
 from modules.subscriptions import stripe_api
 from modules.subscriptions import storage as subscriber_storage
@@ -151,19 +159,18 @@ async def finalize_confirmation(
     payer_name: str,
     message: disnake.Message | None,
 ) -> None:
-    """Confirm the agreement, record the subscriber, and advance the message.
+    """Confirm the purchase, record the subscriber, and advance the message.
 
     Order matters: confirm_agreement first, because its SQL guards are what
-    stop an unsigned/cancelled/already-confirmed purchase being recorded. Only
-    once that succeeds is a subscriber row written.
+    stop a cancelled or already-confirmed purchase being recorded. Only once
+    that succeeds is a subscriber row written.
     """
     confirmed = await storage.confirm_agreement(
         inter.bot.pool, agreement_id, confirmed_by=inter.author.id
     )
     if confirmed is None:
         await inter.response.send_message(
-            "That purchase can't be confirmed — it's unsigned, already confirmed, "
-            "or cancelled.",
+            "That purchase can't be confirmed — it's already confirmed or cancelled.",
             ephemeral=True,
         )
         return
@@ -324,42 +331,31 @@ class PurchaseView(disnake.ui.View):
         self.agreement_id = record["id"]
 
         terminal = bool(record["voided_at"] or record["confirmed_at"])
-        signed = bool(record["signed_at"])
 
-        agree = disnake.ui.Button(
-            label="Agreed" if signed else "I Agree",
-            style=disnake.ButtonStyle.secondary if signed else disnake.ButtonStyle.success,
-            disabled=signed or terminal,
-            custom_id=f"{CUSTOM_ID_PREFIX}:agree:{self.agreement_id}",
-        )
-        agree.callback = self._on_agree
-        self.add_item(agree)
-
-        if not terminal:
-            confirm = disnake.ui.Button(
-                label="Confirm Payment",
-                style=disnake.ButtonStyle.primary,
-                disabled=not signed,
-                custom_id=f"{CUSTOM_ID_PREFIX}:confirm:{self.agreement_id}",
-            )
-            confirm.callback = self._on_confirm
-            self.add_item(confirm)
-
-            cancel = disnake.ui.Button(
-                label="Cancel",
-                style=disnake.ButtonStyle.danger,
-                custom_id=f"{CUSTOM_ID_PREFIX}:cancel:{self.agreement_id}",
-            )
-            cancel.callback = self._on_cancel
-            self.add_item(cancel)
-
-            # Only useful once they've agreed; Discord has no disabled link button,
-            # so they simply aren't shown before that.
-            if signed:
-                for button in _payment_buttons():
-                    self.add_item(button)
-        else:
+        if terminal:
             self.stop()
+            return
+
+        confirm = disnake.ui.Button(
+            label="Confirm Payment",
+            style=disnake.ButtonStyle.primary,
+            custom_id=f"{CUSTOM_ID_PREFIX}:confirm:{self.agreement_id}",
+        )
+        confirm.callback = self._on_confirm
+        self.add_item(confirm)
+
+        cancel = disnake.ui.Button(
+            label="Cancel",
+            style=disnake.ButtonStyle.danger,
+            custom_id=f"{CUSTOM_ID_PREFIX}:cancel:{self.agreement_id}",
+        )
+        cancel.callback = self._on_cancel
+        self.add_item(cancel)
+
+        # Shown immediately. Terms are accepted in Stripe Checkout now, so there
+        # is no in-Discord step gating these any more.
+        for button in _payment_buttons():
+            self.add_item(button)
 
     def _id_from(self, inter: disnake.MessageInteraction) -> int:
         """The agreement id encoded in the clicked button's custom_id.
@@ -381,33 +377,6 @@ class PurchaseView(disnake.ui.View):
     def _is_admin(inter: disnake.MessageInteraction) -> bool:
         perms = getattr(inter.author, "guild_permissions", None)
         return bool(perms and (perms.administrator or perms.manage_guild))
-
-    async def _on_agree(self, inter: disnake.MessageInteraction) -> None:
-        agreement_id = self._id_from(inter)
-        record = await storage.get_agreement(inter.bot.pool, agreement_id)
-        if record is None:
-            await inter.response.send_message(
-                "This purchase's data is gone — it may have been deleted.", ephemeral=True
-            )
-            return
-        if inter.author.id != record["buyer_id"]:
-            await inter.response.send_message(
-                "This purchase isn't addressed to you.", ephemeral=True
-            )
-            return
-
-        signed = await storage.sign_agreement(inter.bot.pool, agreement_id, inter.author.id)
-        if signed is None:
-            # Already signed, or cancelled while they had the message open.
-            await inter.response.send_message(
-                "This purchase can no longer be agreed to — it's already signed or was cancelled.",
-                ephemeral=True,
-            )
-            return
-
-        logger.info("Purchase id=%s agreed by buyer_id=%s", agreement_id, inter.author.id)
-        # The T&C PDF stays attached: it's the document they agreed to.
-        await inter.response.edit_message(embed=status_embed(signed), view=PurchaseView(signed))
 
     async def _on_confirm(self, inter: disnake.MessageInteraction) -> None:
         """Open the Stripe picker. Confirming requires choosing a real subscription."""
@@ -465,7 +434,7 @@ class SubscribeCommands(commands.Cog):
 
     @commands.slash_command(
         name="subscribe",
-        description="Start a purchase for a member: agreement, payment, confirmation.",
+        description="Start a purchase for a member: Stripe payment, then confirmation.",
         default_member_permissions=ADMIN_PERMS,
         contexts=disnake.InteractionContextTypes(guild=True),
     )
@@ -476,20 +445,12 @@ class SubscribeCommands(commands.Cog):
     ) -> None:
         await inter.response.defer(ephemeral=True)
 
-        # Check purchasability before creating anything, so nobody is asked to
-        # sign an agreement for something they can't actually buy.
+        # Check purchasability before creating anything, so no purchase is
+        # started for something that can't actually be bought.
         if not _payment_buttons():
             logger.warning("/subscribe used with no payment links configured")
             await inter.edit_original_response(
                 "Subscriptions aren't set up yet — no Stripe payment links are configured."
-            )
-            return
-
-        if not AGREEMENT_PDF_PATH.exists():
-            logger.error("Agreement PDF missing at %s", AGREEMENT_PDF_PATH)
-            await inter.edit_original_response(
-                f"The agreement PDF is missing on disk ({AGREEMENT_PDF_PATH}). "
-                "Can't start a purchase without it."
             )
             return
 
@@ -499,14 +460,12 @@ class SubscribeCommands(commands.Cog):
             channel_id=inter.channel.id,
             buyer_id=member.id,
             sent_by=inter.author.id,
-            agreement_text=AGREEMENT_FULL_TEXT,
         )
 
         try:
             message = await inter.channel.send(
                 content=member.mention,
                 embed=status_embed(record),
-                file=disnake.File(AGREEMENT_PDF_PATH, filename="terms_and_conditions.pdf"),
                 view=PurchaseView(record),
                 allowed_mentions=disnake.AllowedMentions(users=[member]),
             )

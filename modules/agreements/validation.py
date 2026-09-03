@@ -3,11 +3,16 @@
 Pool-free and Discord-send-free, so it's unit-testable without a bot or
 database. Persistence lives in storage.py.
 
-Everything here must handle BOTH row shapes in the agreements table: historical
-rows from the retired moderator-driven flow (which carry payer_name /
-payment_method / payment_contact for a PayPal/Venmo/Wise payment) and
-self-serve rows from /subscribe (where those are NULL because Stripe knows who
-paid). See the table comment in database/models.py.
+Everything here must handle THREE row shapes in the agreements table, and the
+dual/triple support is the thing most likely to regress:
+  1. Historical moderator-driven rows: payer_name / payment_method /
+     payment_contact populated for a PayPal/Venmo/Wise payment.
+  2. Rows from the in-Discord agreement step: signed_at and agreement_text set.
+  3. Current /subscribe rows: terms accepted in Stripe Checkout, so signed_at
+     is NULL and agreement_text is empty.
+Shapes 1 and 2 are historical but carry real dispute evidence, so none of these
+renderers may assume a field is present. See the table comment in
+database/models.py.
 """
 from __future__ import annotations
 
@@ -15,7 +20,6 @@ from datetime import datetime, timezone
 
 import disnake
 
-from modules.agreements.document import AGREEMENT_SUMMARY
 
 AGREEMENT_EMBED_COLOUR = 0x2ECC71
 VOIDED_EMBED_COLOUR = 0x95A5A6
@@ -38,19 +42,6 @@ def _absolute_utc(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-
-
-def terms_embed() -> disnake.Embed:
-    """Step one of /subscribe: the terms the buyer must accept before paying.
-
-    The full text is too long for an embed, so this is the summary; the
-    complete Terms and Conditions PDF is attached to the same message.
-    """
-    return disnake.Embed(
-        title="Purchase Agreement",
-        description=AGREEMENT_SUMMARY,
-        colour=AGREEMENT_EMBED_COLOUR,
-    )
 
 
 def status_embed(record) -> disnake.Embed:
@@ -86,11 +77,12 @@ def status_embed(record) -> disnake.Embed:
         )
         if record["payer_name"]:
             embed.add_field(name="Paid by", value=record["payer_name"], inline=False)
-        embed.add_field(
-            name="Agreed",
-            value=_relative_timestamp(record["signed_at"]),
-            inline=True,
-        )
+        if record["signed_at"]:
+            embed.add_field(
+                name="Agreed",
+                value=_relative_timestamp(record["signed_at"]),
+                inline=True,
+            )
         embed.add_field(
             name="Confirmed",
             value=(
@@ -117,13 +109,21 @@ def status_embed(record) -> disnake.Embed:
         return embed
 
     embed = disnake.Embed(
-        title="Purchase Agreement",
-        description=AGREEMENT_SUMMARY,
+        title="Purchase",
+        description=(
+            f"**{buyer}:** pick a tier below and pay through Stripe. You'll accept "
+            "the Terms and Conditions as part of Stripe's checkout.\n\n"
+            "This is a **monthly subscription** — you'll be billed automatically "
+            "each month until you cancel. To cancel, message a moderator."
+        ),
         colour=AGREEMENT_EMBED_COLOUR,
     )
     embed.add_field(
         name="Waiting on",
-        value=f"{buyer} to read the attached Terms and Conditions and click **I Agree**.",
+        value=(
+            "the payment to go through. A moderator will confirm it here once it "
+            "shows up in Stripe."
+        ),
         inline=False,
     )
     return embed
@@ -137,14 +137,16 @@ def receipt_text(
     voided_by_label: str | None = None,
     confirmed_by_label: str | None = None,
 ) -> str:
-    """Plain-text proof-of-signature document for a signed (or voided) agreement.
+    """Plain-text purchase record, for forwarding to a payment processor.
 
-    Not tied to Discord's embed limits — meant to be forwarded to a payment
-    processor as an attachment, so it carries the exact agreement text the
-    buyer saw rather than a pointer to a possibly-since-edited template.
+    Not tied to Discord's embed limits. Historical rows carry the exact
+    agreement text the buyer signed, so it is reproduced verbatim rather than
+    pointed at a possibly-since-edited template. Purchases made since terms
+    moved into Stripe Checkout have no such transcript — the consent record
+    lives in Stripe, and the document says so rather than printing a blank.
 
-    Payment and sender lines are omitted entirely when NULL (a self-serve row)
-    rather than printed as "None".
+    Payment and sender lines are omitted entirely when NULL rather than
+    printed as "None".
     """
     lines = [
         "PURCHASE AGREEMENT RECEIPT",
@@ -165,8 +167,11 @@ def receipt_text(
     if record["signed_at"]:
         lines.append(f"Signed At: {_absolute_utc(record['signed_at'])}")
         lines.append("Status: SIGNED")
-    else:
-        lines.append("Status: NOT YET SIGNED")
+    elif not record["confirmed_at"]:
+        # Purchases made since terms moved into Stripe Checkout have no
+        # in-Discord signature, so "not yet signed" would be misleading on a
+        # confirmed one; only an unconfirmed purchase is genuinely incomplete.
+        lines.append("Status: AWAITING PAYMENT")
 
     if record["confirmed_at"]:
         lines.append(f"Payment Confirmed At: {_absolute_utc(record['confirmed_at'])}")
@@ -178,6 +183,11 @@ def receipt_text(
             "  (Matched to a live Stripe subscription at confirmation time by"
         )
         lines.append("   the moderator named above.)")
+        if not record["signed_at"]:
+            lines.append(
+                "  (Terms and Conditions were accepted by the buyer during Stripe"
+            )
+            lines.append("   Checkout; that consent record is held by Stripe.)")
 
     if record["sent_by"]:
         lines.append(f"Sent By: {sender_label or record['sent_by']} (discord id {record['sent_by']})")
@@ -188,9 +198,21 @@ def receipt_text(
         lines.append(f"Voided By: {voided_by_label or record['voided_by']}")
         lines.append(f"Void Reason: {record['void_reason']}")
 
-    lines.append("")
-    lines.append("--- AGREEMENT TEXT AS SIGNED ---")
-    lines.append(record["agreement_text"])
+    if record["agreement_text"]:
+        lines.append("")
+        lines.append("--- AGREEMENT TEXT AS SIGNED ---")
+        lines.append(record["agreement_text"])
+    else:
+        # No in-Discord signature on this purchase: terms were accepted in
+        # Stripe Checkout, so there is no transcript to reproduce here. Printing
+        # an empty section would read as data loss.
+        lines.append("")
+        lines.append("--- TERMS AND CONDITIONS ---")
+        lines.append(
+            "Accepted by the buyer during Stripe Checkout. The consent record, "
+            "including the terms shown and when they were accepted, is held by "
+            "Stripe and available from the Stripe Dashboard."
+        )
 
     return "\n".join(lines)
 
@@ -238,5 +260,4 @@ __all__ = [
     "lookup_embed",
     "receipt_text",
     "status_embed",
-    "terms_embed",
 ]

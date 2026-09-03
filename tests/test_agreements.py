@@ -1,10 +1,11 @@
 """Unit tests for the agreements module: rendering and storage.
 
-Two row shapes must both render: historical rows from the retired
-moderator-driven /agreement send flow (payer_name / payment_method /
-payment_contact populated), and self-serve rows written by /subscribe (those
-columns NULL). The dual support is the thing most likely to regress, so both
-are covered here.
+Three row shapes must all render, and that is the thing most likely to regress:
+historical moderator-driven rows (payer_name / payment_method / payment_contact
+populated), rows from the retired in-Discord agree step (signed_at and
+agreement_text set), and current /subscribe rows where terms are accepted in
+Stripe Checkout (signed_at NULL, agreement_text empty). The older shapes carry
+real dispute evidence, so all three are covered here.
 """
 from __future__ import annotations
 
@@ -79,12 +80,10 @@ def _moderator_row(**overrides):
 # --- terms embed --------------------------------------------------------------
 
 
-def test_terms_embed_carries_the_summary() -> None:
-    from modules.agreements.document import AGREEMENT_SUMMARY
-
-    embed = validation.terms_embed()
-    assert embed.title == "Purchase Agreement"
-    assert embed.description == AGREEMENT_SUMMARY
+def test_no_in_discord_terms_embed_remains() -> None:
+    """Terms are accepted in Stripe Checkout now. A leftover terms_embed would
+    mean the removed agree step is still reachable from somewhere."""
+    assert not hasattr(validation, "terms_embed")
 
 
 # --- receipt_text -------------------------------------------------------------
@@ -135,10 +134,38 @@ def test_receipt_text_carries_the_full_agreement_text() -> None:
     assert "CLAUSE TWO" in text
 
 
-def test_receipt_text_marks_unsigned() -> None:
-    text = validation.receipt_text(_self_serve_row(signed_at=None), buyer_label="buyer#1")
-    assert "Status: NOT YET SIGNED" in text
+def test_receipt_text_marks_an_unpaid_purchase_as_awaiting_payment() -> None:
+    row = _self_serve_row(signed_at=None, agreement_text="")
+    text = validation.receipt_text(row, buyer_label="buyer#1")
+    assert "Status: AWAITING PAYMENT" in text
     assert "Status: SIGNED" not in text
+
+
+def test_receipt_for_a_stripe_checkout_purchase_points_at_stripe_for_consent() -> None:
+    """These rows have no signature and no stored terms text. The receipt must
+    say where the consent record actually lives rather than print a blank
+    section, which would read as data loss on a dispute document."""
+    row = _self_serve_row(
+        signed_at=None,
+        agreement_text="",
+        confirmed_at=datetime(2026, 8, 30, 13, 0, 0, tzinfo=timezone.utc),
+        confirmed_by=555,
+    )
+    text = validation.receipt_text(row, buyer_label="buyer#1")
+
+    assert "AGREEMENT TEXT AS SIGNED" not in text
+    assert "Stripe Checkout" in text
+    # Not "awaiting payment" — it is confirmed, just not signed in Discord.
+    assert "AWAITING PAYMENT" not in text
+
+
+def test_receipt_still_reproduces_a_historical_signed_agreement() -> None:
+    """Old rows carry the exact text the buyer signed; that is the evidence."""
+    text = validation.receipt_text(_self_serve_row(), buyer_label="buyer#1")
+
+    assert "--- AGREEMENT TEXT AS SIGNED ---" in text
+    assert "All sales are final." in text
+    assert "Status: SIGNED" in text
 
 
 def test_receipt_text_includes_void_details() -> None:
@@ -298,11 +325,29 @@ def test_lookup_embed_distinguishes_paid_from_merely_signed() -> None:
 # --- status_embed -------------------------------------------------------------
 
 
-def test_status_embed_pending_waits_on_the_buyer() -> None:
+def test_status_embed_pending_prompts_for_payment_not_a_signature() -> None:
     embed = validation.status_embed(_self_serve_row(signed_at=None))
-    assert embed.title == "Purchase Agreement"
-    assert "<@4242>" in " ".join(f.value for f in embed.fields)
-    assert "I Agree" in " ".join(f.value for f in embed.fields)
+    assert embed.title == "Purchase"
+    assert "<@4242>" in embed.description
+    assert "pay through Stripe" in embed.description
+    # The in-Discord agree step is gone; asking for it again would be wrong.
+    assert "I Agree" not in embed.description
+    assert "I Agree" not in " ".join(f.value for f in embed.fields)
+
+
+def test_status_embed_confirmed_omits_agreed_field_when_never_signed() -> None:
+    """signed_at is NULL on Stripe-Checkout purchases; rendering the field
+    would crash on the None timestamp."""
+    row = _self_serve_row(
+        signed_at=None,
+        confirmed_at=datetime(2026, 8, 30, 13, 0, 0, tzinfo=timezone.utc),
+        confirmed_by=555,
+    )
+    embed = validation.status_embed(row)
+
+    assert embed.title == "Purchase Confirmed"
+    assert "Agreed" not in [f.name for f in embed.fields]
+    assert "<@555>" in " ".join(f.value for f in embed.fields)
 
 
 def test_status_embed_signed_prompts_for_payment() -> None:
@@ -368,15 +413,19 @@ async def test_create_pending_agreement_inserts_unsigned() -> None:
 
 @pytest.mark.asyncio
 async def test_confirm_agreement_guards_live_in_sql() -> None:
-    """Confirming must be impossible for an unsigned, already-confirmed, or
-    cancelled purchase even if a handler check is missed."""
+    """Confirming must be impossible for an already-confirmed or cancelled
+    purchase even if a handler check is missed.
+
+    There is deliberately NO signed_at guard: terms moved into Stripe Checkout,
+    so new purchases never have an in-Discord signature and requiring one would
+    block every confirmation."""
     conn = MagicMock()
     conn.fetchrow = AsyncMock(return_value=_self_serve_row())
 
     await storage.confirm_agreement(_fake_pool(conn), 7, confirmed_by=555)
 
     sql, *args = conn.fetchrow.await_args.args
-    assert "signed_at IS NOT NULL" in sql
+    assert "signed_at IS NOT NULL" not in sql
     assert "confirmed_at IS NULL" in sql
     assert "voided_at IS NULL" in sql
     assert args == [7, 555]

@@ -148,29 +148,41 @@ def _button_interaction(*, custom_id: str, author_id: int, admin: bool = False):
 
 
 @pytest.mark.asyncio
-async def test_pending_view_hides_payment_links_until_signed() -> None:
-    """The payment links must not be reachable before the buyer agrees."""
+async def test_pending_view_shows_payment_links_immediately() -> None:
+    """Terms are accepted in Stripe Checkout, so nothing gates the links."""
     with patch.object(subscribe_commands, "TIERS", _tiers()):
-        view = subscribe_commands.PurchaseView(_row())
-
-    labels = [item.label for item in view.children]
-    assert "I Agree" in labels
-    assert not any(getattr(item, "url", None) for item in view.children)
-    confirm = next(i for i in view.children if i.label == "Confirm Payment")
-    assert confirm.disabled is True
-
-
-@pytest.mark.asyncio
-async def test_signed_view_reveals_payment_links_and_enables_confirm() -> None:
-    with patch.object(subscribe_commands, "TIERS", _tiers()):
-        view = subscribe_commands.PurchaseView(_row(signed_at=SIGNED))
+        view = subscribe_commands.PurchaseView(_row(signed_at=None))
 
     urls = [i.url for i in view.children if getattr(i, "url", None)]
     assert urls == ["https://buy.stripe.com/l2", "https://buy.stripe.com/l1"]
     confirm = next(i for i in view.children if i.label == "Confirm Payment")
     assert confirm.disabled is False
-    agree = next(i for i in view.children if i.label == "Agreed")
-    assert agree.disabled is True
+
+
+@pytest.mark.asyncio
+async def test_no_agree_button_remains() -> None:
+    """The in-Discord agree step is gone; a leftover button would ask buyers to
+    accept the same terms twice, and its callback no longer exists."""
+    with patch.object(subscribe_commands, "TIERS", _tiers()):
+        view = subscribe_commands.PurchaseView(_row(signed_at=None))
+
+    labels = [i.label for i in view.children]
+    assert "I Agree" not in labels
+    assert "Agreed" not in labels
+    assert not hasattr(subscribe_commands.PurchaseView, "_on_agree")
+
+
+@pytest.mark.asyncio
+async def test_historical_signed_row_still_renders_a_usable_view() -> None:
+    """Purchases started before the agree step was removed are still open in
+    real tickets; their buttons must keep working."""
+    with patch.object(subscribe_commands, "TIERS", _tiers()):
+        view = subscribe_commands.PurchaseView(_row(signed_at=SIGNED))
+
+    labels = [i.label for i in view.children]
+    assert "Confirm Payment" in labels
+    assert "Cancel" in labels
+    assert any(getattr(i, "url", None) for i in view.children)
 
 
 @pytest.mark.asyncio
@@ -184,43 +196,6 @@ async def test_confirmed_view_is_terminal() -> None:
     assert "Confirm Payment" not in labels
     assert "Cancel" not in labels
     assert view.is_finished()
-
-
-@pytest.mark.asyncio
-async def test_only_the_named_buyer_can_agree() -> None:
-    inter = _button_interaction(custom_id="purchase:agree:7", author_id=9999)
-
-    with patch.object(subscribe_commands, "TIERS", _tiers()), \
-         patch.object(
-             subscribe_commands.storage, "get_agreement", new=AsyncMock(return_value=_row())
-         ), \
-         patch.object(subscribe_commands.storage, "sign_agreement", new=AsyncMock()) as sign:
-        view = subscribe_commands.PurchaseView(_row())
-        await view.children[0].callback(inter)
-
-    sign.assert_not_awaited()
-    assert "addressed to you" in inter.response.send_message.call_args.args[0]
-
-
-@pytest.mark.asyncio
-async def test_buyer_agreeing_advances_the_message() -> None:
-    inter = _button_interaction(custom_id="purchase:agree:7", author_id=4242)
-    signed = _row(signed_at=SIGNED)
-
-    with patch.object(subscribe_commands, "TIERS", _tiers()), \
-         patch.object(
-             subscribe_commands.storage, "get_agreement", new=AsyncMock(return_value=_row())
-         ), \
-         patch.object(
-             subscribe_commands.storage, "sign_agreement", new=AsyncMock(return_value=signed)
-         ) as sign:
-        view = subscribe_commands.PurchaseView(_row())
-        await view.children[0].callback(inter)
-
-    sign.assert_awaited_once()
-    kwargs = inter.response.edit_message.call_args.kwargs
-    assert "Signed" in kwargs["embed"].title
-    assert any(getattr(i, "url", None) for i in kwargs["view"].children)
 
 
 @pytest.mark.asyncio

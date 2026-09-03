@@ -19,13 +19,18 @@ async def create_pending_agreement(
     channel_id: int,
     buyer_id: int,
     sent_by: int,
-    agreement_text: str,
+    agreement_text: str = "",
 ) -> asyncpg.Record:
-    """Insert an unsigned agreement, before the status message is posted.
+    """Insert a pending purchase, before the status message is posted.
 
     The row exists first because the message carries a *persistent* view whose
     custom_ids need an agreement id to encode. `attach_message` fills in
     message_id once the send succeeds.
+
+    `agreement_text` defaults to empty: terms are accepted in Stripe Checkout,
+    so there is no in-Discord signature to capture and nothing to transcribe.
+    The column is NOT NULL, hence "" rather than None. Historical rows hold the
+    full T&C text and must keep rendering.
 
     The payment columns (payer_name / payment_method / payment_contact) stay
     NULL — Stripe knows who paid. See the agreements table comment in
@@ -97,6 +102,11 @@ async def sign_agreement(
     no-op — only the first successful UPDATE returns a row — and the voided_at
     guard stops a buyer signing a purchase an admin cancelled while they had the
     message open.
+
+    NO LONGER CALLED IN PRODUCTION. Terms are accepted in Stripe Checkout, so
+    `/subscribe` has no I Agree button and nothing writes `signed_at` any more.
+    Kept because purchases created before that change may still be open in a
+    ticket, and because the readers of `signed_at` still need testing.
     """
     async with pool.acquire() as conn:
         return await conn.fetchrow(
@@ -114,15 +124,17 @@ async def sign_agreement(
 async def confirm_agreement(
     pool: asyncpg.Pool, agreement_id: int, *, confirmed_by: int
 ) -> asyncpg.Record | None:
-    """Stamp an admin's confirmation that they saw the payment; None if not eligible.
+    """Link this purchase to a Stripe subscription an admin picked; None if not eligible.
 
-    This is an ATTESTATION, not a verified payment — there's no Stripe webhook,
-    so the bot never observes the charge. The admin checked the Stripe Dashboard
-    themselves.
+    The subscription's existence and status come from Stripe's API, so this is
+    verification rather than attestation. What stays human judgement is WHICH
+    subscription belongs to WHICH Discord user — Stripe doesn't know its
+    customers' Discord accounts. confirmed_by records who made that call.
 
-    The guards live in SQL rather than only in the handler: signed_at NOT NULL
-    stops confirming a purchase nobody agreed to, confirmed_at IS NULL makes a
-    double-click a no-op, and voided_at IS NULL stops confirming a cancelled one.
+    The guards live in SQL rather than only in the handler: confirmed_at IS NULL
+    makes a double-click a no-op, and voided_at IS NULL stops confirming a
+    cancelled purchase. There is deliberately NO signed_at guard — terms are now
+    accepted in Stripe Checkout, so no in-Discord signature exists to require.
     """
     async with pool.acquire() as conn:
         return await conn.fetchrow(
@@ -130,7 +142,6 @@ async def confirm_agreement(
             UPDATE agreements
             SET confirmed_at = NOW(), confirmed_by = $2
             WHERE id = $1
-              AND signed_at IS NOT NULL
               AND confirmed_at IS NULL
               AND voided_at IS NULL
             RETURNING *;
