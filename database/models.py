@@ -435,6 +435,8 @@ CREATE TABLE IF NOT EXISTS subscribers (
     linked_by BIGINT NOT NULL,
     relinked_by BIGINT,
     relinked_at TIMESTAMP,
+    archived_at TIMESTAMP,
+    archived_by BIGINT,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );
@@ -448,6 +450,20 @@ CREATE INDEX IF NOT EXISTS idx_subscribers_discord ON subscribers (discord_id);
 MIGRATE_SUBSCRIBERS_RELINK = """
 ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS relinked_by BIGINT;
 ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS relinked_at TIMESTAMP;
+"""
+
+# `/purchases archive` closes out a month: last month's purchases stop counting as
+# current access so the active list is only this month's, WITHOUT deleting anything.
+# These rows are the purchase log and dispute evidence — nothing here ever removes a
+# row, and a resub still creates a new one.
+#
+# Archiving is a separate flag rather than a `status` value on purpose: `status`
+# mirrors Stripe's own string verbatim (see the table comment), and inventing a local
+# value for it would break that correspondence and confuse the refresh job.
+MIGRATE_SUBSCRIBERS_ARCHIVE = """
+ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP;
+ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS archived_by BIGINT;
+CREATE INDEX IF NOT EXISTS idx_subscribers_archived ON subscribers (guild_id, archived_at);
 """
 
 # The old `subscriptions` table was shaped for the deleted FastAPI checkout site's
@@ -563,6 +579,8 @@ async def create_tables(pool: asyncpg.Pool) -> None:
         await conn.execute(DROP_LEGACY_SUBSCRIPTIONS)
         logger.info("Applying subscribers relink migration if needed")
         await conn.execute(MIGRATE_SUBSCRIBERS_RELINK)
+        logger.info("Applying subscribers archive migration if needed")
+        await conn.execute(MIGRATE_SUBSCRIBERS_ARCHIVE)
 
 
 async def drop_tables(pool: asyncpg.Pool) -> None:

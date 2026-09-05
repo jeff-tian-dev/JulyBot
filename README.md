@@ -301,6 +301,7 @@ The Cogs listed in `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py) are
 | `/subscribe <member>`            | subscriptions (admin) | live      |
 | `/purchases list [member]`       | subscriptions (admin) | live      |
 | `/purchases relink <id>`         | subscriptions (admin) | live      |
+| `/purchases archive`             | subscriptions (admin) | live      |
 | `/agreement lookup <member>`     | agreements (admin) | live         |
 | `/agreement receipt <id>`        | agreements (admin) | live         |
 | `/legend`                        | legend_tracker     | stub, not loaded |

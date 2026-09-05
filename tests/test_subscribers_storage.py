@@ -129,14 +129,22 @@ async def test_list_for_refresh_skips_one_time_payments() -> None:
 @pytest.mark.asyncio
 async def test_list_active_subscribers_excludes_payment_trouble() -> None:
     """past_due / unpaid are live subscriptions in Stripe but mean payment is
-    failing, so they deliberately don't count as active access."""
+    failing, so they deliberately don't count as active access.
+
+    "succeeded" IS included — that's a one-time PaymentIntent, which is what
+    the Payment Links currently produce; without it no one-time purchase could
+    ever count as active."""
     conn = MagicMock()
     conn.fetch = AsyncMock(return_value=[{"id": 1}])
 
     await storage.list_active_subscribers(_fake_pool(conn), 1)
 
-    _, *args = conn.fetch.await_args.args
-    assert args == [1, ["active", "trialing"]]
+    sql, *args = conn.fetch.await_args.args
+    assert args == [1, ["active", "trialing", "succeeded"]]
+    assert "past_due" not in sql
+    # Archived rows are a closed-out month, not current access. This is what
+    # bounds a one-time purchase, whose status never stops being "succeeded".
+    assert "archived_at IS NULL" in sql
 
 
 @pytest.mark.asyncio
@@ -275,3 +283,80 @@ async def test_linked_stripe_ids_returns_a_set() -> None:
     ])
 
     assert await storage.linked_stripe_ids(_fake_pool(conn)) == {"pi_a", "sub_b"}
+
+
+# --- archiving a month --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_archive_marks_rows_without_deleting_them() -> None:
+    """These rows are the purchase log and dispute evidence — closing out a
+    month must never remove one."""
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[{"id": 1}, {"id": 2}])
+    cutoff = datetime(2026, 9, 1, tzinfo=timezone.utc)
+
+    archived = await storage.archive_subscribers(
+        _fake_pool(conn), 1, before=cutoff, archived_by=555
+    )
+
+    assert len(archived) == 2
+    sql, *args = conn.fetch.await_args.args
+    assert "UPDATE subscribers" in sql
+    assert "DELETE" not in sql.upper()
+    assert "archived_at = NOW()" in sql
+    assert args == [1, cutoff, 555]
+
+
+@pytest.mark.asyncio
+async def test_archive_skips_already_archived_rows() -> None:
+    """Re-running a close-out must be a no-op, not a restamp that loses when
+    the archive actually happened."""
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    await storage.archive_subscribers(
+        _fake_pool(conn), 1, before=datetime(2026, 9, 1, tzinfo=timezone.utc), archived_by=555
+    )
+
+    assert "archived_at IS NULL" in conn.fetch.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_archive_is_scoped_to_one_guild_and_cutoff() -> None:
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    await storage.archive_subscribers(
+        _fake_pool(conn), 42, before=datetime(2026, 9, 1, tzinfo=timezone.utc), archived_by=1
+    )
+
+    sql = conn.fetch.await_args.args[0]
+    assert "guild_id = $1" in sql
+    assert "created_at < $2" in sql
+
+
+@pytest.mark.asyncio
+async def test_unarchive_clears_both_columns() -> None:
+    """A close-out run too early must be fully undoable, not leave a stale
+    archived_by behind."""
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={"id": 3, "archived_at": None})
+
+    await storage.unarchive_subscriber(_fake_pool(conn), 3)
+
+    sql = conn.fetchrow.await_args.args[0]
+    assert "archived_at = NULL" in sql
+    assert "archived_by = NULL" in sql
+
+
+@pytest.mark.asyncio
+async def test_refresh_skips_archived_rows() -> None:
+    """A closed-out month's status no longer drives anything, so re-polling it
+    would just burn Stripe calls."""
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    await storage.list_for_refresh(_fake_pool(conn))
+
+    assert "archived_at IS NULL" in conn.fetch.await_args.args[0]

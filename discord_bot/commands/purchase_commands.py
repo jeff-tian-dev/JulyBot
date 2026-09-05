@@ -2,8 +2,9 @@
 
 Two subcommands, both admin-only:
 
-    /purchases list [member]    recent purchases, or one member's history
+    /purchases list [member]    recent purchases (paged), or one member's history
     /purchases relink <id>      repoint a row at a different Stripe payment
+    /purchases archive          close out the previous month's purchases
 
 **What relink fixes, precisely:** an admin picking the WRONG PAYMENT out of the
 Stripe dropdown when confirming. The Discord buyer is not changed — `/subscribe`
@@ -17,10 +18,17 @@ payment afterwards, and the only remedy was editing the database by hand.
 The row is corrected in place rather than deleted and re-created, so `id`,
 `created_at`, `agreement_id` and the original `linked_by` all survive — a
 correction is exactly when the history of who touched a row matters.
+
+**Archiving never deletes.** `subscribers` rows are the purchase log and the
+evidence for a payment dispute; closing out a month only sets `archived_at`, so
+the rows drop out of the active list but stay fully readable. That flag is also
+what bounds a ONE-TIME purchase: its Stripe status stays `succeeded` forever, so
+without archiving it would grant access permanently.
 """
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 import asyncpg
 import disnake
@@ -34,11 +42,19 @@ logger = logging.getLogger(__name__)
 ADMIN_PERMS = disnake.Permissions(administrator=True)
 NO_PINGS = disnake.AllowedMentions.none()
 EMBED_COLOUR = 0x5865F2
-# Discord caps an embed description at 4096 chars; a page of purchases stays
-# well under that, and a shorter list is easier to scan for the right row.
-LIST_LIMIT = 15
+# Purchases shown per page. Discord caps an embed description at 4096 chars and
+# each row is ~2 short lines, so this stays well under it while keeping a page
+# scannable. The list is paged rather than truncated because a month can carry
+# ~100 purchases and the row you want is often not in the newest handful.
+PAGE_SIZE = 10
+# How many purchases a listing loads at most. Paging happens in memory over
+# this, which is cheap at this scale and avoids re-querying on every click.
+LIST_LIMIT = 200
 # The admin is mid-correction; if they wander off, re-running the command is cheap.
 PICKER_TIMEOUT_SECONDS = 300
+# Archiving touches many rows at once, so it is previewed and confirmed rather
+# than fired on the first click.
+CONFIRM_TIMEOUT_SECONDS = 120
 
 
 def _money(record) -> str:
@@ -64,8 +80,19 @@ def purchase_line(record) -> str:
     return "\n".join(parts)
 
 
-def build_list_embed(records, *, member: disnake.User | None = None) -> disnake.Embed:
-    """The /purchases list panel."""
+def page_count(total: int) -> int:
+    """Pages needed for `total` records — at least 1, so an empty list renders."""
+    return max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+
+
+def build_list_embed(
+    records, *, member: disnake.User | None = None, page: int = 0
+) -> disnake.Embed:
+    """One page of the /purchases list panel.
+
+    `page` is 0-based and clamped, so a stale click after the list shrank
+    renders the last page rather than an empty one.
+    """
     if member is not None:
         title = f"Purchases — {member.display_name}"
         empty = f"No purchases recorded for {member.mention}."
@@ -76,15 +103,71 @@ def build_list_embed(records, *, member: disnake.User | None = None) -> disnake.
     if not records:
         return disnake.Embed(title=title, description=empty, colour=EMBED_COLOUR)
 
+    pages = page_count(len(records))
+    page = max(0, min(page, pages - 1))
+    start = page * PAGE_SIZE
+    shown = records[start : start + PAGE_SIZE]
+
     embed = disnake.Embed(
         title=title,
-        description="\n".join(purchase_line(r) for r in records),
+        description="\n".join(purchase_line(r) for r in shown),
         colour=EMBED_COLOUR,
     )
     embed.set_footer(
-        text="Use /purchases relink <id> if a purchase is linked to the wrong payment."
+        text=(
+            f"Page {page + 1}/{pages} · {len(records)} total · "
+            "/purchases relink <id> fixes a wrong payment"
+        )
     )
     return embed
+
+
+class PurchaseListView(disnake.ui.View):
+    """Prev/next paging over an already-loaded list of purchases.
+
+    Records are held on the view rather than re-queried per click: a listing is
+    capped at LIST_LIMIT rows, so paging in memory is cheap and the page cannot
+    shift under the admin while they read it.
+
+    Ephemeral and short-lived like the pickers, so it needs no persistent
+    registration — if it times out, re-run the command.
+    """
+
+    def __init__(self, records, *, member: disnake.User | None = None) -> None:
+        super().__init__(timeout=PICKER_TIMEOUT_SECONDS)
+        self.records = records
+        self.member = member
+        self.page = 0
+
+        self.prev = disnake.ui.Button(label="◀", style=disnake.ButtonStyle.secondary)
+        self.prev.callback = self._on_prev
+        self.add_item(self.prev)
+
+        self.next = disnake.ui.Button(label="▶", style=disnake.ButtonStyle.secondary)
+        self.next.callback = self._on_next
+        self.add_item(self.next)
+
+        self._sync_buttons()
+
+    def _sync_buttons(self) -> None:
+        self.prev.disabled = self.page <= 0
+        self.next.disabled = self.page >= page_count(len(self.records)) - 1
+
+    def embed(self) -> disnake.Embed:
+        return build_list_embed(self.records, member=self.member, page=self.page)
+
+    async def _turn(self, inter: disnake.MessageInteraction, delta: int) -> None:
+        self.page = max(0, min(self.page + delta, page_count(len(self.records)) - 1))
+        self._sync_buttons()
+        await inter.response.edit_message(
+            embed=self.embed(), view=self, allowed_mentions=NO_PINGS
+        )
+
+    async def _on_prev(self, inter: disnake.MessageInteraction) -> None:
+        await self._turn(inter, -1)
+
+    async def _on_next(self, inter: disnake.MessageInteraction) -> None:
+        await self._turn(inter, 1)
 
 
 class RelinkPickerView(disnake.ui.View):
@@ -182,6 +265,72 @@ class RelinkPickerView(disnake.ui.View):
         )
 
 
+class ArchiveConfirmView(disnake.ui.View):
+    """Confirm a month close-out before it touches anything.
+
+    Archiving is bulk and easy to fire on the wrong month, so the admin sees
+    the count and cutoff first. Short-lived and ephemeral like the pickers —
+    nothing to restore after a restart.
+    """
+
+    def __init__(self, guild_id: int, *, before: datetime, count: int) -> None:
+        super().__init__(timeout=CONFIRM_TIMEOUT_SECONDS)
+        self.guild_id = guild_id
+        self.before = before
+        self.count = count
+
+        confirm = disnake.ui.Button(
+            label=f"Archive {count} purchase{'s' if count != 1 else ''}",
+            style=disnake.ButtonStyle.primary,
+        )
+        confirm.callback = self._on_confirm
+        self.add_item(confirm)
+
+        cancel = disnake.ui.Button(label="Cancel", style=disnake.ButtonStyle.secondary)
+        cancel.callback = self._on_cancel
+        self.add_item(cancel)
+
+    async def _on_confirm(self, inter: disnake.MessageInteraction) -> None:
+        archived = await subscriber_storage.archive_subscribers(
+            inter.bot.pool,
+            self.guild_id,
+            before=self.before,
+            archived_by=inter.author.id,
+        )
+        logger.info(
+            "Archived %s purchases before %s in guild %s by %s",
+            len(archived),
+            self.before.isoformat(),
+            self.guild_id,
+            inter.author.id,
+        )
+        await inter.response.edit_message(
+            content=(
+                f"Archived **{len(archived)}** purchase(s) made before "
+                f"<t:{int(self.before.timestamp())}:d>. They stay in the log and on "
+                "receipts — they just no longer count as current access."
+            ),
+            embed=None,
+            view=None,
+        )
+
+    async def _on_cancel(self, inter: disnake.MessageInteraction) -> None:
+        await inter.response.edit_message(
+            content="Nothing archived.", embed=None, view=None
+        )
+
+
+def month_start(now: datetime | None = None) -> datetime:
+    """First instant of the current month, UTC — the archive cutoff.
+
+    Everything bought BEFORE this belongs to a previous month. Supabase runs
+    UTC and `created_at` is written by NOW(), so the boundary matches the
+    stored timestamps without a timezone conversion.
+    """
+    now = now or datetime.now(timezone.utc)
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
 class PurchaseCommands(commands.Cog):
     def __init__(self, bot: commands.InteractionBot) -> None:
         self.bot = bot
@@ -215,6 +364,15 @@ class PurchaseCommands(commands.Cog):
         except Exception as exc:  # noqa: BLE001 — surface it rather than time out
             logger.exception("Couldn't list purchases")
             await inter.edit_original_response(f"Couldn't load purchases: {exc}")
+            return
+
+        # Only attach paging controls when there is more than one page — two
+        # dead buttons under a three-row list is just noise.
+        if len(records) > PAGE_SIZE:
+            view = PurchaseListView(records, member=member)
+            await inter.edit_original_response(
+                embed=view.embed(), view=view, allowed_mentions=NO_PINGS
+            )
             return
 
         await inter.edit_original_response(
@@ -279,6 +437,55 @@ class PurchaseCommands(commands.Cog):
             view=RelinkPickerView(record["id"], purchases, already_linked=already),
             allowed_mentions=NO_PINGS,
         )
+
+
+    @purchases.sub_command(
+        name="archive",
+        description="Close out purchases from before this month.",
+    )
+    async def archive(self, inter: disnake.ApplicationCommandInteraction) -> None:
+        await inter.response.defer(ephemeral=True)
+
+        before = month_start()
+        active = await subscriber_storage.list_active_subscribers(
+            self.bot.pool, inter.guild.id
+        )
+        stale = [r for r in active if r["created_at"] and r["created_at"] < _naive(before)]
+
+        if not stale:
+            await inter.edit_original_response(
+                "Nothing to archive — no active purchases predate this month."
+            )
+            return
+
+        embed = disnake.Embed(
+            title="Archive previous months",
+            description=(
+                f"**{len(stale)}** active purchase(s) were made before "
+                f"<t:{int(before.timestamp())}:d> and would be closed out.\n\n"
+                "They stay in the purchase log and on receipts — archiving only "
+                "stops them counting as current access."
+            ),
+            colour=EMBED_COLOUR,
+        )
+        embed.add_field(
+            name="Affected",
+            value="\n".join(
+                f"#{r['id']} — <@{r['discord_id']}>" for r in stale[:PAGE_SIZE]
+            )
+            + (f"\n…and {len(stale) - PAGE_SIZE} more" if len(stale) > PAGE_SIZE else ""),
+            inline=False,
+        )
+        await inter.edit_original_response(
+            embed=embed,
+            view=ArchiveConfirmView(inter.guild.id, before=before, count=len(stale)),
+            allowed_mentions=NO_PINGS,
+        )
+
+
+def _naive(dt: datetime) -> datetime:
+    """asyncpg returns TIMESTAMP (no tz) for created_at, so compare like with like."""
+    return dt.replace(tzinfo=None)
 
 
 def setup(bot: commands.InteractionBot) -> None:

@@ -6,7 +6,11 @@ the same pattern).
 
 One row per subscription period: a resub creates a NEW row rather than
 overwriting, so this table is a history. "Is this user subscribed?" means "do
-they have a row with a live status?", not "is there a row for them".
+they have a live, unarchived row?", not "is there a row for them".
+
+**Nothing here deletes a row.** These are the purchase log and the evidence for
+a payment dispute. Ending a month archives (`archived_at`), which drops a row
+out of the active list while leaving it fully readable.
 """
 from __future__ import annotations
 
@@ -16,10 +20,15 @@ import asyncpg
 
 from modules.subscriptions.stripe_api import TERMINAL_STATUSES
 
-# Statuses that mean the subscriber currently has access. Stripe's other live
-# statuses (past_due, unpaid, incomplete) mean payment is in trouble, so they
-# deliberately don't count as active.
-ACTIVE_STATUSES = ("active", "trialing")
+# Statuses that mean the payment is in good standing. Stripe's other live
+# subscription statuses (past_due, unpaid, incomplete) mean payment is in
+# trouble, so they deliberately don't count.
+#
+# "succeeded" is a one-time PaymentIntent, not a subscription — without it a
+# one-time purchase could never count as active, which is what the Payment
+# Links currently produce. It stays `succeeded` forever, so for those rows
+# access is bounded by ARCHIVING, not by the status ever changing.
+ACTIVE_STATUSES = ("active", "trialing", "succeeded")
 
 
 async def create_subscriber(
@@ -91,16 +100,70 @@ async def list_subscribers_for_discord_id(
 
 
 async def list_active_subscribers(pool: asyncpg.Pool, guild_id: int) -> list[asyncpg.Record]:
-    """Everyone with a currently-live subscription in a guild."""
+    """Everyone with current access in a guild.
+
+    Two conditions, and both are needed. The status check catches a recurring
+    subscription that Stripe has since cancelled; the archive check is what
+    bounds a ONE-TIME purchase, whose status stays `succeeded` forever and so
+    would otherwise grant access permanently.
+    """
     async with pool.acquire() as conn:
         return await conn.fetch(
             """
             SELECT * FROM subscribers
-            WHERE guild_id = $1 AND status = ANY($2::text[])
+            WHERE guild_id = $1
+              AND status = ANY($2::text[])
+              AND archived_at IS NULL
             ORDER BY created_at DESC;
             """,
             guild_id,
             list(ACTIVE_STATUSES),
+        )
+
+
+async def archive_subscribers(
+    pool: asyncpg.Pool, guild_id: int, *, before: datetime, archived_by: int
+) -> list[asyncpg.Record]:
+    """Close out purchases made before `before`; returns what was archived.
+
+    Ends a month: last month's purchases stop counting as current access so the
+    active list is only this month's. **Nothing is deleted** — these rows are
+    the purchase log and dispute evidence, and a resub already creates a new row
+    rather than reusing one.
+
+    Only touches rows not already archived, so re-running it is a no-op rather
+    than restamping the timestamp and losing when the close-out actually
+    happened. Returning the rows lets the caller report what changed.
+    """
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            """
+            UPDATE subscribers
+            SET archived_at = NOW(), archived_by = $3, updated_at = NOW()
+            WHERE guild_id = $1
+              AND created_at < $2
+              AND archived_at IS NULL
+            RETURNING *;
+            """,
+            guild_id,
+            before,
+            archived_by,
+        )
+
+
+async def unarchive_subscriber(
+    pool: asyncpg.Pool, subscriber_id: int
+) -> asyncpg.Record | None:
+    """Undo an archive on one row, for a close-out run too early or by mistake."""
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            """
+            UPDATE subscribers
+            SET archived_at = NULL, archived_by = NULL, updated_at = NOW()
+            WHERE id = $1
+            RETURNING *;
+            """,
+            subscriber_id,
         )
 
 
@@ -114,6 +177,8 @@ async def list_for_refresh(pool: asyncpg.Pool) -> list[asyncpg.Record]:
         forever; there is no renewal or cancellation to observe. Recurring
         subscription ids start `sub_…`, so the prefix is enough to tell them
         apart without a `kind` column.
+      - Archived rows — a closed-out month is not current access, so its
+        status no longer drives anything.
     """
     async with pool.acquire() as conn:
         return await conn.fetch(
@@ -123,6 +188,7 @@ async def list_for_refresh(pool: asyncpg.Pool) -> list[asyncpg.Record]:
             SELECT id, stripe_subscription_id, status FROM subscribers
             WHERE NOT (status = ANY($1::text[]))
               AND stripe_subscription_id NOT LIKE 'pi\_%'
+              AND archived_at IS NULL
             ORDER BY id;
             """,
             list(TERMINAL_STATUSES),

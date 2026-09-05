@@ -250,3 +250,176 @@ async def test_relinking_a_deleted_row_reports_it() -> None:
         await view.children[0].callback(inter)
 
     assert "no longer exists" in inter.response.send_message.call_args.args[0]
+
+
+# --- paging (a month can carry ~100 purchases) --------------------------------
+
+
+def test_page_count_rounds_up_and_never_returns_zero() -> None:
+    assert purchase_commands.page_count(0) == 1
+    assert purchase_commands.page_count(1) == 1
+    assert purchase_commands.page_count(purchase_commands.PAGE_SIZE) == 1
+    assert purchase_commands.page_count(purchase_commands.PAGE_SIZE + 1) == 2
+
+
+def test_list_embed_shows_only_one_page() -> None:
+    records = [_record(id=i) for i in range(25)]
+
+    first = purchase_commands.build_list_embed(records, page=0)
+    second = purchase_commands.build_list_embed(records, page=1)
+
+    assert "**#0**" in first.description
+    assert f"**#{purchase_commands.PAGE_SIZE}**" not in first.description
+    assert f"**#{purchase_commands.PAGE_SIZE}**" in second.description
+    assert "25 total" in first.footer.text
+
+
+def test_list_embed_clamps_an_out_of_range_page() -> None:
+    """A stale button click after the list shrank must not render blank."""
+    records = [_record(id=i) for i in range(3)]
+
+    embed = purchase_commands.build_list_embed(records, page=99)
+
+    assert "**#0**" in embed.description
+    assert "Page 1/1" in embed.footer.text
+
+
+@pytest.mark.asyncio
+async def test_paging_view_disables_prev_on_the_first_page() -> None:
+    view = purchase_commands.PurchaseListView([_record(id=i) for i in range(25)])
+
+    assert view.prev.disabled is True
+    assert view.next.disabled is False
+
+
+@pytest.mark.asyncio
+async def test_paging_view_disables_next_on_the_last_page() -> None:
+    inter = _interaction()
+    view = purchase_commands.PurchaseListView([_record(id=i) for i in range(15)])
+
+    await view._on_next(inter)
+
+    assert view.page == 1
+    assert view.next.disabled is True
+    assert view.prev.disabled is False
+
+
+@pytest.mark.asyncio
+async def test_short_list_gets_no_paging_buttons() -> None:
+    """Two dead buttons under a three-row list is just noise."""
+    inter = _interaction()
+    cog = purchase_commands.PurchaseCommands(MagicMock())
+    cog.bot.pool = inter.bot.pool
+
+    with patch.object(
+        purchase_commands.subscriber_storage,
+        "list_recent_subscribers",
+        new=AsyncMock(return_value=[_record()]),
+    ):
+        await cog.list_purchases.callback(cog, inter, member=None)
+
+    assert "view" not in inter.edit_original_response.call_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_long_list_gets_paging_buttons() -> None:
+    inter = _interaction()
+    cog = purchase_commands.PurchaseCommands(MagicMock())
+    cog.bot.pool = inter.bot.pool
+
+    with patch.object(
+        purchase_commands.subscriber_storage,
+        "list_recent_subscribers",
+        new=AsyncMock(return_value=[_record(id=i) for i in range(30)]),
+    ):
+        await cog.list_purchases.callback(cog, inter, member=None)
+
+    view = inter.edit_original_response.call_args.kwargs["view"]
+    assert isinstance(view, purchase_commands.PurchaseListView)
+
+
+# --- archive ------------------------------------------------------------------
+
+
+def test_month_start_is_the_first_of_the_month_at_midnight() -> None:
+    start = purchase_commands.month_start(datetime(2026, 9, 17, 13, 45, tzinfo=timezone.utc))
+
+    assert (start.year, start.month, start.day) == (2026, 9, 1)
+    assert (start.hour, start.minute, start.second) == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_archive_reports_nothing_to_do_when_all_purchases_are_current() -> None:
+    inter = _interaction()
+    cog = purchase_commands.PurchaseCommands(MagicMock())
+    cog.bot.pool = inter.bot.pool
+    this_month = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    with patch.object(
+        purchase_commands.subscriber_storage,
+        "list_active_subscribers",
+        new=AsyncMock(return_value=[_record(created_at=this_month)]),
+    ), patch.object(
+        purchase_commands.subscriber_storage, "archive_subscribers", new=AsyncMock()
+    ) as archive:
+        await cog.archive.callback(cog, inter)
+
+    archive.assert_not_awaited()
+    assert "Nothing to archive" in inter.edit_original_response.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_archive_previews_before_touching_anything() -> None:
+    """Bulk and easy to fire on the wrong month, so it confirms first."""
+    inter = _interaction()
+    cog = purchase_commands.PurchaseCommands(MagicMock())
+    cog.bot.pool = inter.bot.pool
+
+    with patch.object(
+        purchase_commands.subscriber_storage,
+        "list_active_subscribers",
+        new=AsyncMock(return_value=[_record(created_at=datetime(2020, 1, 1))]),
+    ), patch.object(
+        purchase_commands.subscriber_storage, "archive_subscribers", new=AsyncMock()
+    ) as archive:
+        await cog.archive.callback(cog, inter)
+
+    archive.assert_not_awaited()
+    kwargs = inter.edit_original_response.call_args.kwargs
+    assert isinstance(kwargs["view"], purchase_commands.ArchiveConfirmView)
+    assert "stay in the purchase log" in kwargs["embed"].description
+
+
+@pytest.mark.asyncio
+async def test_confirming_the_archive_runs_it() -> None:
+    inter = _interaction()
+    before = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    view = purchase_commands.ArchiveConfirmView(1, before=before, count=2)
+
+    with patch.object(
+        purchase_commands.subscriber_storage,
+        "archive_subscribers",
+        new=AsyncMock(return_value=[_record(), _record(id=4)]),
+    ) as archive:
+        await view._on_confirm(inter)
+
+    kwargs = archive.await_args.kwargs
+    assert kwargs["before"] == before
+    assert kwargs["archived_by"] == 555
+    assert "Archived **2**" in inter.response.edit_message.call_args.kwargs["content"]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_archive_changes_nothing() -> None:
+    inter = _interaction()
+    view = purchase_commands.ArchiveConfirmView(
+        1, before=datetime(2026, 9, 1, tzinfo=timezone.utc), count=2
+    )
+
+    with patch.object(
+        purchase_commands.subscriber_storage, "archive_subscribers", new=AsyncMock()
+    ) as archive:
+        await view._on_cancel(inter)
+
+    archive.assert_not_awaited()
+    assert "Nothing archived" in inter.response.edit_message.call_args.kwargs["content"]
