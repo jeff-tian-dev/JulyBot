@@ -59,13 +59,19 @@ git pull
 | Variable | Value | Required? |
 |----------|-------|-----------|
 | `STRIPE_PAYMENT_LINK_L2_L3` | Payment Link URL for the $20 L2/L3 tier | Tier is hidden if unset |
-| `STRIPE_PAYMENT_LINK_L1` | Payment Link URL for the $30 L1 tier | Tier is hidden if unset |
+| `STRIPE_PAYMENT_LINK_L1` | Payment Link URL for the $35 L1 tier | Tier is hidden if unset |
 | `STRIPE_SECRET_KEY` | `sk_live_…` (or `sk_test_…` to rehearse) | Optional — see below |
 | `SUBSCRIBER_REFRESH_INTERVAL_MINUTES` | `60` | Optional, defaults to 60 |
 
-Both Payment Links must be created in the Stripe Dashboard as **recurring monthly**
-subscriptions, and both must be **live-mode** links if `STRIPE_SECRET_KEY` is a live key —
-a test link paired with a live key produces subscriptions the confirm step cannot find.
+Both Payment Links must be created in the Stripe Dashboard as **one-time** payments (each
+buys a single month; nothing auto-renews), and both must be **live-mode** links if
+`STRIPE_SECRET_KEY` is a live key — a test link paired with a live key produces payments the
+confirm step cannot find.
+
+The billing model is set per Payment Link and the bot cannot see it, so the buyer-facing copy
+is hardcoded to match. **If these are ever switched back to recurring, the copy in
+`modules/subscriptions/tiers.py` and `build_subscribe_embed` must change with them** — a test
+pins the current wording and will fail if only the Dashboard changes.
 
 Two things to expect while running this:
 

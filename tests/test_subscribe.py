@@ -30,7 +30,7 @@ def _tiers(l2_link: str = "https://buy.stripe.com/l2", l1_link: str = "https://b
         "l1": TierConfig(
             key="l1",
             name="L1",
-            price_usd=30,
+            price_usd=35,
             description="L1 base access for one month.",
             payment_link=l1_link,
         ),
@@ -51,7 +51,7 @@ def test_embed_lists_every_tier_with_price() -> None:
     values = " ".join(f.value for f in embed.fields)
     assert names == ["L2/L3", "L1"]
     assert "$20" in values
-    assert "$30" in values
+    assert "$35" in values
     # Priced per month of access, not as a monthly recurring charge.
     assert "/month" not in values
 
@@ -478,3 +478,17 @@ async def test_subscribe_refuses_when_no_tiers_are_purchasable() -> None:
     inter.channel.send.assert_not_awaited()
 
 
+
+
+def test_configured_tier_prices_match_what_stripe_charges() -> None:
+    """Pins the real TIERS constant, not the test fixture above.
+
+    The price here is display copy only — Stripe charges whatever its Payment
+    Link says, and the bot cannot read that. So this asserts the intended
+    prices explicitly: if a Dashboard price changes, update both together or
+    buyers are quoted one number and charged another.
+    """
+    from modules.subscriptions.tiers import TIERS
+
+    assert TIERS["l2_l3"].price_usd == 20
+    assert TIERS["l1"].price_usd == 35

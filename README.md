@@ -178,8 +178,8 @@ cp .env.example .env   # only if setup.sh didn't already create it
 | `CLAN_WATCH_CHANNEL_ID`          | no       | `1528897151625592993`                  | Channel that clan-watch leave/rejoin alerts post to |
 | `CLAN_WATCH_POLL_INTERVAL_MINUTES` | no     | `10`                                   | How often watched rosters are checked against the clan family |
 | `RANKED_TRACKING_POLL_INTERVAL_MINUTES` | no | `20`                              | How often tracked players' likely-to-be-hit status is checked for `/trackingon` DM alerts |
-| `STRIPE_PAYMENT_LINK_L2_L3`      | no       | empty                                   | Stripe Payment Link for the L2/L3 tier ($20/month); empty marks it unavailable in `/subscribe` |
-| `STRIPE_PAYMENT_LINK_L1`         | no       | empty                                   | Stripe Payment Link for the L1 tier ($30/month, highest)    |
+| `STRIPE_PAYMENT_LINK_L2_L3`      | no       | empty                                   | Stripe Payment Link for the L2/L3 tier ($20 per month of access); empty marks it unavailable in `/subscribe` |
+| `STRIPE_PAYMENT_LINK_L1`         | no       | empty                                   | Stripe Payment Link for the L1 tier ($35 per month of access, highest)    |
 | `STRIPE_SECRET_KEY`              | no       | empty                                   | Secret key used read-only to look up subscriptions when confirming a payment and to refresh subscriber status. Empty disables both; the bot still runs |
 | `SUBSCRIBER_REFRESH_INTERVAL_MINUTES` | no  | `60`                                    | How often stored subscriptions are re-checked against Stripe |
 

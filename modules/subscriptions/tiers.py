@@ -49,7 +49,7 @@ TIERS: dict[str, TierConfig] = {
     "l1": TierConfig(
         key="l1",
         name="L1",
-        price_usd=30,
+        price_usd=35,
         description="L1 base access for one month — our highest tier.",
         payment_link=settings.STRIPE_PAYMENT_LINK_L1,
     ),
