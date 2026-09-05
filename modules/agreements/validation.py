@@ -113,8 +113,8 @@ def status_embed(record) -> disnake.Embed:
         description=(
             f"**{buyer}:** pick a tier below and pay through Stripe. You'll accept "
             "the Terms and Conditions as part of Stripe's checkout.\n\n"
-            "This is a **monthly subscription** — you'll be billed automatically "
-            "each month until you cancel. To cancel, message a moderator."
+            "This is a **one-time payment for one month of access** — it does "
+            "**not** auto-renew, and nothing is charged again."
         ),
         colour=AGREEMENT_EMBED_COLOUR,
     )

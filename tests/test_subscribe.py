@@ -50,8 +50,10 @@ def test_embed_lists_every_tier_with_price() -> None:
     names = [f.name for f in embed.fields]
     values = " ".join(f.value for f in embed.fields)
     assert names == ["L2/L3", "L1"]
-    assert "$20/month" in values
-    assert "$30/month" in values
+    assert "$20" in values
+    assert "$30" in values
+    # Priced per month of access, not as a monthly recurring charge.
+    assert "/month" not in values
 
 
 def test_embed_marks_unavailable_tier() -> None:
@@ -98,19 +100,21 @@ async def test_view_is_none_when_nothing_configured() -> None:
         assert subscribe_commands.build_subscribe_view() is None
 
 
-def test_embed_discloses_automatic_monthly_billing() -> None:
-    """The auto-renewal disclosure is load-bearing, not decoration: an
-    unexpected second charge is what produces chargebacks, and a dispute
-    cites what the buyer was shown. If the billing model changes, this
+def test_embed_discloses_that_the_purchase_does_not_renew() -> None:
+    """The billing disclosure is load-bearing, not decoration, and it cuts both
+    ways: an unexpected second charge produces chargebacks, and so does a buyer
+    who expected access to continue and finds it lapsed. A dispute cites what
+    the buyer was shown. If the billing model changes back to recurring, this
     assertion should fail and force the copy to change with it."""
     with patch.object(subscribe_commands, "TIERS", _tiers()):
         embed = subscribe_commands.build_subscribe_embed()
 
     description = embed.description.lower()
-    assert "monthly subscription" in description
-    assert "billed automatically" in description
-    # Cancellation is manual — no Stripe customer portal is wired up.
-    assert "cancel" in description
+    assert "one-time" in description
+    assert "not** auto-renew" in description or "does not auto-renew" in description
+    # Nothing recurring means nothing to cancel; promising a cancellation route
+    # would imply a subscription the buyer doesn't have.
+    assert "billed automatically" not in description
 
 
 # --- the ticket purchase flow -------------------------------------------------

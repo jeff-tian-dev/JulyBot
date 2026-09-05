@@ -38,13 +38,14 @@ instead of a custom_id: Discord opens them client-side, so there is no callback
 to dispatch for those. The other three buttons are ordinary callbacks on a
 persistent view, restored on startup by register_persistent_views().
 
-**The buyer-facing copy assumes recurring monthly billing** — build_subscribe_embed
-and the pending status embed both say the buyer is billed automatically until
-they cancel. That wording is load-bearing for chargebacks: an unexpected second
-charge is what generates them. **If the Payment Links are switched to one-time
-in the Stripe Dashboard, this copy must change in the same commit**, or buyers
-are told they'll be re-billed when they won't be. Cancellation is manual (no
-Stripe customer portal is wired up), so the copy points buyers at a moderator.
+**The buyer-facing copy says ONE-TIME, no auto-renewal** — build_subscribe_embed
+and the pending status embed both state the purchase buys one month and is not
+charged again. That wording is load-bearing for chargebacks, in both directions:
+promising a renewal that never comes, or an unexpected second charge, are each a
+dispute. The billing model is a per-Payment-Link Stripe Dashboard setting the bot
+cannot see and which has already been switched twice, so **if it changes back to
+recurring, this copy must change in the same commit**. There is nothing to cancel
+now, so the copy no longer points buyers at a moderator for that.
 """
 from __future__ import annotations
 
@@ -78,14 +79,15 @@ def build_subscribe_embed() -> disnake.Embed:
     embed = disnake.Embed(
         title="Subscriptions",
         description=(
-            "Pick a tier below to subscribe securely through Stripe.\n"
-            "This is a **monthly subscription** — you'll be billed automatically "
-            "each month until you cancel. To cancel, message a moderator."
+            "Pick a tier below to pay securely through Stripe.\n"
+            "This is a **one-time payment for one month of access** — it does "
+            "**not** auto-renew, and nothing is charged again. To keep your "
+            "access, purchase again when the month is up."
         ),
         colour=EMBED_COLOUR,
     )
     for tier in TIERS.values():
-        value = f"**${tier.price_usd}/month**\n{tier.description}"
+        value = f"**${tier.price_usd}** for one month\n{tier.description}"
         if not tier.available:
             value += "\n*Currently unavailable — ask a moderator.*"
         embed.add_field(name=tier.name, value=value, inline=True)

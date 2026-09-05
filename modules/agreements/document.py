@@ -11,9 +11,15 @@ record captures the exact terms text even if the PDF file changes later.
 That transcript relationship is the whole point of this constant, and nothing
 enforces it — the buyer reads the PDF, but agreements.agreement_text stores this
 string, so a divergence means the row is not evidence of what they were shown.
-On 2026-08-30 the payment sections were rewritten from PayPal to Stripe; if
-data/agreements/terms_and_conditions.pdf still says PayPal, it is stale and
-outranks nothing — regenerate it before sending any further agreements.
+On 2026-08-30 the payment sections were rewritten from PayPal to Stripe, and on
+2026-09-04 from recurring subscriptions to one-time monthly purchases. If
+data/agreements/terms_and_conditions.pdf still says PayPal or describes
+auto-renewal, it is stale.
+
+NOTE: since 2026-09-03 nothing sends this PDF — terms are accepted in Stripe
+Checkout, so the buyer-facing terms are the ones configured THERE. Update the
+Stripe Checkout terms to match this text; the PDF only matters if the in-Discord
+agreement step is ever restored.
 """
 from __future__ import annotations
 
@@ -27,17 +33,17 @@ AGREEMENT_SUMMARY = (
     "- All sales are final — payments are **non-refundable** once access is provided.\n"
     "- Content leaking, redistribution, or account sharing is prohibited and may result "
     "in termination without a refund.\n"
-    "- Subscriptions bill **monthly through Stripe** and renew automatically until you "
-    "cancel — message a moderator to cancel future renewals.\n"
+    "- Each purchase is a **one-time payment through Stripe** for one month of "
+    "access. It does not auto-renew — purchase again to continue.\n"
     "- You agree not to make false or misleading statements to Stripe or another payment "
     "processor to recover payment after receiving access.\n"
     "- We may share evidence of your purchase and acceptance of these Terms with a "
     "payment processor if a dispute is filed.\n\n"
-    "Read the full Terms and Conditions in the attached PDF before agreeing."
+    "Read the full Terms and Conditions before completing your purchase."
 )
 
 AGREEMENT_FULL_TEXT = """TERMS AND CONDITIONS
-Last Updated: 8/30/2026
+Last Updated: 9/4/2026
 
 These Terms and Conditions ("Terms") govern access to and use of the [JULY LEGENDS SUBSCRIPTION] ("Service," "we," "us," or "our"), including all subscription-only content, communities, files, media, resources, messages, downloads, and other materials made available through the Service.
 
@@ -59,7 +65,7 @@ Payments must be made using the payment methods officially provided or approved 
 
 You are responsible for providing accurate payment information and for any fees or charges associated with your chosen payment method.
 
-Subscriptions are billed monthly through Stripe and renew automatically until cancelled. You may cancel future renewals at any time by contacting a moderator; cancellation stops future billing and does not refund payments already made.
+Each purchase is a one-time payment processed through Stripe that grants access for a single month. Purchases do not automatically renew, and no further charges are made unless you choose to purchase again. To continue access beyond the month purchased, you must make a new purchase.
 
 3. Refund Policy
 
@@ -147,11 +153,11 @@ You must notify us promptly if you believe your account has been compromised.
 
 Claims that another person used your account do not automatically prevent us from restricting the account where the account was involved in unauthorized distribution or other prohibited activity. We may consider the circumstances and available information when determining the appropriate action.
 
-11. Subscription Cancellation
+11. Cancellation and Renewal
 
-Where recurring billing is offered, you may cancel future renewal of your subscription in accordance with the cancellation method provided by us or the applicable payment provider.
+Purchases are one-time payments for a single month of access and do not automatically renew. There is no recurring billing to cancel, and no further charge is made unless you choose to purchase again.
 
-Cancellation prevents future renewals but does not ordinarily create a right to a refund for a subscription period that has already begun or for digital access already provided.
+Where recurring billing is offered in future, you may cancel future renewal in accordance with the cancellation method provided by us or the applicable payment provider. Cancellation prevents future renewals but does not ordinarily create a right to a refund for a period that has already begun or for digital access already provided.
 
 12. No Guarantee of Permanent Access
 
