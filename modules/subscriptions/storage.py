@@ -105,16 +105,24 @@ async def list_active_subscribers(pool: asyncpg.Pool, guild_id: int) -> list[asy
 
 
 async def list_for_refresh(pool: asyncpg.Pool) -> list[asyncpg.Record]:
-    """Subscriptions still worth re-checking against Stripe.
+    """Purchases still worth re-checking against Stripe.
 
-    Terminal ones are skipped — a canceled subscription never comes back, so
-    re-polling it forever would just burn API calls.
+    Two exclusions, both to avoid burning API calls on rows whose status can
+    never change again:
+      - Terminal subscriptions — a canceled one never comes back.
+      - One-time payments (`pi_…` ids). A successful payment stays `succeeded`
+        forever; there is no renewal or cancellation to observe. Recurring
+        subscription ids start `sub_…`, so the prefix is enough to tell them
+        apart without a `kind` column.
     """
     async with pool.acquire() as conn:
         return await conn.fetch(
-            """
+            # Raw string: the backslash is SQL's LIKE escape for a literal
+            # underscore, not a Python escape.
+            r"""
             SELECT id, stripe_subscription_id, status FROM subscribers
             WHERE NOT (status = ANY($1::text[]))
+              AND stripe_subscription_id NOT LIKE 'pi\_%'
             ORDER BY id;
             """,
             list(TERMINAL_STATUSES),

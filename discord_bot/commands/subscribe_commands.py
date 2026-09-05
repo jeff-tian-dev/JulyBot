@@ -21,22 +21,30 @@ carries the purchase's state and the confirmation audit trail.
 Only an admin can Confirm or Cancel. That gate is enforced against the database
 row rather than the in-memory view, since a persistent view outlives the process.
 
-**Confirming requires linking a real Stripe subscription** — there is no
-attestation-only path. The bot pulls the live subscription list from Stripe's
-API (no webhook needed, since that is an outbound call), the admin says which
-one belongs to this buyer, and the result is stored in `subscribers` along with
-who made that call. Stripe has no idea who its customers are on Discord, so
-that match is human judgement; everything around it is verified.
+**Confirming requires linking a real Stripe purchase** — there is no
+attestation-only path. The bot pulls the live list from Stripe's API (no webhook
+needed, since that is an outbound call), the admin says which one belongs to
+this buyer, and the result is stored in `subscribers` along with who made that
+call. Stripe has no idea who its customers are on Discord, so that match is
+human judgement; everything around it is verified.
+
+The dropdown lists **both** active recurring subscriptions and successful
+one-time payments, because which kind the Payment Links create is a Stripe
+Dashboard setting the bot can't see and which has already been switched once.
+Each option is labelled "monthly" or "one-time". See stripe_api.py.
 
 The payment buttons are disnake.ButtonStyle.link buttons, which carry a URL
 instead of a custom_id: Discord opens them client-side, so there is no callback
 to dispatch for those. The other three buttons are ordinary callbacks on a
 persistent view, restored on startup by register_persistent_views().
 
-The links are recurring monthly subscriptions — Stripe re-bills the buyer each
-month until they cancel. The tier embed says so explicitly: an unexpected second
-charge is what generates chargebacks. Cancellation is manual too (there's no
-Stripe customer portal wired up), so the copy points buyers at a moderator.
+**The buyer-facing copy assumes recurring monthly billing** — build_subscribe_embed
+and the pending status embed both say the buyer is billed automatically until
+they cancel. That wording is load-bearing for chargebacks: an unexpected second
+charge is what generates them. **If the Payment Links are switched to one-time
+in the Stripe Dashboard, this copy must change in the same commit**, or buyers
+are told they'll be re-billed when they won't be. Cancellation is manual (no
+Stripe customer portal is wired up), so the copy points buyers at a moderator.
 """
 from __future__ import annotations
 
@@ -277,7 +285,7 @@ class StripePickerView(disnake.ui.View):
         self._by_id = {s.subscription_id: s for s in subscriptions}
 
         select = disnake.ui.StringSelect(
-            placeholder="Which Stripe subscription?",
+            placeholder="Which Stripe purchase?",
             options=[
                 disnake.SelectOption(
                     label=s.label()[:100],
@@ -406,15 +414,18 @@ class PurchaseView(disnake.ui.View):
 
         if not subscriptions:
             await inter.response.send_message(
-                "Stripe has no active subscriptions to link. If the payment just went "
-                "through, give it a moment and try again.",
+                "Stripe has no recent purchases to link — no active subscriptions and "
+                "no successful one-time payments. If the payment just went through, "
+                "give it a moment and try again; if it's older, it may have scrolled "
+                "past the most recent "
+                f"{stripe_api.RECENT_SUBSCRIPTION_LIMIT}.",
                 ephemeral=True,
             )
             return
 
         # Ephemeral: only the admin needs this, and it carries buyer emails.
         await inter.response.send_message(
-            "Pick the Stripe subscription for this buyer:",
+            "Pick the Stripe purchase for this buyer:",
             view=StripePickerView(agreement_id, subscriptions, message=inter.message),
             ephemeral=True,
         )

@@ -113,6 +113,20 @@ async def test_list_for_refresh_skips_terminal_statuses() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_for_refresh_skips_one_time_payments() -> None:
+    """A successful payment is `succeeded` forever — there is no renewal or
+    cancellation to observe, so re-polling one only burns Stripe API calls.
+    Recurring subscriptions are `sub_…`; one-time payments are `pi_…`."""
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    await storage.list_for_refresh(_fake_pool(conn))
+
+    sql = conn.fetch.await_args.args[0]
+    assert "NOT LIKE 'pi" in sql
+
+
+@pytest.mark.asyncio
 async def test_list_active_subscribers_excludes_payment_trouble() -> None:
     """past_due / unpaid are live subscriptions in Stripe but mean payment is
     failing, so they deliberately don't count as active access."""

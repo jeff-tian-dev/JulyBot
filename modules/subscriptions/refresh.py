@@ -1,9 +1,13 @@
-"""Re-check stored subscriptions against Stripe on a schedule.
+"""Re-check stored recurring subscriptions against Stripe on a schedule.
 
 There is no Stripe webhook, so cancellations and failed renewals are never
 pushed to the bot — this job pulls them. It only touches subscriptions already
 linked to a Discord user, so the cost is proportional to the subscriber count
 rather than to everything in the Stripe account.
+
+**One-time payments are excluded** by `storage.list_for_refresh`, not here: a
+successful payment is `succeeded` forever, with no renewal or cancellation to
+observe, so re-fetching one would never change anything.
 
 Consequence worth remembering: a status in the database is only as fresh as
 the last run of this job, not real-time.
