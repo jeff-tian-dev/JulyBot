@@ -433,11 +433,21 @@ CREATE TABLE IF NOT EXISTS subscribers (
     status VARCHAR(30) NOT NULL,
     current_period_end TIMESTAMP,
     linked_by BIGINT NOT NULL,
+    relinked_by BIGINT,
+    relinked_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_subscribers_stripe_sub ON subscribers (stripe_subscription_id);
 CREATE INDEX IF NOT EXISTS idx_subscribers_discord ON subscribers (discord_id);
+"""
+
+# `/purchases relink` corrects an admin picking the wrong payment out of the Stripe
+# dropdown. Kept alongside linked_by rather than overwriting it: a correction is exactly
+# when you want to see who touched the row and when. NULL means never relinked.
+MIGRATE_SUBSCRIBERS_RELINK = """
+ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS relinked_by BIGINT;
+ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS relinked_at TIMESTAMP;
 """
 
 # The old `subscriptions` table was shaped for the deleted FastAPI checkout site's
@@ -551,6 +561,8 @@ async def create_tables(pool: asyncpg.Pool) -> None:
         await conn.execute(CREATE_SUBSCRIBERS)
         logger.info("Dropping legacy subscriptions table if present")
         await conn.execute(DROP_LEGACY_SUBSCRIPTIONS)
+        logger.info("Applying subscribers relink migration if needed")
+        await conn.execute(MIGRATE_SUBSCRIBERS_RELINK)
 
 
 async def drop_tables(pool: asyncpg.Pool) -> None:

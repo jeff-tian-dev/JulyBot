@@ -262,7 +262,7 @@ Tests mock `asyncpg.Pool` and patch `aiohttp` calls — no Postgres or network a
 
 ## Slash commands
 
-The Cogs listed in `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py) are loaded today: **x, youtube, moderation, account, roster, post, base_post, agreement, ranked, subscribe**. The legend, base_finder, and ping Cogs exist but are still stubs and are commented out of the load list.
+The Cogs listed in `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py) are loaded today: **x, youtube, moderation, account, roster, post, base_post, agreement, ranked, subscribe, purchases**. The legend, base_finder, and ping Cogs exist but are still stubs and are commented out of the load list.
 
 
 
@@ -299,6 +299,8 @@ The Cogs listed in `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py) are
 | `/trackingoff <player_tag>`      | ranked_tracker     | live         |
 | `/trackinglist`                  | ranked_tracker     | live         |
 | `/subscribe <member>`            | subscriptions (admin) | live      |
+| `/purchases list [member]`       | subscriptions (admin) | live      |
+| `/purchases relink <id>`         | subscriptions (admin) | live      |
 | `/agreement lookup <member>`     | agreements (admin) | live         |
 | `/agreement receipt <id>`        | agreements (admin) | live         |
 | `/legend`                        | legend_tracker     | stub, not loaded |

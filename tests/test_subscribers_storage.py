@@ -175,3 +175,103 @@ async def test_list_subscribers_for_discord_id_is_newest_first() -> None:
 
     assert [r["id"] for r in rows] == [2, 1]
     assert "ORDER BY created_at DESC" in conn.fetch.await_args.args[0]
+
+
+# --- relink (fixing a mislinked payment) --------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_relink_rewrites_stripe_fields_but_not_the_buyer() -> None:
+    """The Discord buyer was already correct — /subscribe names them. Only the
+    payment was picked wrongly, so only Stripe-derived columns change."""
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={"id": 3, "stripe_subscription_id": "pi_right"})
+
+    await storage.relink_subscriber(
+        _fake_pool(conn),
+        3,
+        stripe_subscription_id="pi_right",
+        stripe_customer_id="cus_9",
+        payer_name="Right Person",
+        email="right@example.com",
+        status="succeeded",
+        current_period_end=None,
+        relinked_by=555,
+    )
+
+    sql, *args = conn.fetchrow.await_args.args
+    assert "UPDATE subscribers" in sql
+    assert "discord_id" not in sql
+    assert "relinked_by = $8" in sql
+    assert "relinked_at = NOW()" in sql
+    assert args[0] == 3
+    assert args[1] == "pi_right"
+
+
+@pytest.mark.asyncio
+async def test_relink_keeps_the_original_linker() -> None:
+    """linked_by is the audit trail of who made the first call; a correction
+    adds to that history rather than erasing it."""
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={"id": 3})
+
+    await storage.relink_subscriber(
+        _fake_pool(conn), 3,
+        stripe_subscription_id="pi_x", stripe_customer_id="c", payer_name=None,
+        email=None, status="succeeded", current_period_end=None, relinked_by=999,
+    )
+
+    sql = conn.fetchrow.await_args.args[0]
+    assert "linked_by = " not in sql.replace("relinked_by = ", "")
+
+
+@pytest.mark.asyncio
+async def test_relink_returns_none_when_the_row_is_gone() -> None:
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=None)
+
+    result = await storage.relink_subscriber(
+        _fake_pool(conn), 999,
+        stripe_subscription_id="pi_x", stripe_customer_id="c", payer_name=None,
+        email=None, status="succeeded", current_period_end=None, relinked_by=555,
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_relink_surfaces_a_duplicate_rather_than_stealing_the_payment() -> None:
+    import asyncpg
+
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(side_effect=asyncpg.UniqueViolationError("dup"))
+
+    with pytest.raises(asyncpg.UniqueViolationError):
+        await storage.relink_subscriber(
+            _fake_pool(conn), 3,
+            stripe_subscription_id="pi_taken", stripe_customer_id="c", payer_name=None,
+            email=None, status="succeeded", current_period_end=None, relinked_by=555,
+        )
+
+
+@pytest.mark.asyncio
+async def test_list_recent_subscribers_is_scoped_to_the_guild() -> None:
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[{"id": 2}, {"id": 1}])
+
+    await storage.list_recent_subscribers(_fake_pool(conn), 1, limit=15)
+
+    sql, *args = conn.fetch.await_args.args
+    assert "WHERE guild_id = $1" in sql
+    assert "ORDER BY created_at DESC" in sql
+    assert args == [1, 15]
+
+
+@pytest.mark.asyncio
+async def test_linked_stripe_ids_returns_a_set() -> None:
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[
+        {"stripe_subscription_id": "pi_a"}, {"stripe_subscription_id": "sub_b"},
+    ])
+
+    assert await storage.linked_stripe_ids(_fake_pool(conn)) == {"pi_a", "sub_b"}

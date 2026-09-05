@@ -129,6 +129,95 @@ async def list_for_refresh(pool: asyncpg.Pool) -> list[asyncpg.Record]:
         )
 
 
+async def get_subscriber(pool: asyncpg.Pool, subscriber_id: int) -> asyncpg.Record | None:
+    """One subscriber row by its own id, for /purchases."""
+    async with pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM subscribers WHERE id = $1;", subscriber_id)
+
+
+async def list_recent_subscribers(
+    pool: asyncpg.Pool, guild_id: int, limit: int = 25
+) -> list[asyncpg.Record]:
+    """Recent purchases in this guild, newest first."""
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT * FROM subscribers
+            WHERE guild_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2;
+            """,
+            guild_id,
+            limit,
+        )
+
+
+async def linked_stripe_ids(pool: asyncpg.Pool) -> set[str]:
+    """Every Stripe id already attached to a subscriber row.
+
+    Used to grey out payments in the relink dropdown that are already someone
+    else's — the unique index would reject them anyway, so catching it before
+    the admin picks saves a confusing failure.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT stripe_subscription_id FROM subscribers;")
+    return {row["stripe_subscription_id"] for row in rows}
+
+
+async def relink_subscriber(
+    pool: asyncpg.Pool,
+    subscriber_id: int,
+    *,
+    stripe_subscription_id: str,
+    stripe_customer_id: str,
+    payer_name: str | None,
+    email: str | None,
+    status: str,
+    current_period_end: datetime | None,
+    relinked_by: int,
+) -> asyncpg.Record | None:
+    """Repoint a row at a different Stripe payment. None if the row is gone.
+
+    Fixes the one mistake this flow makes: an admin picking the wrong payment
+    out of the Stripe dropdown. The Discord buyer is NOT changed — `/subscribe`
+    names them up front, so the buyer is the part that was already right.
+
+    Everything Stripe-derived is overwritten together (customer, payer name,
+    email, status, period end), because a half-updated row would carry one
+    payment's id alongside another's payer name — worse than the mislink.
+
+    `relinked_by` and `relinked_at` are kept rather than just overwriting
+    `linked_by`: a correction is exactly the moment you want the history of who
+    touched the row. Raises asyncpg.UniqueViolationError if the target payment
+    is already linked to a different row, same as create_subscriber.
+    """
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            """
+            UPDATE subscribers
+            SET stripe_subscription_id = $2,
+                stripe_customer_id = $3,
+                payer_name = $4,
+                email = $5,
+                status = $6,
+                current_period_end = $7,
+                relinked_by = $8,
+                relinked_at = NOW(),
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING *;
+            """,
+            subscriber_id,
+            stripe_subscription_id,
+            stripe_customer_id,
+            payer_name,
+            email,
+            status,
+            current_period_end,
+            relinked_by,
+        )
+
+
 async def update_subscriber_status(
     pool: asyncpg.Pool,
     stripe_subscription_id: str,
