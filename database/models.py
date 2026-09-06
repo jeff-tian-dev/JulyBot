@@ -300,6 +300,7 @@ CREATE TABLE IF NOT EXISTS agreements (
     payer_name VARCHAR(200),
     payment_method VARCHAR(20),
     payment_contact VARCHAR(320),
+    amount_cents INTEGER,
     order_ref VARCHAR(200),
     agreement_text TEXT NOT NULL,
     signed_at TIMESTAMP,
@@ -425,13 +426,15 @@ CREATE TABLE IF NOT EXISTS subscribers (
     discord_id BIGINT NOT NULL,
     guild_id BIGINT NOT NULL,
     agreement_id INTEGER REFERENCES agreements(id) ON DELETE SET NULL,
-    stripe_subscription_id VARCHAR(255) NOT NULL,
-    stripe_customer_id VARCHAR(255) NOT NULL,
+    stripe_subscription_id VARCHAR(255),
+    stripe_customer_id VARCHAR(255),
     payer_name VARCHAR(200),
     email VARCHAR(320),
     tier VARCHAR(50),
     status VARCHAR(30) NOT NULL,
     current_period_end TIMESTAMP,
+    payment_method VARCHAR(30),
+    amount_cents INTEGER,
     linked_by BIGINT NOT NULL,
     relinked_by BIGINT,
     relinked_at TIMESTAMP,
@@ -440,7 +443,8 @@ CREATE TABLE IF NOT EXISTS subscribers (
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_subscribers_stripe_sub ON subscribers (stripe_subscription_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_subscribers_stripe_sub
+    ON subscribers (stripe_subscription_id) WHERE stripe_subscription_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_subscribers_discord ON subscribers (discord_id);
 """
 
@@ -460,6 +464,31 @@ ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS relinked_at TIMESTAMP;
 # Archiving is a separate flag rather than a `status` value on purpose: `status`
 # mirrors Stripe's own string verbatim (see the table comment), and inventing a local
 # value for it would break that correspondence and confuse the refresh job.
+# Not every buyer pays through Stripe — some still use PayPal/Venmo/Wise/cash, recorded
+# by `/agreement record`. Those rows have no Stripe objects at all, so the two Stripe
+# columns become nullable and the unique index becomes PARTIAL: without the WHERE clause
+# a second manual row would collide with the first on NULL in some engines, and it also
+# stops NULL being treated as a linkable value.
+#
+# `payment_method` NULL means Stripe; anything else names how they actually paid. A
+# manual row is identified by stripe_subscription_id IS NULL, never by a sentinel id.
+# `/agreement record` captures how much a non-Stripe buyer paid. Stripe rows get this
+# from the Stripe API; for a manual row nothing else knows it, and a receipt without an
+# amount is weak dispute evidence.
+MIGRATE_AGREEMENTS_AMOUNT = """
+ALTER TABLE agreements ADD COLUMN IF NOT EXISTS amount_cents INTEGER;
+"""
+
+MIGRATE_SUBSCRIBERS_MANUAL = """
+ALTER TABLE subscribers ALTER COLUMN stripe_subscription_id DROP NOT NULL;
+ALTER TABLE subscribers ALTER COLUMN stripe_customer_id DROP NOT NULL;
+ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS payment_method VARCHAR(30);
+ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS amount_cents INTEGER;
+DROP INDEX IF EXISTS idx_subscribers_stripe_sub;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_subscribers_stripe_sub
+    ON subscribers (stripe_subscription_id) WHERE stripe_subscription_id IS NOT NULL;
+"""
+
 MIGRATE_SUBSCRIBERS_ARCHIVE = """
 ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP;
 ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS archived_by BIGINT;
@@ -569,6 +598,8 @@ async def create_tables(pool: asyncpg.Pool) -> None:
         # Must run AFTER the self-serve migration, which drops the DEFAULT that wrote these.
         logger.info("Clearing defaulted PayPal payment_method from self-serve rows")
         await conn.execute(CLEAR_DEFAULTED_PAYMENT_METHOD)
+        logger.info("Applying agreements amount migration if needed")
+        await conn.execute(MIGRATE_AGREEMENTS_AMOUNT)
 
         logger.info("Creating table ranked_tracking if not exists")
         await conn.execute(CREATE_RANKED_TRACKING)
@@ -581,6 +612,8 @@ async def create_tables(pool: asyncpg.Pool) -> None:
         await conn.execute(MIGRATE_SUBSCRIBERS_RELINK)
         logger.info("Applying subscribers archive migration if needed")
         await conn.execute(MIGRATE_SUBSCRIBERS_ARCHIVE)
+        logger.info("Applying subscribers manual-payment migration if needed")
+        await conn.execute(MIGRATE_SUBSCRIBERS_MANUAL)
 
 
 async def drop_tables(pool: asyncpg.Pool) -> None:

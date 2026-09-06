@@ -49,6 +49,7 @@ def _self_serve_row(**overrides):
         "payer_name": None,
         "payment_method": None,
         "payment_contact": None,
+        "amount_cents": None,
         "order_ref": None,
         "agreement_text": "TERMS AND CONDITIONS\nAll sales are final.",
         "signed_at": SIGNED_AT,
@@ -532,3 +533,115 @@ def test_agreement_text_describes_stripe_not_paypal() -> None:
     assert "Paypal" not in document.AGREEMENT_FULL_TEXT
     assert "PayPal" not in document.AGREEMENT_SUMMARY
     assert "Stripe" in document.AGREEMENT_FULL_TEXT
+
+
+# --- manual (non-Stripe) purchases --------------------------------------------
+
+
+def _manual_row(**overrides):
+    """A row from /agreement record: paid outside Stripe, so it carries the
+    method and amount and the buyer signs here."""
+    row = _self_serve_row(
+        payer_name="Cash Buyer",
+        payment_method="Venmo",
+        amount_cents=3500,
+        signed_at=None,
+    )
+    row.update(overrides)
+    return row
+
+
+def test_pending_manual_purchase_asks_the_buyer_to_agree() -> None:
+    """A non-Stripe buyer never sees Stripe's checkout, so this signature is
+    the only consent record that will ever exist for them."""
+    embed = validation.status_embed(_manual_row())
+
+    assert "Agreement Required" in embed.title
+    assert "I Agree" in embed.description
+    assert "Venmo" in embed.description
+    assert "$35.00" in embed.description
+    # Must not tell a manual buyer to go pay through Stripe.
+    assert "Stripe" not in embed.description
+
+
+def test_signed_manual_purchase_waits_on_the_moderator_not_stripe() -> None:
+    embed = validation.status_embed(_manual_row(signed_at=SIGNED_AT))
+
+    assert "Venmo" in embed.description
+    assert "pay through Stripe" not in embed.description
+
+
+def test_confirmed_manual_purchase_does_not_claim_a_stripe_match() -> None:
+    """Saying a cash payment was 'matched to a Stripe subscription' would be
+    false on a document meant for a dispute."""
+    embed = validation.status_embed(
+        _manual_row(
+            signed_at=SIGNED_AT,
+            confirmed_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+            confirmed_by=555,
+        )
+    )
+
+    assert "Stripe" not in embed.description
+    assert "Venmo" in embed.description
+
+
+def test_manual_receipt_names_the_method_and_amount() -> None:
+    text = validation.receipt_text(
+        _manual_row(
+            signed_at=SIGNED_AT,
+            confirmed_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+            confirmed_by=555,
+        ),
+        buyer_label="buyer#1",
+    )
+
+    assert "Payment Method: Venmo" in text
+    assert "Amount Paid: $35.00 USD" in text
+    assert "Status: SIGNED" in text
+    # The signed terms ARE the evidence for these rows.
+    assert "--- AGREEMENT TEXT AS SIGNED ---" in text
+    assert "Stripe subscription" not in text
+
+
+def test_stripe_purchases_still_say_stripe() -> None:
+    """The manual branch must not swallow the Stripe path."""
+    embed = validation.status_embed(_self_serve_row(signed_at=None))
+    assert "Stripe" in embed.description
+
+
+@pytest.mark.asyncio
+async def test_create_manual_agreement_stores_the_payment_details() -> None:
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_manual_row())
+
+    await storage.create_manual_agreement(
+        _fake_pool(conn),
+        guild_id=1,
+        channel_id=99,
+        buyer_id=4242,
+        sent_by=555,
+        payment_method="Venmo",
+        payer_name="Cash Buyer",
+        amount_cents=3500,
+        agreement_text="TERMS",
+    )
+
+    sql, *args = conn.fetchrow.await_args.args
+    assert "INSERT INTO agreements" in sql
+    assert args == [1, 99, 4242, 555, "Venmo", "Cash Buyer", 3500, "TERMS"]
+
+
+@pytest.mark.asyncio
+async def test_sign_agreement_still_guards_buyer_and_double_click() -> None:
+    """Reinstated for the manual flow, so its guards matter again."""
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_manual_row(signed_at=SIGNED_AT))
+
+    await storage.sign_agreement(_fake_pool(conn), 7, 4242)
+
+    sql, *args = conn.fetchrow.await_args.args
+    assert "buyer_id = $2" in sql
+    assert "signed_at IS NULL" in sql
+    assert "voided_at IS NULL" in sql
+    assert args == [7, 4242]

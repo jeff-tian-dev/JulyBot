@@ -156,6 +156,9 @@ class CancelReasonModal(disnake.ui.Modal):
         logger.info(
             "Purchase id=%s cancelled by %s: %s", self.agreement_id, inter.author.id, reason
         )
+        # Only reachable from PurchaseView's Cancel (the Stripe flow); a
+        # manually-recorded purchase cancels through ManualPurchaseView, which
+        # has its own button and rebuilds its own view class.
         await inter.response.edit_message(
             embed=status_embed(record), view=PurchaseView(record), attachments=[]
         )
@@ -508,20 +511,29 @@ async def register_persistent_views(bot: commands.InteractionBot) -> None:
         logger.exception("Couldn't load purchases to restore views")
         return
 
+    # Imported here, not at module scope: agreement_commands imports nothing
+    # from this module, but keeping the direction one-way avoids a cycle if it
+    # ever does.
+    from discord_bot.commands.agreement_commands import ManualPurchaseView
+
     for row in rows:
         # list_views_to_restore only returns unterminated rows, so the view is
         # rebuilt from the columns that decide which buttons are live.
-        bot.add_view(
-            PurchaseView(
-                {
-                    "id": row["id"],
-                    "buyer_id": row["buyer_id"],
-                    "signed_at": row["signed_at"],
-                    "confirmed_at": None,
-                    "voided_at": None,
-                }
-            )
-        )
+        record = {
+            "id": row["id"],
+            "buyer_id": row["buyer_id"],
+            "signed_at": row["signed_at"],
+            "payment_method": row["payment_method"],
+            "amount_cents": row["amount_cents"],
+            "payer_name": row["payer_name"],
+            "confirmed_at": None,
+            "voided_at": None,
+        }
+        # The two flows use different custom_ids (purchase:agree vs
+        # purchase:magree), so restoring the wrong class leaves the message's
+        # buttons dead. payment_method is only set on manually-recorded rows.
+        view = ManualPurchaseView(record) if row["payment_method"] else PurchaseView(record)
+        bot.add_view(view)
     if rows:
         logger.info("Restored %d purchase view(s)", len(rows))
 

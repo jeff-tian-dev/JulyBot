@@ -3,6 +3,7 @@
 Two subcommands, both admin-only:
 
     /purchases list [member]    recent purchases (paged), or one member's history
+                                — Stripe and non-Stripe alike
     /purchases relink <id>      repoint a row at a different Stripe payment
     /purchases archive          close out the previous month's purchases
 
@@ -62,11 +63,23 @@ def _money(record) -> str:
 
 
 def purchase_line(record) -> str:
-    """One purchase, rendered for the list embed."""
+    """One purchase, rendered for the list embed.
+
+    Covers both payment routes: a Stripe purchase shows its Stripe id, one
+    recorded by `/agreement record` shows the method instead (it has no Stripe
+    ids at all). Both live in this table so the list is every buyer.
+    """
     who = f"<@{record['discord_id']}>"
-    parts = [f"**#{record['id']}** — {who} — `{record['stripe_subscription_id']}`"]
+    source = (
+        f"`{record['stripe_subscription_id']}`"
+        if record["stripe_subscription_id"]
+        else f"*{record['payment_method'] or 'manual'}*"
+    )
+    parts = [f"**#{record['id']}** — {who} — {source}"]
 
     detail = [record["status"]]
+    if record["amount_cents"]:
+        detail.append(f"${record['amount_cents'] / 100:.2f}")
     if record["payer_name"]:
         detail.append(record["payer_name"])
     if record["created_at"]:

@@ -27,6 +27,8 @@ def _record(**overrides):
         "tier": None,
         "status": "succeeded",
         "current_period_end": None,
+        "payment_method": None,
+        "amount_cents": None,
         "linked_by": 555,
         "relinked_by": None,
         "relinked_at": None,

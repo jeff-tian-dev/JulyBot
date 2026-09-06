@@ -243,8 +243,8 @@ chmod +x deploy/*.sh                        # only if the release added new scri
 | `clan_membership`  | Per-tag clan in/out state + accumulated absence, kept by the clan-watch poller |
 | `coc_player_cache` | Short-TTL cache of live CoC player name + current clan, shared across rosters |
 | `ranked_tracking`  | `/trackingon` subscriptions: Discord user + CoC tag pairs, with the last-seen likely-to-be-hit status |
-| `agreements`       | The purchase record `/subscribe` writes: buyer, plus `confirmed_at` / `voided_at`. Rows predating the move of terms into Stripe Checkout also carry `signed_at` and the verbatim terms signed |
-| `subscribers`      | One row per subscription period (a resub adds a row, so it's a history): who, which Stripe subscription, and its status refreshed from Stripe |
+| `agreements`       | The purchase record `/subscribe` and `/agreement record` write: buyer, plus `confirmed_at` / `voided_at`. Non-Stripe purchases also carry `payment_method` / `payer_name` / `amount_cents` and the buyer's in-Discord signature |
+| `subscribers`      | One row per purchase period (a resub adds a row, so it's a history): who, and either the Stripe subscription/payment or — for a purchase paid outside Stripe — the method and amount |
 
 See [database/models.py](database/models.py) for the exact DDL.
 
@@ -302,6 +302,7 @@ The Cogs listed in `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py) are
 | `/purchases list [member]`       | subscriptions (admin) | live      |
 | `/purchases relink <id>`         | subscriptions (admin) | live      |
 | `/purchases archive`             | subscriptions (admin) | live      |
+| `/agreement record <member> <method> <payer_name> <amount>` | agreements (admin) | live |
 | `/agreement lookup <member>`     | agreements (admin) | live         |
 | `/agreement receipt <id>`        | agreements (admin) | live         |
 | `/legend`                        | legend_tracker     | stub, not loaded |

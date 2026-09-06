@@ -57,8 +57,10 @@ async def test_create_subscriber_inserts_every_field() -> None:
     assert result["id"] == 1
     sql, *args = conn.fetchrow.await_args.args
     assert "INSERT INTO subscribers" in sql
+    # payment_method / amount_cents trail the Stripe fields: they're NULL for a
+    # Stripe purchase and carry the detail for a manually-recorded one.
     assert args == [4242, 1, 7, "sub_aug", "cus_1", "Jane Doe", "jane@example.com",
-                    "l1", "active", PERIOD_END, 555]
+                    "l1", "active", PERIOD_END, 555, None, None]
 
 
 @pytest.mark.asyncio

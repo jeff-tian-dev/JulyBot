@@ -129,6 +129,8 @@ def _row(**overrides):
         "buyer_id": 4242,
         "sent_by": 555,
         "payer_name": None,
+        "payment_method": None,
+        "amount_cents": None,
         "signed_at": None,
         "confirmed_at": None,
         "confirmed_by": None,

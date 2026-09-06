@@ -67,12 +67,14 @@ def status_embed(record) -> disnake.Embed:
         return embed
 
     if record["confirmed_at"]:
+        how = (
+            f"has been confirmed ({record['payment_method']})"
+            if record["payment_method"]
+            else "has been matched to a Stripe subscription"
+        )
         embed = disnake.Embed(
             title="Purchase Confirmed",
-            description=(
-                f"{buyer}'s payment has been matched to a Stripe subscription. "
-                "Access can now be set up."
-            ),
+            description=f"{buyer}'s payment {how}. Access can now be set up.",
             colour=AGREEMENT_EMBED_COLOUR,
         )
         if record["payer_name"]:
@@ -94,18 +96,44 @@ def status_embed(record) -> disnake.Embed:
         return embed
 
     if record["signed_at"]:
-        embed = disnake.Embed(
-            title="Purchase Agreement — Signed",
-            description=(
-                f"{buyer} has accepted the Terms and Conditions.\n\n"
+        if record["payment_method"]:
+            nxt = (
+                f"**Next:** a moderator will confirm the {record['payment_method']} "
+                "payment here."
+            )
+        else:
+            nxt = (
                 "**Next:** pick a tier below and pay through Stripe. Once the payment "
                 "shows up in Stripe, a moderator will confirm it here."
-            ),
+            )
+        embed = disnake.Embed(
+            title="Purchase Agreement — Signed",
+            description=f"{buyer} has accepted the Terms and Conditions.\n\n{nxt}",
             colour=AGREEMENT_EMBED_COLOUR,
         )
         embed.add_field(
             name="Agreed", value=_relative_timestamp(record["signed_at"]), inline=False
         )
+        return embed
+
+    if record["payment_method"]:
+        # A purchase paid outside Stripe: the buyer never sees Stripe's
+        # checkout, so signing here is the only consent record there will be.
+        amount = record["amount_cents"]
+        paid = f" of **${amount / 100:.2f}**" if amount else ""
+        embed = disnake.Embed(
+            title="Purchase — Agreement Required",
+            description=(
+                f"**{buyer}:** a payment{paid} by **{record['payment_method']}** has "
+                "been recorded for you.\n\n"
+                "Read the Terms and Conditions and click **I Agree** below. A "
+                "moderator will then confirm the payment."
+            ),
+            colour=AGREEMENT_EMBED_COLOUR,
+        )
+        if record["payer_name"]:
+            embed.add_field(name="Paid by", value=record["payer_name"], inline=True)
+        embed.add_field(name="Method", value=record["payment_method"], inline=True)
         return embed
 
     embed = disnake.Embed(
@@ -163,6 +191,8 @@ def receipt_text(
         lines.append(f"Payment Contact: {record['payment_contact']}")
     if record["order_ref"]:
         lines.append(f"Order Ref: {record['order_ref']}")
+    if record["amount_cents"]:
+        lines.append(f"Amount Paid: ${record['amount_cents'] / 100:.2f} USD")
 
     if record["signed_at"]:
         lines.append(f"Signed At: {_absolute_utc(record['signed_at'])}")
@@ -179,10 +209,16 @@ def receipt_text(
             f"Payment Confirmed By: {confirmed_by_label or record['confirmed_by']} "
             f"(discord id {record['confirmed_by']})"
         )
-        lines.append(
-            "  (Matched to a live Stripe subscription at confirmation time by"
-        )
-        lines.append("   the moderator named above.)")
+        if record["payment_method"]:
+            lines.append(
+                f"  (Payment received by {record['payment_method']} and confirmed by"
+            )
+            lines.append("   the moderator named above.)")
+        else:
+            lines.append(
+                "  (Matched to a live Stripe subscription at confirmation time by"
+            )
+            lines.append("   the moderator named above.)")
         if not record["signed_at"]:
             lines.append(
                 "  (Terms and Conditions were accepted by the buyer during Stripe"

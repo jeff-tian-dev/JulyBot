@@ -103,10 +103,9 @@ async def sign_agreement(
     guard stops a buyer signing a purchase an admin cancelled while they had the
     message open.
 
-    NO LONGER CALLED IN PRODUCTION. Terms are accepted in Stripe Checkout, so
-    `/subscribe` has no I Agree button and nothing writes `signed_at` any more.
-    Kept because purchases created before that change may still be open in a
-    ticket, and because the readers of `signed_at` still need testing.
+    Used by `/agreement record` — a buyer paying outside Stripe never sees
+    Stripe's checkout, so signing here is the ONLY consent record for them.
+    `/subscribe` (Stripe) has no I Agree button; Stripe collects it instead.
     """
     async with pool.acquire() as conn:
         return await conn.fetchrow(
@@ -118,6 +117,48 @@ async def sign_agreement(
             """,
             agreement_id,
             buyer_id,
+        )
+
+
+async def create_manual_agreement(
+    pool: asyncpg.Pool,
+    *,
+    guild_id: int,
+    channel_id: int,
+    buyer_id: int,
+    sent_by: int,
+    payment_method: str,
+    payer_name: str,
+    amount_cents: int,
+    agreement_text: str,
+) -> asyncpg.Record:
+    """Open a purchase paid outside Stripe, for the buyer to sign.
+
+    Unlike `create_pending_agreement` (the Stripe path) this stores the payment
+    columns the retired moderator flow used, because for these rows nothing
+    else records how the buyer paid — Stripe has never heard of them.
+
+    `agreement_text` is stored verbatim so the row is evidence of exactly what
+    the buyer was shown, which for a non-Stripe buyer exists nowhere else.
+    """
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            """
+            INSERT INTO agreements (
+                guild_id, channel_id, buyer_id, sent_by,
+                payment_method, payer_name, amount_cents, agreement_text
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING *;
+            """,
+            guild_id,
+            channel_id,
+            buyer_id,
+            sent_by,
+            payment_method,
+            payer_name,
+            amount_cents,
+            agreement_text,
         )
 
 
@@ -186,11 +227,17 @@ async def list_views_to_restore(pool: asyncpg.Pool) -> list[asyncpg.Record]:
     A confirmed or voided purchase is terminal: its message already shows the
     final state with every button disabled, so restoring a view for it would
     only waste a registration.
+
+    `payment_method` comes back so the caller can tell a Stripe purchase from a
+    manually-recorded one — their buttons use different custom_ids, so the
+    wrong view class would leave the message's buttons dead after a restart.
     """
     async with pool.acquire() as conn:
         return await conn.fetch(
             """
-            SELECT id, buyer_id, signed_at FROM agreements
+            SELECT id, buyer_id, signed_at, payment_method, amount_cents,
+                   payer_name
+              FROM agreements
             WHERE message_id IS NOT NULL AND voided_at IS NULL AND confirmed_at IS NULL
             ORDER BY id;
             """

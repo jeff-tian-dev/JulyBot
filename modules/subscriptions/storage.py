@@ -30,6 +30,11 @@ from modules.subscriptions.stripe_api import TERMINAL_STATUSES
 # access is bounded by ARCHIVING, not by the status ever changing.
 ACTIVE_STATUSES = ("active", "trialing", "succeeded")
 
+# What a manually-recorded (non-Stripe) purchase's status is set to. It mirrors
+# a successful one-time payment: nothing external will ever change it, so
+# access is bounded by archiving, not by the status moving on its own.
+MANUAL_STATUS = "succeeded"
+
 
 async def create_subscriber(
     pool: asyncpg.Pool,
@@ -37,20 +42,28 @@ async def create_subscriber(
     discord_id: int,
     guild_id: int,
     agreement_id: int | None,
-    stripe_subscription_id: str,
-    stripe_customer_id: str,
+    stripe_subscription_id: str | None,
+    stripe_customer_id: str | None,
     payer_name: str | None,
     email: str | None,
     tier: str | None,
     status: str,
     current_period_end: datetime | None,
     linked_by: int,
+    payment_method: str | None = None,
+    amount_cents: int | None = None,
 ) -> asyncpg.Record:
-    """Record a confirmed subscription.
+    """Record a confirmed purchase, whether paid through Stripe or not.
+
+    Both Stripe ids are None for a purchase paid another way (PayPal, Venmo,
+    cash…), recorded by `/agreement record`. Those rows carry `payment_method`
+    and `amount_cents` instead, and are identified by `stripe_subscription_id
+    IS NULL` — never by a sentinel id in a column named for Stripe.
 
     Raises asyncpg.UniqueViolationError if this Stripe subscription is already
     linked to someone — deliberately loud, since silently re-attributing a
-    payment to a second Discord user would be worse than failing.
+    payment to a second Discord user would be worse than failing. The index is
+    partial, so any number of manual rows (all NULL) coexist happily.
     """
     async with pool.acquire() as conn:
         return await conn.fetchrow(
@@ -58,9 +71,9 @@ async def create_subscriber(
             INSERT INTO subscribers (
                 discord_id, guild_id, agreement_id, stripe_subscription_id,
                 stripe_customer_id, payer_name, email, tier, status,
-                current_period_end, linked_by
+                current_period_end, linked_by, payment_method, amount_cents
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             RETURNING *;
             """,
             discord_id,
@@ -74,6 +87,8 @@ async def create_subscriber(
             status,
             current_period_end,
             linked_by,
+            payment_method,
+            amount_cents,
         )
 
 
@@ -179,6 +194,8 @@ async def list_for_refresh(pool: asyncpg.Pool) -> list[asyncpg.Record]:
         apart without a `kind` column.
       - Archived rows — a closed-out month is not current access, so its
         status no longer drives anything.
+      - Manually-recorded purchases (`stripe_subscription_id IS NULL`), which
+        Stripe has never heard of; there is nothing to look up.
     """
     async with pool.acquire() as conn:
         return await conn.fetch(
@@ -187,6 +204,7 @@ async def list_for_refresh(pool: asyncpg.Pool) -> list[asyncpg.Record]:
             r"""
             SELECT id, stripe_subscription_id, status FROM subscribers
             WHERE NOT (status = ANY($1::text[]))
+              AND stripe_subscription_id IS NOT NULL
               AND stripe_subscription_id NOT LIKE 'pi\_%'
               AND archived_at IS NULL
             ORDER BY id;
