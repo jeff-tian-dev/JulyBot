@@ -309,3 +309,14 @@ async def test_restore_picks_the_view_class_matching_the_flow() -> None:
     # And the manual one carries the manual custom_ids.
     ids = [i.custom_id for i in restored[1].children]
     assert "purchase:magree:2" in ids
+
+
+def test_payment_methods_fit_the_column() -> None:
+    """agreements.payment_method is VARCHAR(20); a longer choice would only
+    fail at insert time, in production, after the buyer was already messaged."""
+    assert all(len(m) <= 20 for m in agreement_commands.PAYMENT_METHODS)
+    # The values are stored verbatim, so these strings appear on receipts.
+    assert "UPI" in agreement_commands.PAYMENT_METHODS
+    assert "WeChat" in agreement_commands.PAYMENT_METHODS
+    # "Other" stays last so it reads as the fallback, not a peer.
+    assert agreement_commands.PAYMENT_METHODS[-1] == "Other"

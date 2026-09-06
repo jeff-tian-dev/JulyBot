@@ -42,7 +42,7 @@ NO_PINGS = disnake.AllowedMentions.none()
 CUSTOM_ID_PREFIX = "purchase"
 MAX_PAYER_NAME_LENGTH = 200
 # agreements.payment_method is VARCHAR(20); keep these short enough to fit.
-PAYMENT_METHODS = ("PayPal", "Venmo", "Wise", "Cash", "Other")
+PAYMENT_METHODS = ("PayPal", "Venmo", "Wise", "UPI", "WeChat", "Cash", "Other")
 
 
 class ManualPurchaseView(disnake.ui.View):
