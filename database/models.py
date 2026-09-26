@@ -502,10 +502,46 @@ DROP_LEGACY_SUBSCRIPTIONS = """
 DROP TABLE IF EXISTS subscriptions;
 """
 
+# Admin-managed one-time products sold alongside the L1/L2 tiers (e.g. a base pack).
+# Each is a name plus a Stripe Payment Link, per guild. A sale runs through exactly the
+# same agreements -> subscribers pipeline as a tier purchase; `product_id` on both of
+# those tables is what tells the two apart.
+#
+# Removal is a SOFT delete (`removed_at`), never a DELETE: past purchases reference the
+# row, and the purchase log must keep saying what was bought. The unique name index is
+# partial on `removed_at IS NULL`, so a removed product's name can be reused.
+CREATE_PRODUCTS = """
+CREATE TABLE IF NOT EXISTS products (
+    id SERIAL PRIMARY KEY,
+    guild_id BIGINT NOT NULL,
+    name VARCHAR(100) NOT NULL,
+    payment_link TEXT NOT NULL,
+    description VARCHAR(300),
+    created_by BIGINT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    removed_at TIMESTAMP,
+    removed_by BIGINT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_products_guild_name
+    ON products (guild_id, lower(name)) WHERE removed_at IS NULL;
+"""
+
+# Ties a purchase to the product it sold. NULL on both tables means a tier purchase
+# (/subscribe) or a manual one (/agreement record) — every row that existed before
+# products did. `agreements.product_name` is a SNAPSHOT of the name at sale time: the
+# agreement is dispute evidence, so it must say what was sold without depending on a
+# join to a row an admin could later remove.
+MIGRATE_PURCHASE_PRODUCTS = """
+ALTER TABLE agreements ADD COLUMN IF NOT EXISTS product_id INTEGER REFERENCES products(id) ON DELETE SET NULL;
+ALTER TABLE agreements ADD COLUMN IF NOT EXISTS product_name VARCHAR(100);
+ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS product_id INTEGER REFERENCES products(id) ON DELETE SET NULL;
+"""
+
 ALL_TABLES = (
     "subscribers",
     "ranked_tracking",
     "agreements",
+    "products",
     "base_post_downloads",
     "base_posts",
     "seen_tweets",
@@ -614,6 +650,12 @@ async def create_tables(pool: asyncpg.Pool) -> None:
         await conn.execute(MIGRATE_SUBSCRIBERS_ARCHIVE)
         logger.info("Applying subscribers manual-payment migration if needed")
         await conn.execute(MIGRATE_SUBSCRIBERS_MANUAL)
+
+        # After agreements + subscribers: the migration adds FKs from both to products.
+        logger.info("Creating table products if not exists")
+        await conn.execute(CREATE_PRODUCTS)
+        logger.info("Applying purchase product migration if needed")
+        await conn.execute(MIGRATE_PURCHASE_PRODUCTS)
 
 
 async def drop_tables(pool: asyncpg.Pool) -> None:

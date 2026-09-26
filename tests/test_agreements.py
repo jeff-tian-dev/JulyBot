@@ -409,7 +409,8 @@ async def test_create_pending_agreement_inserts_unsigned() -> None:
     sql, *args = conn.fetchrow.await_args.args
     assert "INSERT INTO agreements" in sql
     assert "signed_at" not in sql
-    assert args == [1, 99, 4242, 555, "TERMS"]
+    # product_id / product_name trail: NULL for a tier purchase.
+    assert args == [1, 99, 4242, 555, "TERMS", None, None]
 
 
 @pytest.mark.asyncio

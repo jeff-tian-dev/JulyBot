@@ -75,7 +75,10 @@ def purchase_line(record) -> str:
         if record["stripe_subscription_id"]
         else f"*{record['payment_method'] or 'manual'}*"
     )
-    parts = [f"**#{record['id']}** — {who} — {source}"]
+    # Product sales share this log with tier purchases; name the product so the
+    # two read differently. `.get`: only the log queries join it in.
+    product = f" — 📦 **{record['product_name']}**" if record.get("product_name") else ""
+    parts = [f"**#{record['id']}** — {who} — {source}{product}"]
 
     detail = [record["status"]]
     if record["amount_cents"]:

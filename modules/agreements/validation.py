@@ -11,7 +11,12 @@ dual/triple support is the thing most likely to regress:
   3. Current /subscribe rows: terms accepted in Stripe Checkout, so signed_at
      is NULL and agreement_text is empty.
 Shapes 1 and 2 are historical but carry real dispute evidence, so none of these
-renderers may assume a field is present. See the table comment in
+renderers may assume a field is present.
+
+Shape 3 has a variant: a `/product sell` purchase sets `product_name`. It is a
+one-time product (e.g. a base pack), NOT a month of access, so its copy must
+never say "one month". `product_name` is read with `.get` because rows and test
+fixtures predating the column don't carry it. See the table comment in
 database/models.py.
 """
 from __future__ import annotations
@@ -66,17 +71,29 @@ def status_embed(record) -> disnake.Embed:
         )
         return embed
 
+    product = record.get("product_name")
+
     if record["confirmed_at"]:
-        how = (
-            f"has been confirmed ({record['payment_method']})"
-            if record["payment_method"]
-            else "has been matched to a Stripe subscription"
-        )
-        embed = disnake.Embed(
-            title="Purchase Confirmed",
-            description=f"{buyer}'s payment {how}. Access can now be set up.",
-            colour=AGREEMENT_EMBED_COLOUR,
-        )
+        if product:
+            embed = disnake.Embed(
+                title=f"Purchase Confirmed — {product}",
+                description=(
+                    f"{buyer}'s payment for **{product}** has been matched to a "
+                    "Stripe payment."
+                ),
+                colour=AGREEMENT_EMBED_COLOUR,
+            )
+        else:
+            how = (
+                f"has been confirmed ({record['payment_method']})"
+                if record["payment_method"]
+                else "has been matched to a Stripe subscription"
+            )
+            embed = disnake.Embed(
+                title="Purchase Confirmed",
+                description=f"{buyer}'s payment {how}. Access can now be set up.",
+                colour=AGREEMENT_EMBED_COLOUR,
+            )
         if record["payer_name"]:
             embed.add_field(name="Paid by", value=record["payer_name"], inline=False)
         if record["signed_at"]:
@@ -136,6 +153,27 @@ def status_embed(record) -> disnake.Embed:
         embed.add_field(name="Method", value=record["payment_method"], inline=True)
         return embed
 
+    if product:
+        embed = disnake.Embed(
+            title=f"Purchase — {product}",
+            description=(
+                f"**{buyer}:** pay for **{product}** with the button below through "
+                "Stripe. You'll accept the Terms and Conditions as part of Stripe's "
+                "checkout.\n\n"
+                "This is a **one-time payment** — nothing is charged again."
+            ),
+            colour=AGREEMENT_EMBED_COLOUR,
+        )
+        embed.add_field(
+            name="Waiting on",
+            value=(
+                "the payment to go through. A moderator will confirm it here once it "
+                "shows up in Stripe."
+            ),
+            inline=False,
+        )
+        return embed
+
     embed = disnake.Embed(
         title="Purchase",
         description=(
@@ -183,6 +221,8 @@ def receipt_text(
         f"Buyer: {buyer_label} (discord id {record['buyer_id']})",
     ]
 
+    if record.get("product_name"):
+        lines.append(f"Product: {record['product_name']} (one-time purchase)")
     if record["payer_name"]:
         lines.append(f"Payer Name: {record['payer_name']}")
     if record["payment_method"]:
@@ -213,6 +253,9 @@ def receipt_text(
             lines.append(
                 f"  (Payment received by {record['payment_method']} and confirmed by"
             )
+            lines.append("   the moderator named above.)")
+        elif record.get("product_name"):
+            lines.append("  (Matched to a successful Stripe payment at confirmation time by")
             lines.append("   the moderator named above.)")
         else:
             lines.append(
@@ -273,7 +316,8 @@ def lookup_embed(buyer_id: int, rows) -> disnake.Embed:
         else:
             status = "⌛ Pending"
         order = f" ({row['order_ref']})" if row["order_ref"] else ""
-        line = f"**#{row['id']}**{order} — {status}"
+        product = f" · {row['product_name']}" if row.get("product_name") else ""
+        line = f"**#{row['id']}**{order}{product} — {status}"
         # Only historical moderator-flow rows carry payment details.
         if row["payment_method"] and row["payer_name"]:
             line += f"\n{row['payment_method']}: {row['payer_name']}"

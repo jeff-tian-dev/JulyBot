@@ -34,6 +34,7 @@ COG_MODULES = (
     "discord_bot.commands.ranked_commands",
     "discord_bot.commands.subscribe_commands",
     "discord_bot.commands.purchase_commands",
+    "discord_bot.commands.product_commands",
 )
 
 # Disabled until wired up (still under development):

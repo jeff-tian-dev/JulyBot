@@ -232,14 +232,16 @@ def _summary(name="Jane Doe", subscription_id="sub_123"):
     )
 
 
-async def _click_confirm(inter, *, subscriptions=None, side_effect=None):
+async def _click_confirm(inter, *, subscriptions=None, side_effect=None, row=None):
     """Drive the Confirm Payment button with a mocked Stripe lookup."""
+    row = row or _row(signed_at=SIGNED)
     lookup = AsyncMock(side_effect=side_effect) if side_effect else AsyncMock(
         return_value=subscriptions if subscriptions is not None else [_summary()]
     )
     with patch.object(subscribe_commands, "TIERS", _tiers()), \
+         patch.object(subscribe_commands.storage, "get_agreement", new=AsyncMock(return_value=row)), \
          patch.object(subscribe_commands.stripe_api, "list_recent_subscriptions", new=lookup):
-        view = subscribe_commands.PurchaseView(_row(signed_at=SIGNED))
+        view = subscribe_commands.PurchaseView(row)
         button = next(i for i in view.children if i.label == "Confirm Payment")
         await button.callback(inter)
 

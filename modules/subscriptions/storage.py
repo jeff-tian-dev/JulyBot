@@ -8,6 +8,11 @@ One row per subscription period: a resub creates a NEW row rather than
 overwriting, so this table is a history. "Is this user subscribed?" means "do
 they have a live, unarchived row?", not "is there a row for them".
 
+Product sales (`/product sell`) are logged here too, with `product_id` set.
+They are one-time purchases, not a month of access, so they are left out of
+`list_active_subscribers` and never archived — but they appear everywhere the
+purchase LOG is read (listing, relink), so there is one purchase history.
+
 **Nothing here deletes a row.** These are the purchase log and the evidence for
 a payment dispute. Ending a month archives (`archived_at`), which drops a row
 out of the active list while leaving it fully readable.
@@ -52,6 +57,7 @@ async def create_subscriber(
     linked_by: int,
     payment_method: str | None = None,
     amount_cents: int | None = None,
+    product_id: int | None = None,
 ) -> asyncpg.Record:
     """Record a confirmed purchase, whether paid through Stripe or not.
 
@@ -71,9 +77,10 @@ async def create_subscriber(
             INSERT INTO subscribers (
                 discord_id, guild_id, agreement_id, stripe_subscription_id,
                 stripe_customer_id, payer_name, email, tier, status,
-                current_period_end, linked_by, payment_method, amount_cents
+                current_period_end, linked_by, payment_method, amount_cents,
+                product_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             RETURNING *;
             """,
             discord_id,
@@ -89,7 +96,17 @@ async def create_subscriber(
             linked_by,
             payment_method,
             amount_cents,
+            product_id,
         )
+
+
+# Every purchase-log read joins the product for its name, so a listing can say
+# "Base Pack" rather than just a number. LEFT JOIN: tier purchases have none.
+_LOG_SELECT = """
+    SELECT s.*, p.name AS product_name
+      FROM subscribers s
+      LEFT JOIN products p ON p.id = s.product_id
+"""
 
 
 async def get_subscriber_by_stripe_id(
@@ -109,7 +126,7 @@ async def list_subscribers_for_discord_id(
     """Every subscription period for one Discord user, newest first."""
     async with pool.acquire() as conn:
         return await conn.fetch(
-            "SELECT * FROM subscribers WHERE discord_id = $1 ORDER BY created_at DESC;",
+            _LOG_SELECT + " WHERE s.discord_id = $1 ORDER BY s.created_at DESC;",
             discord_id,
         )
 
@@ -121,6 +138,8 @@ async def list_active_subscribers(pool: asyncpg.Pool, guild_id: int) -> list[asy
     subscription that Stripe has since cancelled; the archive check is what
     bounds a ONE-TIME purchase, whose status stays `succeeded` forever and so
     would otherwise grant access permanently.
+
+    Product sales are excluded: buying a base pack is not access to anything.
     """
     async with pool.acquire() as conn:
         return await conn.fetch(
@@ -129,6 +148,7 @@ async def list_active_subscribers(pool: asyncpg.Pool, guild_id: int) -> list[asy
             WHERE guild_id = $1
               AND status = ANY($2::text[])
               AND archived_at IS NULL
+              AND product_id IS NULL
             ORDER BY created_at DESC;
             """,
             guild_id,
@@ -149,6 +169,9 @@ async def archive_subscribers(
     Only touches rows not already archived, so re-running it is a no-op rather
     than restamping the timestamp and losing when the close-out actually
     happened. Returning the rows lets the caller report what changed.
+
+    Product sales are never archived — they were never access, so there is
+    no month to close out.
     """
     async with pool.acquire() as conn:
         return await conn.fetch(
@@ -158,6 +181,7 @@ async def archive_subscribers(
             WHERE guild_id = $1
               AND created_at < $2
               AND archived_at IS NULL
+              AND product_id IS NULL
             RETURNING *;
             """,
             guild_id,
@@ -225,10 +249,10 @@ async def list_recent_subscribers(
     """Recent purchases in this guild, newest first."""
     async with pool.acquire() as conn:
         return await conn.fetch(
-            """
-            SELECT * FROM subscribers
-            WHERE guild_id = $1
-            ORDER BY created_at DESC
+            _LOG_SELECT
+            + """
+            WHERE s.guild_id = $1
+            ORDER BY s.created_at DESC
             LIMIT $2;
             """,
             guild_id,

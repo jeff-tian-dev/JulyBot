@@ -46,6 +46,12 @@ dispute. The billing model is a per-Payment-Link Stripe Dashboard setting the bo
 cannot see and which has already been switched twice, so **if it changes back to
 recurring, this copy must change in the same commit**. There is nothing to cancel
 now, so the copy no longer points buyers at a moderator for that.
+
+**Products** (`/product sell`, see product_commands.py) reuse this whole flow —
+the same row, status message, Confirm/Cancel buttons and custom_ids. The row's
+`product_id` is what differs: its view shows one link button for that product
+instead of the tier buttons, and the confirm picker offers only one-time
+payments, since a product is never a subscription.
 """
 from __future__ import annotations
 
@@ -204,6 +210,8 @@ async def finalize_confirmation(
             status=subscription.status,
             current_period_end=subscription.current_period_end,
             linked_by=inter.author.id,
+            amount_cents=subscription.amount_cents,
+            product_id=confirmed.get("product_id"),
         )
     except asyncpg.UniqueViolationError:
         # Already attributed to someone — say who rather than silently
@@ -339,7 +347,7 @@ class PurchaseView(disnake.ui.View):
     the record on every edit rather than mutated in place.
     """
 
-    def __init__(self, record) -> None:
+    def __init__(self, record, *, product_link: str | None = None) -> None:
         super().__init__(timeout=None)
         self.agreement_id = record["id"]
 
@@ -367,8 +375,22 @@ class PurchaseView(disnake.ui.View):
 
         # Shown immediately. Terms are accepted in Stripe Checkout now, so there
         # is no in-Discord step gating these any more.
-        for button in _payment_buttons():
-            self.add_item(button)
+        if record.get("product_id"):
+            # A product sale shows only that product's link. `product_link` is
+            # None when restoring after a restart — fine, because link buttons
+            # carry no custom_id and so play no part in dispatch; the posted
+            # message already shows the button.
+            if product_link:
+                self.add_item(
+                    disnake.ui.Button(
+                        label=f"Pay for {record['product_name']}"[:80],
+                        style=disnake.ButtonStyle.link,
+                        url=product_link,
+                    )
+                )
+        else:
+            for button in _payment_buttons():
+                self.add_item(button)
 
     def _id_from(self, inter: disnake.MessageInteraction) -> int:
         """The agreement id encoded in the clicked button's custom_id.
@@ -400,6 +422,8 @@ class PurchaseView(disnake.ui.View):
             return
 
         agreement_id = self._id_from(inter)
+        record = await storage.get_agreement(inter.bot.pool, agreement_id)
+        is_product = bool(record and record.get("product_id"))
 
         try:
             subscriptions = await stripe_api.list_recent_subscriptions()
@@ -416,6 +440,18 @@ class PurchaseView(disnake.ui.View):
                 f"Couldn't reach Stripe: {exc}", ephemeral=True
             )
             return
+
+        if is_product:
+            # A product is always a one-time purchase; offering subscriptions
+            # would only invite linking the wrong payment.
+            subscriptions = [s for s in subscriptions if s.is_one_time]
+            if not subscriptions:
+                await inter.response.send_message(
+                    "Stripe has no recent successful one-time payments to link. If the "
+                    "payment just went through, give it a moment and try again.",
+                    ephemeral=True,
+                )
+                return
 
         if not subscriptions:
             await inter.response.send_message(
@@ -470,33 +506,54 @@ class SubscribeCommands(commands.Cog):
             )
             return
 
-        record = await storage.create_pending_agreement(
-            self.bot.pool,
-            guild_id=inter.guild.id,
-            channel_id=inter.channel.id,
-            buyer_id=member.id,
-            sent_by=inter.author.id,
-        )
+        await start_purchase(inter, member)
 
-        try:
-            message = await inter.channel.send(
-                content=member.mention,
-                embed=status_embed(record),
-                view=PurchaseView(record),
-                allowed_mentions=disnake.AllowedMentions(users=[member]),
-            )
-        except Exception as exc:  # noqa: BLE001 — surface any failure + log
-            # Roll back so no orphan row points at a message that never existed.
-            await storage.delete_agreement(self.bot.pool, record["id"])
-            logger.exception("Failed to post purchase for buyer=%s", member.id)
-            await inter.edit_original_response(f"Couldn't start the purchase: {exc}")
-            return
 
-        await storage.attach_message(self.bot.pool, record["id"], message.id)
-        await inter.edit_original_response(
-            f"Purchase #{record['id']} started for {member.mention} — {message.jump_url}",
-            allowed_mentions=NO_PINGS,
+async def start_purchase(
+    inter: disnake.ApplicationCommandInteraction,
+    member: disnake.User,
+    *,
+    product=None,
+) -> None:
+    """Create the purchase row and post its status message in this channel.
+
+    Shared by /subscribe (tiers, `product` None) and /product sell (one product
+    record), so both produce the same row, message and buttons. Expects the
+    interaction to be deferred already.
+    """
+    pool = inter.bot.pool
+    record = await storage.create_pending_agreement(
+        pool,
+        guild_id=inter.guild.id,
+        channel_id=inter.channel.id,
+        buyer_id=member.id,
+        sent_by=inter.author.id,
+        product_id=product["id"] if product else None,
+        product_name=product["name"] if product else None,
+    )
+
+    try:
+        message = await inter.channel.send(
+            content=member.mention,
+            embed=status_embed(record),
+            view=PurchaseView(
+                record, product_link=product["payment_link"] if product else None
+            ),
+            allowed_mentions=disnake.AllowedMentions(users=[member]),
         )
+    except Exception as exc:  # noqa: BLE001 — surface any failure + log
+        # Roll back so no orphan row points at a message that never existed.
+        await storage.delete_agreement(pool, record["id"])
+        logger.exception("Failed to post purchase for buyer=%s", member.id)
+        await inter.edit_original_response(f"Couldn't start the purchase: {exc}")
+        return
+
+    await storage.attach_message(pool, record["id"], message.id)
+    what = f" of **{product['name']}**" if product else ""
+    await inter.edit_original_response(
+        f"Purchase #{record['id']}{what} started for {member.mention} — {message.jump_url}",
+        allowed_mentions=NO_PINGS,
+    )
 
 
 async def register_persistent_views(bot: commands.InteractionBot) -> None:
@@ -526,6 +583,8 @@ async def register_persistent_views(bot: commands.InteractionBot) -> None:
             "payment_method": row["payment_method"],
             "amount_cents": row["amount_cents"],
             "payer_name": row["payer_name"],
+            "product_id": row.get("product_id"),
+            "product_name": row.get("product_name"),
             "confirmed_at": None,
             "voided_at": None,
         }

@@ -12,6 +12,7 @@ A Discord bot for Clash of Clans clans, built around nine independent modules:
 - **Roster** — admin-managed named groups of players (by Discord user or raw CoC tag). Optionally *watch* a roster to get alerts when a member leaves or rejoins the clan family (`COC_FAMILY_CLAN_TAGS`) and to track how long each member has been out.
 - **Ranked tracker** — looks up a player's current Ranked Battles weekly tournament group (`/group`) and renders a refreshable dashboard of defenses received this week, with no stored history — everything is fetched live from the CoC API on each refresh.
 - **Subscriptions** — `/subscribe <member>` runs a purchase through a ticket: one message shows the Stripe Payment Link buttons, then advances to confirmed once an admin picks the buyer's subscription out of Stripe. Terms are accepted inside Stripe Checkout, so there is no separate agreement step. The dropdown lists both active recurring subscriptions and successful one-time payments, since either Payment Link type works. Confirmed purchases are recorded in `subscribers`; recurring ones are re-checked against Stripe on a schedule so cancellations and failed renewals show up on their own (a one-time payment has no status that can change, so it is not re-polled). Granting Discord access is still manual.
+- **Products** — admins manage one-time products (e.g. a base pack) with `/product add|remove|list`, each just a name and a Stripe Payment Link, and start a sale with `/product sell <member> <name>`. A sale runs the exact same ticket flow as `/subscribe` — status message, admin confirmation against Stripe, receipt, and a row in `/purchases list` — but only offers one-time payments at confirmation, and never counts as subscription access or gets archived.
 
 The Discord layer (`disnake` Cogs) is a thin shim. Each module is a plain Python package, callable and testable without a running bot.
 
@@ -244,6 +245,7 @@ chmod +x deploy/*.sh                        # only if the release added new scri
 | `coc_player_cache` | Short-TTL cache of live CoC player name + current clan, shared across rosters |
 | `ranked_tracking`  | `/trackingon` subscriptions: Discord user + CoC tag pairs, with the last-seen likely-to-be-hit status |
 | `agreements`       | The purchase record `/subscribe` and `/agreement record` write: buyer, plus `confirmed_at` / `voided_at`. Non-Stripe purchases also carry `payment_method` / `payer_name` / `amount_cents` and the buyer's in-Discord signature |
+| `products`         | Admin-managed one-time products for `/product`: name, Stripe Payment Link, optional description. Soft-deleted (`removed_at`) so past purchases keep their product |
 | `subscribers`      | One row per purchase period (a resub adds a row, so it's a history): who, and either the Stripe subscription/payment or — for a purchase paid outside Stripe — the method and amount |
 
 See [database/models.py](database/models.py) for the exact DDL.
@@ -302,6 +304,9 @@ The Cogs listed in `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py) are
 | `/purchases list [member]`       | subscriptions (admin) | live      |
 | `/purchases relink <id>`         | subscriptions (admin) | live      |
 | `/purchases archive`             | subscriptions (admin) | live      |
+| `/product add <name> <payment_link> [description]` | subscriptions (admin) | live |
+| `/product remove <name>` / `/product list` | subscriptions (admin) | live |
+| `/product sell <member> <name>`  | subscriptions (admin) | live      |
 | `/agreement record <member> <method> <payer_name> <amount>` | agreements (admin) | live |
 | `/agreement lookup <member>`     | agreements (admin) | live         |
 | `/agreement receipt <id>`        | agreements (admin) | live         |

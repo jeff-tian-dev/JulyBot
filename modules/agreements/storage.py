@@ -20,6 +20,8 @@ async def create_pending_agreement(
     buyer_id: int,
     sent_by: int,
     agreement_text: str = "",
+    product_id: int | None = None,
+    product_name: str | None = None,
 ) -> asyncpg.Record:
     """Insert a pending purchase, before the status message is posted.
 
@@ -35,12 +37,19 @@ async def create_pending_agreement(
     The payment columns (payer_name / payment_method / payment_contact) stay
     NULL — Stripe knows who paid. See the agreements table comment in
     database/models.py.
+
+    `product_id` / `product_name` are set for a `/product sell` purchase and
+    NULL for a tier purchase. The name is a snapshot, so the row still says
+    what was sold after the product is removed.
     """
     async with pool.acquire() as conn:
         return await conn.fetchrow(
             """
-            INSERT INTO agreements (guild_id, channel_id, buyer_id, sent_by, agreement_text)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO agreements (
+                guild_id, channel_id, buyer_id, sent_by, agreement_text,
+                product_id, product_name
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING *;
             """,
             guild_id,
@@ -48,6 +57,8 @@ async def create_pending_agreement(
             buyer_id,
             sent_by,
             agreement_text,
+            product_id,
+            product_name,
         )
 
 
@@ -236,7 +247,7 @@ async def list_views_to_restore(pool: asyncpg.Pool) -> list[asyncpg.Record]:
         return await conn.fetch(
             """
             SELECT id, buyer_id, signed_at, payment_method, amount_cents,
-                   payer_name
+                   payer_name, product_id, product_name
               FROM agreements
             WHERE message_id IS NOT NULL AND voided_at IS NULL AND confirmed_at IS NULL
             ORDER BY id;

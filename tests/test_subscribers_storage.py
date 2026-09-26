@@ -60,7 +60,7 @@ async def test_create_subscriber_inserts_every_field() -> None:
     # payment_method / amount_cents trail the Stripe fields: they're NULL for a
     # Stripe purchase and carry the detail for a manually-recorded one.
     assert args == [4242, 1, 7, "sub_aug", "cus_1", "Jane Doe", "jane@example.com",
-                    "l1", "active", PERIOD_END, 555, None, None]
+                    "l1", "active", PERIOD_END, 555, None, None, None]
 
 
 @pytest.mark.asyncio
@@ -184,7 +184,7 @@ async def test_list_subscribers_for_discord_id_is_newest_first() -> None:
     rows = await storage.list_subscribers_for_discord_id(_fake_pool(conn), 4242)
 
     assert [r["id"] for r in rows] == [2, 1]
-    assert "ORDER BY created_at DESC" in conn.fetch.await_args.args[0]
+    assert "ORDER BY s.created_at DESC" in conn.fetch.await_args.args[0]
 
 
 # --- relink (fixing a mislinked payment) --------------------------------------
@@ -272,8 +272,8 @@ async def test_list_recent_subscribers_is_scoped_to_the_guild() -> None:
     await storage.list_recent_subscribers(_fake_pool(conn), 1, limit=15)
 
     sql, *args = conn.fetch.await_args.args
-    assert "WHERE guild_id = $1" in sql
-    assert "ORDER BY created_at DESC" in sql
+    assert "WHERE s.guild_id = $1" in sql
+    assert "ORDER BY s.created_at DESC" in sql
     assert args == [1, 15]
 
 
