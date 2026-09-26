@@ -206,7 +206,9 @@ async def test_purge_rejects_empty_word() -> None:
     mod = SimpleNamespace(id=42)
     target = SimpleNamespace(id=55)
     with pytest.raises(ModerationError, match="non-empty word"):
-        await purge.purge_user_messages(guild, target, "   ", mod)
+        await purge.purge_messages(
+        guild, "   ", mod, target=target
+    )
 
 
 @pytest.mark.asyncio
@@ -217,7 +219,9 @@ async def test_purge_allows_self_target() -> None:
     guild = _purge_guild([channel])
     mod = SimpleNamespace(id=mod_id)
 
-    result = await purge.purge_user_messages(guild, mod, "dog", mod)
+    result = await purge.purge_messages(
+        guild, "dog", mod, target=mod
+    )
 
     assert result.deleted == 1
 
@@ -233,8 +237,8 @@ async def test_purge_matches_case_insensitive_substring_and_author() -> None:
     channel = _purge_channel(msgs)
     guild = _purge_guild([channel])
 
-    result = await purge.purge_user_messages(
-        guild, SimpleNamespace(id=target_id), "report", SimpleNamespace(id=42)
+    result = await purge.purge_messages(
+        guild, "report", SimpleNamespace(id=42), target=SimpleNamespace(id=target_id)
     )
 
     assert result.deleted == 1
@@ -252,8 +256,8 @@ async def test_purge_bulk_deletes_recent_and_individually_deletes_old() -> None:
     channel = _purge_channel(recent + [old])
     guild = _purge_guild([channel])
 
-    result = await purge.purge_user_messages(
-        guild, SimpleNamespace(id=target_id), "spam", SimpleNamespace(id=42)
+    result = await purge.purge_messages(
+        guild, "spam", SimpleNamespace(id=42), target=SimpleNamespace(id=target_id)
     )
 
     assert result.deleted == 4
@@ -281,8 +285,8 @@ async def test_purge_counts_unmanageable_channels_as_skipped() -> None:
     )
     guild.text_channels = [ok_channel, blocked]
 
-    result = await purge.purge_user_messages(
-        guild, SimpleNamespace(id=55), "spam", SimpleNamespace(id=42)
+    result = await purge.purge_messages(
+        guild, "spam", SimpleNamespace(id=42), target=SimpleNamespace(id=55)
     )
 
     assert result.deleted == 1
@@ -299,8 +303,8 @@ async def test_purge_stops_at_deletion_cap(monkeypatch) -> None:
     channel = _purge_channel(msgs)
     guild = _purge_guild([channel])
 
-    result = await purge.purge_user_messages(
-        guild, SimpleNamespace(id=target_id), "dog", SimpleNamespace(id=42)
+    result = await purge.purge_messages(
+        guild, "dog", SimpleNamespace(id=42), target=SimpleNamespace(id=target_id)
     )
 
     assert result.deleted == 3
@@ -319,8 +323,8 @@ async def test_purge_cap_counts_only_matches_not_scanned(monkeypatch) -> None:
     channel = _purge_channel(msgs)
     guild = _purge_guild([channel])
 
-    result = await purge.purge_user_messages(
-        guild, SimpleNamespace(id=target_id), "dog", SimpleNamespace(id=42)
+    result = await purge.purge_messages(
+        guild, "dog", SimpleNamespace(id=42), target=SimpleNamespace(id=target_id)
     )
 
     assert result.deleted == 2
@@ -333,8 +337,8 @@ async def test_purge_not_capped_when_under_limit() -> None:
     channel = _purge_channel([_message(author_id=target_id, content="dog", age_days=1)])
     guild = _purge_guild([channel])
 
-    result = await purge.purge_user_messages(
-        guild, SimpleNamespace(id=target_id), "dog", SimpleNamespace(id=42)
+    result = await purge.purge_messages(
+        guild, "dog", SimpleNamespace(id=42), target=SimpleNamespace(id=target_id)
     )
 
     assert result.deleted == 1
@@ -351,10 +355,92 @@ async def test_purge_scans_all_channels_concurrently() -> None:
     ]
     guild = _purge_guild(channels)
 
-    result = await purge.purge_user_messages(
-        guild, SimpleNamespace(id=target_id), "dog", SimpleNamespace(id=42)
+    result = await purge.purge_messages(
+        guild, "dog", SimpleNamespace(id=42), target=SimpleNamespace(id=target_id)
     )
 
     assert result.deleted == 4
     assert result.channels_scanned == 4
     assert result.capped is False
+
+
+@pytest.mark.asyncio
+async def test_purge_without_target_deletes_any_authors_matches() -> None:
+    msgs = [
+        _message(author_id=1, content="buy cheap gems", age_days=1),
+        _message(author_id=2, content="GEMS here", age_days=30),
+        _message(author_id=3, content="hello", age_days=1),
+    ]
+    channel = _purge_channel(msgs)
+    guild = _purge_guild([channel])
+
+    result = await purge.purge_messages(guild, "gems", SimpleNamespace(id=42))
+
+    assert result.deleted == 2
+    msgs[0].delete.assert_awaited_once()  # lone recent match -> individual delete
+    msgs[1].delete.assert_awaited_once()  # old match -> individual delete
+    msgs[2].delete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_purge_channel_restricts_scan_to_that_channel() -> None:
+    inside = _purge_channel([_message(author_id=1, content="spam", age_days=1)])
+    outside = _purge_channel([_message(author_id=1, content="spam", age_days=1)])
+    outside.history = MagicMock(side_effect=AssertionError("must not scan other channels"))
+    guild = _purge_guild([inside, outside])
+
+    result = await purge.purge_messages(guild, "spam", SimpleNamespace(id=42), channel=inside)
+
+    assert result.deleted == 1
+    assert result.channels_scanned == 1
+    assert result.channels_skipped == 0
+
+
+@pytest.mark.asyncio
+async def test_purge_channel_combines_with_target() -> None:
+    msgs = [
+        _message(author_id=55, content="spam", age_days=1),
+        _message(author_id=66, content="spam", age_days=1),
+    ]
+    channel = _purge_channel(msgs)
+    guild = _purge_guild([channel])
+
+    result = await purge.purge_messages(
+        guild, "spam", SimpleNamespace(id=42), target=SimpleNamespace(id=55), channel=channel
+    )
+
+    assert result.deleted == 1
+    msgs[0].delete.assert_awaited_once()
+    msgs[1].delete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_purge_unmanageable_named_channel_raises() -> None:
+    channel = _purge_channel([_message(author_id=1, content="spam", age_days=1)])
+    guild = _purge_guild([channel])
+    channel.permissions_for = MagicMock(
+        return_value=SimpleNamespace(read_message_history=True, manage_messages=False)
+    )
+    channel.mention = "<#1>"
+
+    with pytest.raises(ModerationError, match="Manage Messages"):
+        await purge.purge_messages(guild, "spam", SimpleNamespace(id=42), channel=channel)
+
+
+@pytest.mark.asyncio
+async def test_mod_log_without_target_id_omits_id() -> None:
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    bot = MagicMock()
+    bot.get_channel = MagicMock(return_value=channel)
+    moderator = SimpleNamespace(id=42)
+
+    with patch.object(logging, "settings", SimpleNamespace(MOD_LOG_CHANNEL_ID=123)):
+        await logging.send_mod_log(
+            bot, action="purge", target_label="Everyone", target_id=None,
+            moderator=moderator, reason="r",
+        )
+
+    embed = channel.send.await_args.kwargs["embed"]
+    fields = {field.name: field.value for field in embed.fields}
+    assert fields["Target"] == "Everyone"

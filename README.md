@@ -291,7 +291,7 @@ The Cogs listed in `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py) are
 | `/kick <member> [reason]`        | moderation (admin) | live         |
 | `/ban <member> [reason]`         | moderation (admin) | live         |
 | `/unban <user_id> [reason]`      | moderation (admin) | live         |
-| `/purgeword <member> <word>`     | moderation (admin) | live         |
+| `/purgeword <word> [member] [channel]` | moderation (admin) | live |
 | `/post <image> <channel> [text] [ping_role]` | announce (admin) | live |
 | `/group <player_tag>`            | ranked_tracker     | live         |
 | `/groupextrapolate <player_tag>` | ranked_tracker     | live         |

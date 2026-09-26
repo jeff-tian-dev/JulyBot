@@ -32,7 +32,7 @@ async def send_mod_log(
     *,
     action: Action,
     target_label: str,
-    target_id: int,
+    target_id: int | None,
     moderator: disnake.Member,
     reason: str | None,
 ) -> None:
@@ -50,7 +50,9 @@ async def send_mod_log(
         title=_ACTION_TITLES[action],
         colour=_ACTION_COLOURS[action],
     )
-    embed.add_field(name="Target", value=f"{target_label} (`{target_id}`)", inline=False)
+    # A keyword purge with no member has no single target user to id.
+    target_value = target_label if target_id is None else f"{target_label} (`{target_id}`)"
+    embed.add_field(name="Target", value=target_value, inline=False)
     embed.add_field(name="Moderator", value=f"{moderator} (`{moderator.id}`)", inline=False)
     embed.add_field(name="Reason", value=reason or "—", inline=False)
 

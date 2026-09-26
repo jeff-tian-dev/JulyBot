@@ -409,3 +409,11 @@ When you discover a non-obvious convention, an architectural decision, or a work
 - `/purchases list` shows the Stripe id for Stripe rows and the *method* (italicised) plus amount for manual ones, so the two are distinguishable at a glance.
 - `PAYMENT_METHODS` is a 5-item constant (`PayPal`, `Venmo`, `Wise`, `Cash`, `Other`) rendered as slash-command choices. `agreements.payment_method` is `VARCHAR(20)`, so keep any new method name short.
 - Tests: `tests/test_manual_purchase.py` (13 cases) plus 7 added to `test_agreements.py` — covering the confirm-requires-signature gate, the no-Stripe-ids subscriber write, the restore-class branching, rollback when the message can't be posted, and that Stripe purchases still say "Stripe".
+
+## 2026-09-26 — /purgeword: member is optional, channel filter added
+
+- **Signature is now `/purgeword <word> [member] [channel]`** (was `<member> <word>`). Required options must come first in Discord, so `word` moved to the front. Module function renamed `purge_user_messages(guild, target, word, moderator)` → `purge_messages(guild, word, moderator, *, target=None, channel=None)`.
+- **No `member` = anyone's message containing the word is deleted**, including other admins' and the bot's own. `_purge_channel` takes `target_id: int | None`; `None` skips the author filter. The 500-per-run cap matters more here, since a common word server-wide can match far more than one user's history.
+- **`channel` scans exactly that channel or thread — NOT the threads under a channel.** To purge a thread, name the thread. Deliberately predictable over "clever".
+- **A named channel the bot can't manage raises `ModerationError`** rather than showing as "skipped 1" — the admin asked for that channel specifically, so they need to know why nothing happened. Server-wide scans still count unmanageable channels as skipped.
+- `send_mod_log`'s `target_id` is now `int | None`; `None` renders the Target field as just the label ("Everyone") with no id.

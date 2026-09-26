@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging as _logging
+from typing import Union
 
 import disnake
 from disnake.ext import commands
@@ -103,33 +104,51 @@ class ModerationCommands(commands.Cog):
 
     @commands.slash_command(
         name="purgeword",
-        description="Delete all of a member's messages that contain a given word.",
+        description="Delete messages containing a word, optionally from one member or in one channel.",
         default_member_permissions=ADMIN_PERMS,
     )
     async def purgeword(
         self,
         inter: disnake.ApplicationCommandInteraction,
+        word: str = commands.Param(max_length=100, description="Word or phrase to match (case-insensitive)."),
         # Accept User (not just Member) so resolution never fails on a
         # member-vs-user mismatch or a target who left the guild.
-        member: disnake.User,
-        word: str = commands.Param(max_length=100),
+        member: disnake.User = commands.Param(
+            default=None, description="Only delete this member's messages. Omit for everyone's."
+        ),
+        channel: Union[disnake.TextChannel, disnake.Thread] = commands.Param(
+            default=None, description="Only scan this channel or thread. Omit for the whole server."
+        ),
     ) -> None:
         # A full-server history scan far exceeds the 3s interaction deadline.
         await inter.response.defer(ephemeral=True)
 
         try:
-            result = await purge.purge_user_messages(inter.guild, member, word, inter.author)
+            result = await purge.purge_messages(
+                inter.guild, word, inter.author, target=member, channel=channel
+            )
         except ModerationError as exc:
             await self._respond(inter, str(exc))
             return
         except Exception as exc:  # noqa: BLE001 — surface any failure to the invoker + log
-            logger.exception("purgeword failed for target=%s word=%r", member.id, word)
+            logger.exception(
+                "purgeword failed for target=%s channel=%s word=%r",
+                getattr(member, "id", None),
+                getattr(channel, "id", None),
+                word,
+            )
             await self._respond(inter, f"Purge failed: {type(exc).__name__}: {exc}")
             return
 
+        author_part = f" from **{member}**" if member is not None else ""
+        scope_part = (
+            f"in {channel.mention}"
+            if channel is not None
+            else f"across {result.channels_scanned} channel(s)"
+        )
         summary = (
-            f"Deleted **{result.deleted}** message(s) from **{member}** containing "
-            f"`{word}` across {result.channels_scanned} channel(s)."
+            f"Deleted **{result.deleted}** message(s){author_part} containing "
+            f"`{word}` {scope_part}."
         )
         if result.channels_skipped:
             summary += f" Skipped {result.channels_skipped} channel(s) I can't manage."
@@ -145,10 +164,13 @@ class ModerationCommands(commands.Cog):
         await logging.send_mod_log(
             self.bot,
             action="purge",
-            target_label=str(member),
-            target_id=member.id,
+            target_label=str(member) if member is not None else "Everyone",
+            target_id=member.id if member is not None else None,
             moderator=inter.author,
-            reason=f"Purged {result.deleted} message(s) containing {word!r}",
+            reason=(
+                f"Purged {result.deleted} message(s) containing {word!r} "
+                + (f"in #{channel.name}" if channel is not None else "server-wide")
+            ),
         )
 
     @staticmethod

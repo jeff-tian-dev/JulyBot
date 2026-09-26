@@ -1,7 +1,8 @@
-"""Purge a member's messages containing a given word across a guild.
+"""Purge messages containing a given word, optionally narrowed by author or channel.
 
-Discord exposes no "all messages by user" endpoint, so this walks every
-readable text channel and thread, filters history by author + word, and
+Discord exposes no "all messages by user" (or "search by word") endpoint, so
+this walks every readable text channel and thread -- or just the one channel
+the caller names -- filters history by word (and author, if given), and
 deletes matches. Channels are scanned concurrently (the history read is the
 dominant cost). Messages younger than the bulk-delete cutoff are removed in
 batches; older ones are deleted one at a time.
@@ -73,7 +74,7 @@ def _iter_deletable_channels(guild: disnake.Guild):
 
 async def _purge_channel(
     channel: disnake.abc.Messageable,
-    target_id: int,
+    target_id: int | None,
     word_lower: str,
     result: PurgeResult,
     cutoff: datetime,
@@ -107,7 +108,8 @@ async def _purge_channel(
         if stop_event.is_set():
             break
 
-        if message.author.id != target_id:
+        # No target means "anyone's message" -- the word alone decides.
+        if target_id is not None and message.author.id != target_id:
             continue
         if not _content_matches(message.content, word_lower):
             continue
@@ -141,15 +143,25 @@ async def _purge_channel(
     return False
 
 
-async def purge_user_messages(
+def _can_manage(channel: disnake.abc.GuildChannel | disnake.Thread, me: disnake.Member) -> bool:
+    perms = channel.permissions_for(me)
+    return bool(perms.read_message_history and perms.manage_messages)
+
+
+async def purge_messages(
     guild: disnake.Guild,
-    target: disnake.Member | disnake.User,
     word: str,
     moderator: disnake.Member,
+    *,
+    target: disnake.Member | disnake.User | None = None,
+    channel: disnake.TextChannel | disnake.Thread | None = None,
 ) -> PurgeResult:
-    """Delete every message from ``target`` containing ``word`` (case-insensitive substring).
+    """Delete every message containing ``word`` (case-insensitive substring).
 
-    Scans all text channels and active threads the bot can read + manage.
+    ``target`` limits it to one author; omitted, anyone's matching message is
+    deleted. ``channel`` limits the scan to that one channel or thread (its
+    threads are NOT included -- name a thread directly to purge it); omitted,
+    every text channel and active thread the bot can read + manage is scanned.
     Raises ``ModerationError`` for invalid input.
     """
     word = word.strip()
@@ -161,16 +173,26 @@ async def purge_user_messages(
         raise ModerationError("I'm not in this server.")
 
     word_lower = word.lower()
+    target_id = target.id if target is not None else None
     cutoff = disnake.utils.utcnow() - timedelta(days=BULK_DELETE_MAX_AGE_DAYS)
     result = PurgeResult()
 
-    manageable_channels = list(_iter_deletable_channels(guild))
-    manageable_ids = {c.id for c in manageable_channels}
+    if channel is not None:
+        # An explicitly named channel we can't manage is the invoker's to fix,
+        # not a silent "skipped 1" in the summary.
+        if not _can_manage(channel, me):
+            raise ModerationError(
+                f"I need **Read Message History** and **Manage Messages** in {channel.mention}."
+            )
+        manageable_channels = [channel]
+    else:
+        manageable_channels = list(_iter_deletable_channels(guild))
+        manageable_ids = {c.id for c in manageable_channels}
 
-    # Count channels we cannot manage as skipped (transparency in the summary).
-    for channel in guild.text_channels:
-        if channel.id not in manageable_ids:
-            result.channels_skipped += 1
+        # Count channels we cannot manage as skipped (transparency in the summary).
+        for text_channel in guild.text_channels:
+            if text_channel.id not in manageable_ids:
+                result.channels_skipped += 1
 
     # Channels are scanned in parallel — the history read is the dominant cost,
     # so this is the main speedup. `result` is shared; `stop_event` lets every
@@ -178,33 +200,34 @@ async def purge_user_messages(
     stop_event = asyncio.Event()
     semaphore = asyncio.Semaphore(SCAN_CONCURRENCY) if SCAN_CONCURRENCY else None
 
-    async def scan(channel: disnake.abc.Messageable) -> None:
+    async def scan(scan_channel: disnake.abc.Messageable) -> None:
         if stop_event.is_set():
             return
         try:
             if semaphore is not None:
                 async with semaphore:
-                    await _purge_channel(channel, target.id, word_lower, result, cutoff, stop_event)
+                    await _purge_channel(scan_channel, target_id, word_lower, result, cutoff, stop_event)
             else:
-                await _purge_channel(channel, target.id, word_lower, result, cutoff, stop_event)
+                await _purge_channel(scan_channel, target_id, word_lower, result, cutoff, stop_event)
             result.channels_scanned += 1
         except disnake.Forbidden:
             result.channels_skipped += 1
-            logger.warning("Lost access mid-scan in %s; skipping", channel)
+            logger.warning("Lost access mid-scan in %s; skipping", scan_channel)
         except disnake.HTTPException as exc:
             result.channels_skipped += 1
-            logger.warning("HTTP error scanning %s: %s; skipping", channel, exc)
+            logger.warning("HTTP error scanning %s: %s; skipping", scan_channel, exc)
 
-    await asyncio.gather(*(scan(channel) for channel in manageable_channels))
+    await asyncio.gather(*(scan(c) for c in manageable_channels))
 
     if result.capped:
         logger.info("Hit per-run deletion cap (%d); stopped early", MAX_DELETIONS_PER_RUN)
 
     logger.info(
-        "Purge by %s: word=%r target=%s deleted=%d scanned=%d skipped=%d failed=%d",
+        "Purge by %s: word=%r target=%s channel=%s deleted=%d scanned=%d skipped=%d failed=%d",
         moderator,
         word,
-        target.id,
+        target_id if target_id is not None else "anyone",
+        channel.id if channel is not None else "all",
         result.deleted,
         result.channels_scanned,
         result.channels_skipped,
