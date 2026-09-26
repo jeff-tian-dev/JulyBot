@@ -101,7 +101,7 @@ async def create_subscriber(
 
 
 # Every purchase-log read joins the product for its name, so a listing can say
-# "Base Pack" rather than just a number. LEFT JOIN: tier purchases have none.
+# the product by name rather than just a number. LEFT JOIN: tier purchases have none.
 _LOG_SELECT = """
     SELECT s.*, p.name AS product_name
       FROM subscribers s
@@ -139,7 +139,7 @@ async def list_active_subscribers(pool: asyncpg.Pool, guild_id: int) -> list[asy
     bounds a ONE-TIME purchase, whose status stays `succeeded` forever and so
     would otherwise grant access permanently.
 
-    Product sales are excluded: buying a base pack is not access to anything.
+    Product sales are excluded: a one-time product is not access to anything.
     """
     async with pool.acquire() as conn:
         return await conn.fetch(

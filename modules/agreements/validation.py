@@ -14,7 +14,7 @@ Shapes 1 and 2 are historical but carry real dispute evidence, so none of these
 renderers may assume a field is present.
 
 Shape 3 has a variant: a `/product sell` purchase sets `product_name`. It is a
-one-time product (e.g. a base pack), NOT a month of access, so its copy must
+one-time product (anything an admin defined), NOT a month of access, so its copy must
 never say "one month". `product_name` is read with `.get` because rows and test
 fixtures predating the column don't carry it. See the table comment in
 database/models.py.

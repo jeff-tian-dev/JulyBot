@@ -418,7 +418,7 @@ When you discover a non-obvious convention, an architectural decision, or a work
 - **A named channel the bot can't manage raises `ModerationError`** rather than showing as "skipped 1" — the admin asked for that channel specifically, so they need to know why nothing happened. Server-wide scans still count unmanageable channels as skipped.
 - `send_mod_log`'s `target_id` is now `int | None`; `None` renders the Target field as just the label ("Everyone") with no id.
 
-## 2026-09-26 — /product: admin-managed one-time products (e.g. a base pack)
+## 2026-09-26 — /product: admin-managed one-time products (any name/link an admin defines)
 
 - New `products` table + `modules/subscriptions/products.py` + Cog `product_commands` (`/product add|remove|list|sell`, admin-only via the parent group). A product is a name + Stripe Payment Link (https only; host deliberately not pinned to buy.stripe.com since Stripe allows custom domains) + optional description, per guild.
 - **A sale reuses the tier purchase flow wholesale.** `/subscribe`'s body was extracted into `subscribe_commands.start_purchase(inter, member, *, product=None)`, which both commands call — same `agreements` row, status message, `purchase:*` custom_ids, `PurchaseView`, confirmation, receipt and `subscribers` row. Don't fork a second flow for products.

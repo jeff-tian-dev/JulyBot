@@ -502,7 +502,7 @@ DROP_LEGACY_SUBSCRIPTIONS = """
 DROP TABLE IF EXISTS subscriptions;
 """
 
-# Admin-managed one-time products sold alongside the L1/L2 tiers (e.g. a base pack).
+# Admin-managed one-time products sold alongside the L1/L2 tiers — any name an admin enters.
 # Each is a name plus a Stripe Payment Link, per guild. A sale runs through exactly the
 # same agreements -> subscribers pipeline as a tier purchase; `product_id` on both of
 # those tables is what tells the two apart.

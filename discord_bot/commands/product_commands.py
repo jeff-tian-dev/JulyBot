@@ -5,7 +5,8 @@
     /product list
     /product sell <member> <name>
 
-A product is a name plus a Stripe Payment Link (e.g. a base pack). `sell` runs
+A product is any name plus a Stripe Payment Link — admins define them freely,
+nothing in the code knows about any particular product. `sell` runs
 exactly the same ticket flow as /subscribe — see `start_purchase` in
 subscribe_commands.py — so the sale gets the same status message, admin
 confirmation against Stripe, receipt and entry in /purchases list. It never
@@ -73,7 +74,7 @@ class ProductCommands(commands.Cog):
     async def add(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        name: str = commands.Param(max_length=products.MAX_NAME_LENGTH, description="e.g. Base Pack"),
+        name: str = commands.Param(max_length=products.MAX_NAME_LENGTH, description="Product name buyers will see."),
         payment_link: str = commands.Param(description="The product's Stripe Payment Link (https://…)."),
         description: str = commands.Param(
             default=None,
