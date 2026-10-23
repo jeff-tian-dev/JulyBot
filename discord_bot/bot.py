@@ -12,9 +12,6 @@ import disnake
 from disnake.ext import commands
 
 from config.settings import settings
-from discord_bot.commands.base_post_commands import (
-    register_persistent_views as register_base_post_views,
-)
 from discord_bot.commands.subscribe_commands import (
     register_persistent_views as register_purchase_views,
 )
@@ -62,8 +59,9 @@ def create_bot(pool: asyncpg.Pool) -> commands.InteractionBot:
     )
     bot.pool = pool
 
-    # on_ready fires again on every reconnect; the base-post views only need
-    # restoring once per process.
+    # on_ready fires again on every reconnect; the purchase views only need
+    # restoring once per process. (Base post buttons need no restoring — they
+    # are routed by a stateless listener in base_post_commands.)
     views_restored = False
 
     @bot.event
@@ -72,7 +70,6 @@ def create_bot(pool: asyncpg.Pool) -> commands.InteractionBot:
         logger.info("Discord bot ready as %s (id=%s)", bot.user, getattr(bot.user, "id", None))
         if not views_restored:
             views_restored = True
-            await register_base_post_views(bot)
             await register_purchase_views(bot)
 
     for module in COG_MODULES:

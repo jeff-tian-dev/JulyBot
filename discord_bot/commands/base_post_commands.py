@@ -1,9 +1,19 @@
 """/postbase — post a CoC base layout whose link is behind a Fetch Link button.
 
 The layout link is never rendered in the message; members reveal it (ephemerally)
-by pressing Fetch Link, and every distinct presser is counted. The buttons are a
-*persistent* view: custom_ids carry the base_posts row id and the view has no
-timeout, so they keep working after a bot restart (see register_persistent_views).
+by pressing Fetch Link, and every distinct presser is counted.
+
+**The post is a components-v2 message**: one pink-accented container holding the
+title, a separator, the CC + notes, the screenshot as a full-width media
+gallery, and the buttons. It replaced an embed because Discord renders embed
+images small and offers no way to enlarge them; a media gallery is full width.
+
+**Buttons are handled by one stateless listener** (`on_button_click`), routed
+purely by custom_id (`basepost:<action>:<base_post_id>`), not by a persistent
+View. That works for every base post ever made — components-v2, the brief
+embed version, and the original plain messages — and needs nothing restored on
+startup. Do not ALSO register a persistent View for these ids: both would
+answer the same click and the second response would fail.
 """
 from __future__ import annotations
 
@@ -15,12 +25,13 @@ from disnake.ext import commands
 
 from modules.announce import base_storage
 from modules.announce.base_poster import (
+    BASE_POST_COLOUR,
     MAX_CC_LENGTH,
     MAX_DESCRIPTION_LENGTH,
     MAX_LINK_LENGTH,
     MAX_TITLE_LENGTH,
     PostError,
-    build_base_embed,
+    build_post_sections,
     embed_from_record,
     downloaders_embed,
     normalize_text,
@@ -35,6 +46,9 @@ logger = _logging.getLogger(__name__)
 NO_PINGS = disnake.AllowedMentions.none()
 # Prefix for every custom_id this feature owns, so the ids stay unambiguous.
 CUSTOM_ID_PREFIX = "basepost"
+ACTION_FETCH = "fetch"
+ACTION_EDIT = "edit"
+ACTION_DOWNLOADS = "downloads"
 
 
 def _is_moderator(user: disnake.abc.User) -> bool:
@@ -61,19 +75,152 @@ def _can_view_stats(user: disnake.abc.User, record) -> bool:
     return _is_moderator(user)
 
 
+def parse_custom_id(custom_id: str | None) -> tuple[str, int] | None:
+    """(action, base_post_id) for one of our buttons, or None if it isn't ours.
+
+    The id always comes from the clicked button — the same rule every
+    persistent button in this repo follows, since nothing else reliably says
+    which post was clicked.
+    """
+    parts = (custom_id or "").split(":")
+    if len(parts) != 3 or parts[0] != CUSTOM_ID_PREFIX:
+        return None
+    try:
+        return parts[1], int(parts[2])
+    except ValueError:
+        return None
 
 
-def _image_filename(record, inter: disnake.ModalInteraction) -> str | None:
-    """The attached screenshot's filename, for the embed's attachment:// reference.
+def downloads_label(count: int, *, stats_admin_only: bool) -> str:
+    """Button text. Every viewer shares one component payload, so when stats are
+    admin-only the number is omitted entirely — a label like "24 Downloads"
+    would leak the tally to exactly the people it's hidden from.
+    """
+    return "Downloads" if stats_admin_only else f"{count} Downloads"
+
+
+def post_buttons(
+    base_post_id: int, *, download_count: int, stats_admin_only: bool
+) -> disnake.ui.ActionRow:
+    """Fetch Link / Edit / N Downloads, as one row. Handled by the listener."""
+    return disnake.ui.ActionRow(
+        disnake.ui.Button(
+            label="Fetch Link",
+            emoji="🔗",
+            style=disnake.ButtonStyle.secondary,
+            custom_id=f"{CUSTOM_ID_PREFIX}:{ACTION_FETCH}:{base_post_id}",
+        ),
+        disnake.ui.Button(
+            label="Edit",
+            style=disnake.ButtonStyle.primary,
+            custom_id=f"{CUSTOM_ID_PREFIX}:{ACTION_EDIT}:{base_post_id}",
+        ),
+        disnake.ui.Button(
+            label=downloads_label(download_count, stats_admin_only=stats_admin_only),
+            style=disnake.ButtonStyle.primary,
+            custom_id=f"{CUSTOM_ID_PREFIX}:{ACTION_DOWNLOADS}:{base_post_id}",
+        ),
+    )
+
+
+def build_post_components(
+    record, *, download_count: int, image_filename: str | None
+) -> list[disnake.ui.Container]:
+    """The whole base post: one pink-accented container.
+
+    The screenshot is `attachment://<image_filename>` on send AND on edit. On
+    edit the upload is kept by not passing `attachments`, and the reference
+    resolves against it. Never swap in the CDN URL: it's signed and expires, so
+    the picture would vanish later.
+    """
+    heading, body = build_post_sections(
+        title=record["title"], cc=record["cc"], description=record["description"]
+    )
+    children: list = []
+    if heading:
+        children.append(disnake.ui.TextDisplay(heading))
+        children.append(disnake.ui.Separator())
+    if body:
+        children.append(disnake.ui.TextDisplay(body))
+    if image_filename:
+        children.append(
+            disnake.ui.MediaGallery(disnake.MediaGalleryItem(f"attachment://{image_filename}"))
+        )
+    children.append(
+        post_buttons(
+            record["id"],
+            download_count=download_count,
+            stats_admin_only=bool(record["stats_admin_only"]),
+        )
+    )
+    return [disnake.ui.Container(*children, accent_colour=disnake.Colour(BASE_POST_COLOUR))]
+
+
+def _is_components_v2(message: disnake.Message | None) -> bool:
+    flags = getattr(message, "flags", None)
+    return bool(flags and flags.is_components_v2)
+
+
+def _image_filename(record, message: disnake.Message | None) -> str | None:
+    """The attached screenshot's filename, for the attachment:// reference.
 
     Prefer the live message's attachment (it is what the reference must match),
     falling back to the stored name.
     """
-    message = getattr(inter, "message", None)
     attachments = getattr(message, "attachments", None) or []
     if attachments:
         return attachments[0].filename
     return record["image_filename"]
+
+
+def render_kwargs(record, *, message: disnake.Message | None, download_count: int) -> dict:
+    """Edit kwargs that re-render a base post in whichever layout it already has.
+
+    A message can't be switched into the components layout after it was sent,
+    so posts made before it keep their embed: `content=None` (clearing the
+    text of the original plain-message posts), the embed, and a top-level
+    button row. Components-v2 posts are rebuilt whole.
+    """
+    filename = _image_filename(record, message)
+    if _is_components_v2(message):
+        return {
+            "components": build_post_components(
+                record, download_count=download_count, image_filename=filename
+            )
+        }
+    return {
+        "content": None,
+        "embed": embed_from_record(record, image_filename=filename),
+        "components": [
+            post_buttons(
+                record["id"],
+                download_count=download_count,
+                stats_admin_only=bool(record["stats_admin_only"]),
+            )
+        ],
+    }
+
+
+def refresh_kwargs(record, *, message: disnake.Message | None, download_count: int) -> dict:
+    """Edit kwargs that update ONLY the download count, leaving the post's look alone.
+
+    Unlike render_kwargs (used by Edit), this must not restyle an old post just
+    because someone fetched its link — so a pre-components post only has its
+    button row swapped. A components-v2 post has no separate button row (the
+    buttons live inside the container), so it is rebuilt whole.
+    """
+    if _is_components_v2(message):
+        return render_kwargs(record, message=message, download_count=download_count)
+    return {
+        "components": [
+            post_buttons(
+                record["id"],
+                download_count=download_count,
+                stats_admin_only=bool(record["stats_admin_only"]),
+            )
+        ]
+    }
+
 
 class InfoModal(disnake.ui.Modal):
     """A popup panel that displays text without any editable field.
@@ -100,7 +247,7 @@ class InfoModal(disnake.ui.Modal):
 
 
 class BaseEditModal(disnake.ui.Modal):
-    """Pre-filled modal for editing a base post's text fields and image URL."""
+    """Pre-filled modal for editing a base post's text fields and link."""
 
     def __init__(self, record) -> None:
         self.base_post_id = record["id"]
@@ -158,6 +305,11 @@ class BaseEditModal(disnake.ui.Modal):
                 cc=values.get("cc"),
                 description=values.get("description"),
             )
+            # Check the combined length BEFORE saving, so an over-long edit is
+            # rejected rather than stored and then impossible to render.
+            build_post_sections(
+                title=cleaned["title"], cc=cleaned["cc"], description=cleaned["description"]
+            )
         except PostError as exc:
             await inter.response.send_message(str(exc), ephemeral=True)
             return
@@ -175,23 +327,13 @@ class BaseEditModal(disnake.ui.Modal):
             return
 
         count = await base_storage.count_downloads(pool, self.base_post_id)
-        view = BasePostView(
-            self.base_post_id, count, stats_admin_only=bool(updated["stats_admin_only"])
-        )
-
         try:
-            # The attachment is left alone (not passing `attachments` keeps it)
-            # and the embed points back at it via attachment://, so the picture
-            # stays inside the embed. Never point it at the CDN URL instead —
-            # that is what once rendered the picture twice. content=None clears
-            # the text of posts made back when base posts were plain messages,
-            # converting them to the embed layout on their first edit.
+            # Attachments are not passed, so the upload is kept and the
+            # attachment:// reference keeps pointing at it.
             await inter.response.edit_message(
-                content=None,
-                embed=embed_from_record(updated, image_filename=_image_filename(updated, inter)),
-                view=view,
+                **render_kwargs(updated, message=inter.message, download_count=count)
             )
-        except disnake.HTTPException:
+        except (disnake.HTTPException, PostError):
             logger.exception("Failed to apply base post edit id=%s", self.base_post_id)
             # edit_message may have already consumed the response slot, in which
             # case send_message would raise InteractionResponded and hide the
@@ -207,153 +349,103 @@ class BaseEditModal(disnake.ui.Modal):
                 logger.exception("Also failed to report the edit failure")
 
 
-class BasePostView(disnake.ui.View):
-    """The three buttons under a base post: Fetch Link, Edit, N Downloads.
-
-    Persistent (timeout=None) with deterministic custom_ids, so a restarted bot
-    can re-attach handlers to messages it posted in a previous run.
-    """
-
-    def __init__(
-        self,
-        base_post_id: int,
-        download_count: int = 0,
-        stats_admin_only: bool = False,
-    ) -> None:
-        super().__init__(timeout=None)
-        self.base_post_id = base_post_id
-        self.stats_admin_only = stats_admin_only
-
-        fetch = disnake.ui.Button(
-            label="Fetch Link",
-            emoji="🔗",
-            style=disnake.ButtonStyle.secondary,
-            custom_id=f"{CUSTOM_ID_PREFIX}:fetch:{base_post_id}",
-        )
-        fetch.callback = self._on_fetch
-        self.add_item(fetch)
-
-        edit = disnake.ui.Button(
-            label="Edit",
-            style=disnake.ButtonStyle.primary,
-            custom_id=f"{CUSTOM_ID_PREFIX}:edit:{base_post_id}",
-        )
-        edit.callback = self._on_edit
-        self.add_item(edit)
-
-        self.downloads_button = disnake.ui.Button(
-            label=self._downloads_label(download_count),
-            style=disnake.ButtonStyle.primary,
-            custom_id=f"{CUSTOM_ID_PREFIX}:downloads:{base_post_id}",
-        )
-        self.downloads_button.callback = self._on_downloads
-        self.add_item(self.downloads_button)
-
-    def _downloads_label(self, count: int) -> str:
-        """Button text. Every viewer shares one component payload, so when stats
-        are admin-only the number is omitted entirely — a label like "24
-        Downloads" would leak the tally to exactly the people it's hidden from.
-        """
-        return "Downloads" if self.stats_admin_only else f"{count} Downloads"
-
-    def _id_from(self, inter: disnake.MessageInteraction) -> int:
-        """The base post id encoded in the clicked button's custom_id.
-
-        A persistent view is matched by custom_id, but the callback runs on
-        whichever registered instance disnake dispatches to — its
-        `self.base_post_id` is NOT necessarily the clicked post's. Always take
-        the id from the interaction, or clicks land on the wrong row.
-        """
-        custom_id = (inter.data.custom_id or "") if inter.data else ""
-        try:
-            return int(custom_id.rsplit(":", 1)[1])
-        except (IndexError, ValueError):
-            logger.warning("Unparsable base post custom_id %r", custom_id)
-            return self.base_post_id
-
-    async def _load(self, inter: disnake.MessageInteraction):
-        record = await base_storage.get_base_post(inter.bot.pool, self._id_from(inter))
-        if record is None:
-            await inter.response.send_message(
-                "That base post's data is gone — it may have been deleted.", ephemeral=True
-            )
-        return record
-
-    async def _on_fetch(self, inter: disnake.MessageInteraction) -> None:
-        """Reveal the link to the presser only, and count them once."""
-        record = await self._load(inter)
-        if record is None:
-            return
-
-        base_post_id = self._id_from(inter)
-        count = await base_storage.record_download(
-            inter.bot.pool, base_post_id, inter.author.id
-        )
-        # A popup panel built from a static TextDisplay, so nothing is editable.
-        # A modal must be the FIRST response to an interaction, so it's sent
-        # before the counter refresh below (which edits the message, not the
-        # interaction, and so doesn't consume the response slot).
-        await inter.response.send_modal(
-            InfoModal(
-                title="Copy Layout",
-                body=f"Click the link below to copy the layout:\n\n{record['link']}",
-                custom_id=f"{CUSTOM_ID_PREFIX}:linkmodal:{base_post_id}",
-            )
-        )
-
-        # Keep the view in step with the stored flag; a restored view can be
-        # stale if the post's visibility changed after this process started.
-        self.stats_admin_only = bool(record["stats_admin_only"])
-
-        # Refresh the counter on the public message; a failure here is cosmetic.
-        # When stats are admin-only the label carries no number, so there's
-        # nothing to refresh and editing would only burn an API call.
-        new_label = self._downloads_label(count)
-        if new_label != self.downloads_button.label:
-            self.downloads_button.label = new_label
-            try:
-                await inter.message.edit(view=self)
-            except disnake.HTTPException:
-                logger.warning(
-                    "Couldn't refresh download count on base post id=%s", base_post_id
-                )
-
-    async def _on_edit(self, inter: disnake.MessageInteraction) -> None:
-        record = await self._load(inter)
-        if record is None:
-            return
-        if not _can_edit(inter.author, record):
-            await inter.response.send_message(
-                "Only the person who posted this base (or a moderator) can edit it.",
-                ephemeral=True,
-            )
-            return
-        await inter.response.send_modal(BaseEditModal(record))
-
-    async def _on_downloads(self, inter: disnake.MessageInteraction) -> None:
-        """Show the presser a private list of everyone who fetched the link.
-
-        Gated on the post's stats_admin_only flag, read fresh from the DB so a
-        stale restored view can't leak the tally.
-        """
-        record = await self._load(inter)
-        if record is None:
-            return
-        if not _can_view_stats(inter.author, record):
-            await inter.response.send_message(
-                "Only moderators can view download stats for this base.", ephemeral=True
-            )
-            return
-
-        rows = await base_storage.list_downloaders(inter.bot.pool, self._id_from(inter))
+async def _load(inter: disnake.MessageInteraction, base_post_id: int):
+    record = await base_storage.get_base_post(inter.bot.pool, base_post_id)
+    if record is None:
         await inter.response.send_message(
-            embed=downloaders_embed(rows), ephemeral=True, allowed_mentions=NO_PINGS
+            "That base post's data is gone — it may have been deleted.", ephemeral=True
         )
+    return record
+
+
+async def on_fetch(inter: disnake.MessageInteraction, base_post_id: int) -> None:
+    """Reveal the link to the presser only, and count them once."""
+    record = await _load(inter, base_post_id)
+    if record is None:
+        return
+
+    count = await base_storage.record_download(inter.bot.pool, base_post_id, inter.author.id)
+    # A popup panel built from a static TextDisplay, so nothing is editable.
+    # A modal must be the FIRST response to an interaction, so it's sent before
+    # the counter refresh below (which edits the message, not the interaction,
+    # and so doesn't consume the response slot).
+    await inter.response.send_modal(
+        InfoModal(
+            title="Copy Layout",
+            body=f"Click the link below to copy the layout:\n\n{record['link']}",
+            custom_id=f"{CUSTOM_ID_PREFIX}:linkmodal:{base_post_id}",
+        )
+    )
+
+    # When stats are admin-only the label carries no number, so there's nothing
+    # to refresh and editing would only burn an API call.
+    if record["stats_admin_only"]:
+        return
+    try:
+        await inter.message.edit(
+            **refresh_kwargs(record, message=inter.message, download_count=count)
+        )
+    except (disnake.HTTPException, PostError):
+        # Cosmetic — the fetch itself already succeeded.
+        logger.warning("Couldn't refresh download count on base post id=%s", base_post_id)
+
+
+async def on_edit(inter: disnake.MessageInteraction, base_post_id: int) -> None:
+    record = await _load(inter, base_post_id)
+    if record is None:
+        return
+    if not _can_edit(inter.author, record):
+        await inter.response.send_message(
+            "Only the person who posted this base (or a moderator) can edit it.",
+            ephemeral=True,
+        )
+        return
+    await inter.response.send_modal(BaseEditModal(record))
+
+
+async def on_downloads(inter: disnake.MessageInteraction, base_post_id: int) -> None:
+    """Show the presser a private list of everyone who fetched the link.
+
+    Gated on the post's stats_admin_only flag, read fresh from the DB.
+    """
+    record = await _load(inter, base_post_id)
+    if record is None:
+        return
+    if not _can_view_stats(inter.author, record):
+        await inter.response.send_message(
+            "Only moderators can view download stats for this base.", ephemeral=True
+        )
+        return
+
+    rows = await base_storage.list_downloaders(inter.bot.pool, base_post_id)
+    await inter.response.send_message(
+        embed=downloaders_embed(rows), ephemeral=True, allowed_mentions=NO_PINGS
+    )
+
+
+BUTTON_HANDLERS = {
+    ACTION_FETCH: on_fetch,
+    ACTION_EDIT: on_edit,
+    ACTION_DOWNLOADS: on_downloads,
+}
 
 
 class BasePostCommands(commands.Cog):
     def __init__(self, bot: commands.InteractionBot) -> None:
         self.bot = bot
+
+    @commands.Cog.listener("on_button_click")
+    async def on_button_click(self, inter: disnake.MessageInteraction) -> None:
+        """Route every base post button, for posts from any process or layout."""
+        parsed = parse_custom_id(inter.data.custom_id if inter.data else None)
+        if parsed is None:
+            return  # not one of ours
+        action, base_post_id = parsed
+        handler = BUTTON_HANDLERS.get(action)
+        if handler is None:
+            logger.warning("Unknown base post button action %r", action)
+            return
+        await handler(inter, base_post_id)
 
     @commands.slash_command(
         name="postbase",
@@ -397,6 +489,9 @@ class BasePostCommands(commands.Cog):
             )
             validate_image(image)
             validate_target(target, inter.guild)
+            build_post_sections(
+                title=cleaned["title"], cc=cleaned["cc"], description=cleaned["description"]
+            )
         except PostError as exc:
             await self._respond(inter, str(exc))
             return
@@ -406,6 +501,7 @@ class BasePostCommands(commands.Cog):
         except disnake.HTTPException as exc:
             await self._respond(inter, f"Couldn't download the uploaded image: {exc}")
             return
+        # The attachment:// reference must match File.filename exactly.
         file.filename = safe_filename(file.filename)
 
         record = await base_storage.create_base_post(
@@ -421,26 +517,13 @@ class BasePostCommands(commands.Cog):
             stats_admin_only=admin_only_stats,
         )
 
-        # A pink-edged embed with the screenshot inside it. Trade-off, chosen
-        # deliberately: an embed image renders narrower than a bare attachment.
-        try:
-            embed = build_base_embed(
-                title=cleaned["title"],
-                cc=cleaned["cc"],
-                description=cleaned["description"],
-                image_filename=file.filename,
-            )
-        except PostError as exc:
-            await base_storage.delete_base_post(self.bot.pool, record["id"])
-            await self._respond(inter, str(exc))
-            return
-        view = BasePostView(
-            record["id"], download_count=0, stats_admin_only=admin_only_stats
+        components = build_post_components(
+            record, download_count=0, image_filename=file.filename
         )
 
         try:
             message = await target.send(
-                embed=embed, file=file, view=view, allowed_mentions=NO_PINGS
+                components=components, file=file, allowed_mentions=NO_PINGS
             )
         except disnake.HTTPException as exc:
             # Roll back so no orphan row is left pointing at a message that
@@ -456,9 +539,8 @@ class BasePostCommands(commands.Cog):
 
         await base_storage.attach_message(self.bot.pool, record["id"], message.id)
 
-        # Record where Discord is hosting the upload. Editing a message keeps
-        # its attachments as long as they aren't cleared, so this is kept for
-        # reference/debugging rather than for re-rendering.
+        # Record where Discord is hosting the upload — for reference/debugging
+        # only. Rendering always uses attachment://, never this expiring URL.
         if message.attachments:
             await base_storage.update_base_post(
                 self.bot.pool, record["id"], image_url=message.attachments[0].url
@@ -478,30 +560,6 @@ class BasePostCommands(commands.Cog):
                 )
         except disnake.HTTPException:
             logger.exception("Failed to send /postbase response")
-
-
-async def register_persistent_views(bot: commands.InteractionBot) -> None:
-    """Re-attach button handlers to base posts from previous bot runs.
-
-    Called once after login. Without this, buttons on old messages do nothing
-    ("This interaction failed") because the in-memory View is gone.
-    """
-    try:
-        rows = await base_storage.list_views_to_restore(bot.pool)
-    except Exception:  # noqa: BLE001 — never block startup on this
-        logger.exception("Couldn't load base posts to restore views")
-        return
-
-    for row in rows:
-        bot.add_view(
-            BasePostView(
-                row["id"],
-                int(row["download_count"]),
-                stats_admin_only=bool(row["stats_admin_only"]),
-            )
-        )
-    if rows:
-        logger.info("Restored %d base post view(s)", len(rows))
 
 
 def setup(bot: commands.InteractionBot) -> None:

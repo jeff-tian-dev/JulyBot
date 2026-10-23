@@ -34,9 +34,13 @@ DIVIDER = "------------------------"
 # The only section heading. The description is rendered bare — a poster who
 # wants a "Notes:" label types it themselves as part of the description.
 CC_HEADING = "**CC:**"
-# Discord limits. The post is an embed: the title has its own 256-char field and
-# CC + description share the 4096-char embed description.
+# Discord limits. Current posts use the components layout (see
+# build_post_sections); posts made as embeds still re-render through the embed
+# builders on edit, where CC + description share the 4096-char description.
 MAX_EMBED_DESCRIPTION_LENGTH = 4096
+# Discord's cap on the combined text of all text displays in one components-v2
+# message (the layout current base posts use).
+MAX_COMPONENTS_TEXT_LENGTH = 4000
 MAX_TITLE_LENGTH = 256
 # Leaves room for the title, CC, divider, and the blank lines between them.
 MAX_DESCRIPTION_LENGTH = 1200
@@ -176,6 +180,44 @@ def build_base_embed(
     return embed
 
 
+def build_post_sections(
+    *,
+    title: str | None,
+    cc: str | None,
+    description: str | None,
+) -> tuple[str | None, str | None]:
+    """The text of a base post in the components layout: (heading, body).
+
+    Current base posts are a Discord "components v2" message — a pink-accented
+    container holding a heading, a separator, this body, the screenshot as a
+    full-width media gallery, and the buttons. That layout exists because an
+    embed image is rendered small; a media gallery is not.
+
+    The heading is the title as a `##` markdown heading (text displays render
+    markdown headings, unlike embed descriptions), or None. The body is the CC
+    block then the notes, or None if both are blank. No DIVIDER: the container
+    draws a real separator line instead.
+
+    Raises PostError if the combined text exceeds Discord's per-message limit
+    for components text (reachable via the edit modal, which takes raw text).
+    """
+    heading = f"## {title}" if title else None
+    parts: list[str] = []
+    if cc:
+        parts.append(f"{CC_HEADING}\n{cc}")
+    if description:
+        parts.append(description)
+    body = "\n\n".join(parts) or None
+
+    total = len(heading or "") + len(body or "")
+    if total > MAX_COMPONENTS_TEXT_LENGTH:
+        raise PostError(
+            "The title, CC, and description are too long together "
+            f"({total} characters — the limit is {MAX_COMPONENTS_TEXT_LENGTH})."
+        )
+    return heading, body
+
+
 def embed_from_record(record, *, image_filename: str | None) -> disnake.Embed:
     """Rebuild a stored base post's embed (used after an edit).
 
@@ -241,11 +283,13 @@ __all__ = [
     "MAX_CC_LENGTH",
     "MAX_DESCRIPTION_LENGTH",
     "MAX_LINK_LENGTH",
+    "MAX_COMPONENTS_TEXT_LENGTH",
     "MAX_EMBED_DESCRIPTION_LENGTH",
     "MAX_TITLE_LENGTH",
     "PostError",
     "build_base_body",
     "build_base_embed",
+    "build_post_sections",
     "embed_from_record",
     "downloaders_embed",
     "normalize_text",

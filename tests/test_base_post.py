@@ -149,70 +149,6 @@ def test_embed_from_record_round_trips() -> None:
     assert embed.image.url == "attachment://base.png"
 
 
-def _edit_record(**overrides):
-    record = {
-        "id": 5,
-        "title": "Tap 6.0",
-        "cc": "x2 HH",
-        "description": "notes",
-        "link": "https://link.clashofclans.com/en?action=OpenLayout&id=x",
-        "image_filename": "stored.png",
-        "image_url": "https://cdn.discordapp.com/attachments/1/2/stored.png",
-        "stats_admin_only": False,
-    }
-    record.update(overrides)
-    return record
-
-
-def _modal_inter(*, attachments):
-    inter = MagicMock()
-    inter.text_values = {"title": "Tap 6.1", "cc": "x2 HH", "description": "new notes", "link": ""}
-    inter.bot.pool = MagicMock()
-    inter.message.attachments = attachments
-    inter.response.edit_message = AsyncMock()
-    inter.response.send_message = AsyncMock()
-    return inter
-
-
-@pytest.mark.asyncio
-async def test_edit_rebuilds_the_embed_against_the_live_attachment() -> None:
-    from discord_bot.commands import base_post_commands
-
-    attachment = MagicMock()
-    attachment.filename = "live.png"
-    inter = _modal_inter(attachments=[attachment])
-    updated = _edit_record(title="Tap 6.1", description="new notes")
-
-    with patch.object(base_post_commands.base_storage, "update_base_post", new=AsyncMock(return_value=updated)), \
-         patch.object(base_post_commands.base_storage, "count_downloads", new=AsyncMock(return_value=3)):
-        modal = base_post_commands.BaseEditModal(_edit_record())
-        await modal.callback(inter)
-
-    kwargs = inter.response.edit_message.await_args.kwargs
-    # Old plain-message posts have their text cleared so they become embeds.
-    assert kwargs["content"] is None
-    embed = kwargs["embed"]
-    assert embed.title == "Tap 6.1"
-    assert embed.image.url == "attachment://live.png"
-    assert "cdn.discordapp.com" not in (embed.image.url or "")
-    # Attachments are not touched, so the upload survives the edit.
-    assert "attachments" not in kwargs and "file" not in kwargs
-
-
-@pytest.mark.asyncio
-async def test_edit_falls_back_to_the_stored_filename() -> None:
-    from discord_bot.commands import base_post_commands
-
-    inter = _modal_inter(attachments=[])
-
-    with patch.object(base_post_commands.base_storage, "update_base_post", new=AsyncMock(return_value=_edit_record())), \
-         patch.object(base_post_commands.base_storage, "count_downloads", new=AsyncMock(return_value=0)):
-        await base_post_commands.BaseEditModal(_edit_record()).callback(inter)
-
-    embed = inter.response.edit_message.await_args.kwargs["embed"]
-    assert embed.image.url == "attachment://stored.png"
-
-
 # --- image validation -------------------------------------------------------
 
 
@@ -273,41 +209,6 @@ def test_stats_visible_to_moderators(perm: str) -> None:
 
     mod = _user(99, **{perm if perm == "admin" else "manage_messages": True})
     assert bp._can_view_stats(mod, _record(stats_admin_only=True)) is True
-
-
-# --- persistent-view id dispatch --------------------------------------------
-
-
-def test_id_comes_from_the_clicked_button_not_the_instance() -> None:
-    """Regression: a persistent view is matched by custom_id, but the callback
-    runs on whichever registered instance disnake dispatches to. Reading
-    self.base_post_id recorded the fetch against the wrong post, so the
-    downloader list always came back empty."""
-    import asyncio
-
-    from discord_bot.commands import base_post_commands as bp
-
-    async def check():
-        view = bp.BasePostView(1, 0)  # instance registered for post 1...
-        inter = MagicMock()
-        inter.data.custom_id = "basepost:fetch:57"  # ...but post 57 was clicked
-        assert view._id_from(inter) == 57
-
-    asyncio.run(check())
-
-
-def test_id_falls_back_when_custom_id_is_unparsable() -> None:
-    import asyncio
-
-    from discord_bot.commands import base_post_commands as bp
-
-    async def check():
-        view = bp.BasePostView(9, 0)
-        inter = MagicMock()
-        inter.data.custom_id = "garbage"
-        assert view._id_from(inter) == 9
-
-    asyncio.run(check())
 
 
 # --- fetch / stats panels ---------------------------------------------------
