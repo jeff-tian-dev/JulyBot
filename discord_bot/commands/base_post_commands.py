@@ -20,8 +20,8 @@ from modules.announce.base_poster import (
     MAX_LINK_LENGTH,
     MAX_TITLE_LENGTH,
     PostError,
-    build_base_body,
-    content_from_record,
+    build_base_embed,
+    embed_from_record,
     downloaders_embed,
     normalize_text,
     validate_base_input,
@@ -60,6 +60,20 @@ def _can_view_stats(user: disnake.abc.User, record) -> bool:
         return True
     return _is_moderator(user)
 
+
+
+
+def _image_filename(record, inter: disnake.ModalInteraction) -> str | None:
+    """The attached screenshot's filename, for the embed's attachment:// reference.
+
+    Prefer the live message's attachment (it is what the reference must match),
+    falling back to the stored name.
+    """
+    message = getattr(inter, "message", None)
+    attachments = getattr(message, "attachments", None) or []
+    if attachments:
+        return attachments[0].filename
+    return record["image_filename"]
 
 class InfoModal(disnake.ui.Modal):
     """A popup panel that displays text without any editable field.
@@ -166,11 +180,16 @@ class BaseEditModal(disnake.ui.Modal):
         )
 
         try:
-            # Only the text changes. The original attachment is left alone —
-            # editing an embed alongside a live attachment is what made the
-            # picture appear twice.
+            # The attachment is left alone (not passing `attachments` keeps it)
+            # and the embed points back at it via attachment://, so the picture
+            # stays inside the embed. Never point it at the CDN URL instead —
+            # that is what once rendered the picture twice. content=None clears
+            # the text of posts made back when base posts were plain messages,
+            # converting them to the embed layout on their first edit.
             await inter.response.edit_message(
-                content=content_from_record(updated), view=view
+                content=None,
+                embed=embed_from_record(updated, image_filename=_image_filename(updated, inter)),
+                view=view,
             )
         except disnake.HTTPException:
             logger.exception("Failed to apply base post edit id=%s", self.base_post_id)
@@ -402,20 +421,26 @@ class BasePostCommands(commands.Cog):
             stats_admin_only=admin_only_stats,
         )
 
-        # A bare attachment, not an embed image: attachments render at full
-        # message width, where an embed caps the picture much narrower.
-        content = build_base_body(
-            title=cleaned["title"],
-            cc=cleaned["cc"],
-            description=cleaned["description"],
-        )
+        # A pink-edged embed with the screenshot inside it. Trade-off, chosen
+        # deliberately: an embed image renders narrower than a bare attachment.
+        try:
+            embed = build_base_embed(
+                title=cleaned["title"],
+                cc=cleaned["cc"],
+                description=cleaned["description"],
+                image_filename=file.filename,
+            )
+        except PostError as exc:
+            await base_storage.delete_base_post(self.bot.pool, record["id"])
+            await self._respond(inter, str(exc))
+            return
         view = BasePostView(
             record["id"], download_count=0, stats_admin_only=admin_only_stats
         )
 
         try:
             message = await target.send(
-                content=content, file=file, view=view, allowed_mentions=NO_PINGS
+                embed=embed, file=file, view=view, allowed_mentions=NO_PINGS
             )
         except disnake.HTTPException as exc:
             # Roll back so no orphan row is left pointing at a message that

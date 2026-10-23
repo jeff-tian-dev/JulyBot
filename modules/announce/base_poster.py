@@ -1,6 +1,6 @@
 """Render and validate /postbase content.
 
-Pool-free and Discord-send-free: this builds the embed and validates user input,
+Pool-free and Discord-send-free: this builds the post's embed and validates user input,
 so it's unit-testable without a bot or a database. Persistence lives in
 base_storage.py; the interactive buttons live in the Cog.
 """
@@ -23,8 +23,10 @@ from modules.announce.poster import (
 
 logger = logging.getLogger(__name__)
 
-# Embed accent for base posts — CoC gold, distinct from /post's pink.
+# Embed accent for the downloader panel — CoC gold.
 BASE_EMBED_COLOUR = 0xE8B923
+# The pink bar down the left of a base post itself (same pink as /post).
+BASE_POST_COLOUR = 0xEC4899
 # A literal run of dashes. Markdown `---` does NOT become a horizontal rule
 # inside an embed description — Discord renders it as three bare dashes, which
 # looks broken. Keep the long literal run; it reads as a deliberate separator.
@@ -32,10 +34,8 @@ DIVIDER = "------------------------"
 # The only section heading. The description is rendered bare — a poster who
 # wants a "Notes:" label types it themselves as part of the description.
 CC_HEADING = "**CC:**"
-# Discord limits. The post is a plain message + attachment (attachments render
-# wider than embed images), so the whole body shares the 2000-char message
-# budget rather than an embed's 4096.
-MAX_MESSAGE_LENGTH = 2000
+# Discord limits. The post is an embed: the title has its own 256-char field and
+# CC + description share the 4096-char embed description.
 MAX_EMBED_DESCRIPTION_LENGTH = 4096
 MAX_TITLE_LENGTH = 256
 # Leaves room for the title, CC, divider, and the blank lines between them.
@@ -122,43 +122,71 @@ def validate_image(attachment: disnake.Attachment) -> None:
 
 def build_base_body(
     *,
-    title: str | None = None,
     cc: str | None,
     description: str | None,
 ) -> str:
-    """Compose the whole post body: title, a rule, the CC block, then the notes.
+    """Compose the embed description: a rule, the CC block, then the notes.
 
-    The title is a `##` markdown heading, which renders larger than an embed's
-    title field. Any section the poster left blank is skipped entirely, and the
-    description gets no heading of its own (a "Notes:" label is the poster's to
-    type).
+    The title is NOT part of this — it goes in the embed's own title field.
+    Any section the poster left blank is skipped entirely, and the description
+    gets no heading of its own (a "Notes:" label is the poster's to type).
     """
-    parts: list[str] = []
-    if title:
-        parts.append(f"## {title}")
-    parts.append(DIVIDER)
+    parts: list[str] = [DIVIDER]
     if cc:
         parts.append(f"{CC_HEADING}\n{cc}")
     if description:
         parts.append(description)
 
     body = "\n\n".join(parts)
-    if len(body) > MAX_MESSAGE_LENGTH:
-        # The post is a plain message + attachment (an attachment renders wider
-        # than an embed image), so the whole body shares one 2000-char budget.
+    if len(body) > MAX_EMBED_DESCRIPTION_LENGTH:
+        # Each field is individually capped, but the edit modal takes raw text,
+        # so the combination can still overflow Discord's embed limit.
         raise PostError(
-            "The title, CC, and description are too long together "
-            f"({len(body)} characters — the message limit is {MAX_MESSAGE_LENGTH})."
+            "The CC and description are too long together "
+            f"({len(body)} characters — the limit is {MAX_EMBED_DESCRIPTION_LENGTH})."
         )
     return body
 
 
-def content_from_record(record) -> str:
-    """Rebuild a stored base post's message text (used after an edit)."""
-    return build_base_body(
+def build_base_embed(
+    *,
+    title: str | None,
+    cc: str | None,
+    description: str | None,
+    image_filename: str | None,
+) -> disnake.Embed:
+    """The base post: a pink-edged embed with the screenshot inside it.
+
+    The image is referenced as `attachment://<image_filename>`, so the
+    uploaded file is shown INSIDE the embed rather than as a second picture
+    under it. That name must match the attached `File.filename` exactly (see
+    `safe_filename`). Editing must keep using the attachment reference, never
+    the CDN URL: pointing an embed at the CDN while the upload is still
+    attached is what once made the picture render twice.
+    """
+    embed = disnake.Embed(
+        title=title or None,
+        description=build_base_body(cc=cc, description=description),
+        colour=BASE_POST_COLOUR,
+    )
+    # None only if the filename can't be recovered at all; the attachment then
+    # still shows, just under the embed instead of inside it.
+    if image_filename:
+        embed.set_image(url=f"attachment://{image_filename}")
+    return embed
+
+
+def embed_from_record(record, *, image_filename: str | None) -> disnake.Embed:
+    """Rebuild a stored base post's embed (used after an edit).
+
+    `image_filename` is passed in rather than read off the record because the
+    caller resolves it from the live message when the stored value is missing.
+    """
+    return build_base_embed(
         title=record["title"],
         cc=record["cc"],
         description=record["description"],
+        image_filename=image_filename,
     )
 
 
@@ -209,14 +237,16 @@ def downloaders_embed(rows) -> disnake.Embed:
 
 __all__ = [
     "BASE_EMBED_COLOUR",
+    "BASE_POST_COLOUR",
     "MAX_CC_LENGTH",
     "MAX_DESCRIPTION_LENGTH",
     "MAX_LINK_LENGTH",
-    "MAX_MESSAGE_LENGTH",
+    "MAX_EMBED_DESCRIPTION_LENGTH",
     "MAX_TITLE_LENGTH",
     "PostError",
     "build_base_body",
-    "content_from_record",
+    "build_base_embed",
+    "embed_from_record",
     "downloaders_embed",
     "normalize_text",
     "validate_base_input",

@@ -1,7 +1,7 @@
 """Unit tests for /postbase: rendering/validation and storage."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -112,19 +112,105 @@ def test_build_base_body_rejects_combined_overflow() -> None:
         )
 
 
-def test_title_renders_as_a_markdown_heading() -> None:
-    # "## " renders larger than an embed's title field, which is why the post
-    # is a plain message rather than an embed.
-    body = base_poster.build_base_body(title="Tap 6.0", cc=None, description="notes")
-    assert body.startswith("## Tap 6.0")
+def test_base_post_is_a_pink_embed_with_title_in_its_own_field() -> None:
+    embed = base_poster.build_base_embed(
+        title="Tap 6.0", cc="x2 HH", description="notes", image_filename="base.png"
+    )
+    assert embed.colour.value == base_poster.BASE_POST_COLOUR == 0xEC4899
+    assert embed.title == "Tap 6.0"
+    # The title is not repeated in the body.
+    assert "Tap 6.0" not in embed.description
+    assert embed.description == base_poster.build_base_body(cc="x2 HH", description="notes")
 
 
-def test_content_from_record_round_trips() -> None:
+def test_base_post_image_sits_inside_the_embed_via_attachment_reference() -> None:
+    """attachment:// is what keeps the upload inside the embed instead of a
+    second copy under it — a CDN URL here is what once doubled the picture."""
+    embed = base_poster.build_base_embed(
+        title=None, cc=None, description="notes", image_filename="base.png"
+    )
+    assert embed.image.url == "attachment://base.png"
+    assert embed.title is None
+
+
+def test_base_post_without_a_filename_has_no_embed_image() -> None:
+    embed = base_poster.build_base_embed(
+        title=None, cc=None, description="notes", image_filename=None
+    )
+    assert not embed.image
+
+
+def test_embed_from_record_round_trips() -> None:
     record = {"title": "Tap 6.0", "cc": "x2 HH", "description": "notes"}
-    content = base_poster.content_from_record(record)
-    assert content.startswith("## Tap 6.0")
-    assert "**CC:**\nx2 HH" in content
-    assert content.endswith("notes")
+    embed = base_poster.embed_from_record(record, image_filename="base.png")
+    assert embed.title == "Tap 6.0"
+    assert "**CC:**\nx2 HH" in embed.description
+    assert embed.description.endswith("notes")
+    assert embed.image.url == "attachment://base.png"
+
+
+def _edit_record(**overrides):
+    record = {
+        "id": 5,
+        "title": "Tap 6.0",
+        "cc": "x2 HH",
+        "description": "notes",
+        "link": "https://link.clashofclans.com/en?action=OpenLayout&id=x",
+        "image_filename": "stored.png",
+        "image_url": "https://cdn.discordapp.com/attachments/1/2/stored.png",
+        "stats_admin_only": False,
+    }
+    record.update(overrides)
+    return record
+
+
+def _modal_inter(*, attachments):
+    inter = MagicMock()
+    inter.text_values = {"title": "Tap 6.1", "cc": "x2 HH", "description": "new notes", "link": ""}
+    inter.bot.pool = MagicMock()
+    inter.message.attachments = attachments
+    inter.response.edit_message = AsyncMock()
+    inter.response.send_message = AsyncMock()
+    return inter
+
+
+@pytest.mark.asyncio
+async def test_edit_rebuilds_the_embed_against_the_live_attachment() -> None:
+    from discord_bot.commands import base_post_commands
+
+    attachment = MagicMock()
+    attachment.filename = "live.png"
+    inter = _modal_inter(attachments=[attachment])
+    updated = _edit_record(title="Tap 6.1", description="new notes")
+
+    with patch.object(base_post_commands.base_storage, "update_base_post", new=AsyncMock(return_value=updated)), \
+         patch.object(base_post_commands.base_storage, "count_downloads", new=AsyncMock(return_value=3)):
+        modal = base_post_commands.BaseEditModal(_edit_record())
+        await modal.callback(inter)
+
+    kwargs = inter.response.edit_message.await_args.kwargs
+    # Old plain-message posts have their text cleared so they become embeds.
+    assert kwargs["content"] is None
+    embed = kwargs["embed"]
+    assert embed.title == "Tap 6.1"
+    assert embed.image.url == "attachment://live.png"
+    assert "cdn.discordapp.com" not in (embed.image.url or "")
+    # Attachments are not touched, so the upload survives the edit.
+    assert "attachments" not in kwargs and "file" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_edit_falls_back_to_the_stored_filename() -> None:
+    from discord_bot.commands import base_post_commands
+
+    inter = _modal_inter(attachments=[])
+
+    with patch.object(base_post_commands.base_storage, "update_base_post", new=AsyncMock(return_value=_edit_record())), \
+         patch.object(base_post_commands.base_storage, "count_downloads", new=AsyncMock(return_value=0)):
+        await base_post_commands.BaseEditModal(_edit_record()).callback(inter)
+
+    embed = inter.response.edit_message.await_args.kwargs["embed"]
+    assert embed.image.url == "attachment://stored.png"
 
 
 # --- image validation -------------------------------------------------------
