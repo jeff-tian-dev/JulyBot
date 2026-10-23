@@ -21,6 +21,8 @@ from modules.roster.render import (
 
 ADMIN_PERMS = disnake.Permissions(administrator=True)
 NO_PINGS = disnake.AllowedMentions.none()
+# How long the column buttons on a posted roster stay clickable.
+VIEW_TIMEOUT_SECONDS = 300
 
 
 async def _roster_name_autocomplete(
@@ -33,15 +35,23 @@ async def _roster_name_autocomplete(
 
 
 class RosterView(disnake.ui.View):
-    """Ephemeral view with one show/hide button per column.
+    """One show/hide button per column, on a roster posted publicly.
 
     Holds the already-resolved rows so toggling re-renders instantly without
     re-hitting the DB or CoC API. A button is green when its column is shown,
     grey when hidden. Watched rosters add Status and Total Out columns.
+
+    The message is public, so a toggle changes it for every viewer — only the
+    admin who ran the command (`owner_id`) may click. On timeout the buttons
+    are removed rather than left on a public message where clicking them
+    would just fail.
     """
 
-    def __init__(self, name: str, rows: list[dict], columns, hidden=()) -> None:
-        super().__init__(timeout=300)
+    def __init__(self, name: str, rows: list[dict], columns, hidden=(), *, owner_id: int) -> None:
+        super().__init__(timeout=VIEW_TIMEOUT_SECONDS)
+        self.owner_id = owner_id
+        # Set by the command after posting, so on_timeout can strip the buttons.
+        self.message: disnake.Message | None = None
         self.name = name
         self.rows = rows
         self.columns = tuple(columns)
@@ -57,6 +67,12 @@ class RosterView(disnake.ui.View):
         )
 
         async def callback(inter: disnake.MessageInteraction) -> None:
+            if inter.author.id != self.owner_id:
+                await inter.response.send_message(
+                    "Only the person who posted this roster can change its columns.",
+                    ephemeral=True,
+                )
+                return
             self.show[key] = not self.show[key]
             button.style = (
                 disnake.ButtonStyle.success if self.show[key] else disnake.ButtonStyle.secondary
@@ -68,6 +84,15 @@ class RosterView(disnake.ui.View):
 
     def embed(self) -> disnake.Embed:
         return render_embed(self.name, self.rows, self.columns, self.show)
+
+    async def on_timeout(self) -> None:
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(view=None)
+        except disnake.HTTPException:
+            # Message deleted or no longer editable — nothing left to tidy.
+            pass
 
 
 class RosterCommands(commands.Cog):
@@ -170,11 +195,15 @@ class RosterCommands(commands.Cog):
         inter: disnake.ApplicationCommandInteraction,
         name: str = commands.Param(autocomplete=_roster_name_autocomplete),
     ) -> None:
-        await inter.response.defer(ephemeral=True)
+        # Public: the roster is posted for the whole channel to see.
+        await inter.response.defer()
         try:
             view = await storage.build_roster_view(self.bot.pool, inter.guild.id, name)
         except ValueError as e:
-            await inter.edit_original_response(content=str(e))
+            # Don't leave an error (e.g. a typo'd name) in the channel: drop the
+            # public placeholder and tell only the invoker.
+            await inter.delete_original_response()
+            await inter.followup.send(str(e), ephemeral=True)
             return
 
         marker = " 👁" if view["watched"] else ""
@@ -196,8 +225,12 @@ class RosterCommands(commands.Cog):
             discord = await self._user_label(inter.guild, m["discord_id"])
             rows.append(view_cells(m, discord))
 
-        roster_view = RosterView(f"{view['name']}{marker}", rows, VIEW_COLUMNS, VIEW_HIDDEN)
-        await inter.edit_original_response(embed=roster_view.embed(), view=roster_view)
+        roster_view = RosterView(
+            f"{view['name']}{marker}", rows, VIEW_COLUMNS, VIEW_HIDDEN, owner_id=inter.author.id
+        )
+        roster_view.message = await inter.edit_original_response(
+            embed=roster_view.embed(), view=roster_view, allowed_mentions=NO_PINGS
+        )
 
     @roster.sub_command(
         name="watch",

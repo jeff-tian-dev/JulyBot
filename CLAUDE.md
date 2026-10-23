@@ -430,3 +430,10 @@ When you discover a non-obvious convention, an architectural decision, or a work
 - `finalize_confirmation` now also records `amount_cents` from Stripe on the `subscribers` row, for tier purchases too (it was previously left NULL for Stripe rows).
 - Migrations (`CREATE_PRODUCTS`, `MIGRATE_PURCHASE_PRODUCTS`) run after the subscribers migrations in `create_tables`, since they add FKs from both tables. Applied automatically on bot start.
 - Tests: `tests/test_products.py` (28 cases).
+
+## 2026-10-22 — /roster view posts publicly
+
+- **`/roster view` now posts a public embed in the channel** (was ephemeral, visible only to the invoker with a Dismiss button). The command itself stays admin-only; only the output is public.
+- **Column show/hide buttons are owner-only** (`RosterView(owner_id=...)`): on a public message a toggle changes it for every viewer, so anyone else gets an ephemeral refusal. On timeout (`VIEW_TIMEOUT_SECONDS`, 300) `on_timeout` edits the buttons off the message instead of leaving dead buttons that fail when clicked — the command stores the posted message on `view.message` for that.
+- **Errors stay private:** the defer is public, so on a bad roster name the placeholder is deleted and the error goes to the invoker as an ephemeral followup — a typo doesn't leave an error message in the channel.
+- Tests: `tests/test_roster_commands.py` (6 cases).
