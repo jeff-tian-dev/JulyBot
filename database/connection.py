@@ -10,7 +10,7 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 POOL_MIN_SIZE = 1
-POOL_MAX_SIZE = 3
+POOL_MAX_SIZE = 8
 
 _pool: asyncpg.Pool | None = None
 

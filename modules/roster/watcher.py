@@ -11,6 +11,7 @@ skipped to avoid false "left" alerts.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import asyncpg
@@ -21,6 +22,8 @@ from modules.legend_tracker.poller import get_clan, get_player
 from modules.roster import render, storage
 
 logger = logging.getLogger(__name__)
+
+_DISCORD_OP_TIMEOUT_SECONDS = 30
 
 # CoC clan names are frequently Arabic/RTL. In a plain-text alert next to " → "
 # and Latin text the Unicode bidi algorithm reorders them, so each clan name is
@@ -81,7 +84,15 @@ async def _watch_channel(bot: disnake.Client):
     channel = bot.get_channel(settings.CLAN_WATCH_CHANNEL_ID)
     if channel is None:
         try:
-            channel = await bot.fetch_channel(settings.CLAN_WATCH_CHANNEL_ID)
+            channel = await asyncio.wait_for(
+                bot.fetch_channel(settings.CLAN_WATCH_CHANNEL_ID),
+                timeout=_DISCORD_OP_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Clan watch: timed out fetching channel %s", settings.CLAN_WATCH_CHANNEL_ID
+            )
+            return None
         except disnake.HTTPException:
             logger.warning("Clan watch: channel %s not found", settings.CLAN_WATCH_CHANNEL_ID)
             return None
@@ -94,7 +105,14 @@ async def _post_alerts(bot: disnake.Client, alerts: list[dict]) -> None:
         return
     for alert in alerts:
         try:
-            await channel.send(_format_alert(alert), allowed_mentions=disnake.AllowedMentions.none())
+            await asyncio.wait_for(
+                channel.send(
+                    _format_alert(alert), allowed_mentions=disnake.AllowedMentions.none()
+                ),
+                timeout=_DISCORD_OP_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Clan watch: timed out sending alert for %s", alert["tag"])
         except disnake.HTTPException:
             logger.exception("Clan watch: failed to send alert for %s", alert["tag"])
 

@@ -121,6 +121,7 @@ async def test_alert_falls_back_to_mod_log_channel():
         X_ALERT_CHANNEL_ID=0,
         MOD_LOG_CHANNEL_ID=4242,
         X_MAX_CONSECUTIVE_FAILURES=3,
+        X_POLL_INTERVAL_MINUTES=10,
     )
     with (
         patch.object(scheduler, "settings", fake_settings),

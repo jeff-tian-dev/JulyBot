@@ -1,6 +1,7 @@
 """APScheduler wiring for recurring jobs."""
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import asyncpg
@@ -21,32 +22,73 @@ from modules.youtube_feed.poller import poll_youtube_channels
 
 logger = logging.getLogger(__name__)
 
+# Cap wall-clock time so a hung HTTP/Discord/yt-dlp call cannot hold max_instances=1
+# forever and stall every later run (see logs 2026-10-24: poll_clan_watch never finished).
+_JOB_TIMEOUT_BUFFER_SECONDS = 60
+_REFRESH_BASE_CACHE_MAX_SECONDS = 2 * 3600
+
+
+async def _run_with_timeout(coro, *, job_id: str, timeout_seconds: float) -> None:
+    """Bound job wall time without waiting on coroutines that ignore CancelledError.
+
+    asyncio.wait_for keeps waiting if cancellation fails (e.g. tweety HTTP). asyncio.wait
+    returns when the deadline hits so APScheduler can release max_instances=1.
+    """
+    task = asyncio.create_task(coro)
+    done, pending = await asyncio.wait({task}, timeout=timeout_seconds)
+    if pending:
+        logger.error(
+            "Scheduled job %s exceeded %ss; abandoning stuck run so future runs can proceed",
+            job_id,
+            int(timeout_seconds),
+        )
+        task.cancel()
+        return
+    task.result()
+
+
+def _interval_job_timeout(minutes: int) -> float:
+    return max(120.0, minutes * 60 - _JOB_TIMEOUT_BUFFER_SECONDS)
+
 
 async def poll_legend_players(pool: asyncpg.Pool) -> None:
     """Scheduled job: poll legend stats and save snapshots."""
-    try:
-        results = await poll_all_legend_players(pool)
-    except Exception:
-        logger.exception("poll_all_legend_players raised")
-        return
+    timeout = _interval_job_timeout(settings.LEGEND_POLL_INTERVAL_MINUTES)
 
-    inserted = 0
-    for stats in results:
+    async def _body() -> None:
         try:
-            if await save_snapshot(pool, stats):
-                inserted += 1
+            results = await poll_all_legend_players(pool)
         except Exception:
-            logger.exception("save_snapshot failed for %s", stats.get("coc_tag"))
-    logger.info("Legend poll complete: %d players, %d new snapshots", len(results), inserted)
+            logger.exception("poll_all_legend_players raised")
+            return
+
+        inserted = 0
+        for stats in results:
+            try:
+                if await save_snapshot(pool, stats):
+                    inserted += 1
+            except Exception:
+                logger.exception("save_snapshot failed for %s", stats.get("coc_tag"))
+        logger.info("Legend poll complete: %d players, %d new snapshots", len(results), inserted)
+
+    await _run_with_timeout(_body(), job_id="poll_legend_players", timeout_seconds=timeout)
 
 
 async def refresh_base_cache(pool: asyncpg.Pool) -> None:
     """Scheduled job: ingest new YouTube VODs into the base cache."""
-    try:
-        summary = await run_pipeline(pool)
-        logger.info("Base finder pipeline summary: %s", summary)
-    except Exception:
-        logger.exception("run_pipeline raised")
+
+    async def _body() -> None:
+        try:
+            summary = await run_pipeline(pool)
+            logger.info("Base finder pipeline summary: %s", summary)
+        except Exception:
+            logger.exception("run_pipeline raised")
+
+    await _run_with_timeout(
+        _body(),
+        job_id="refresh_base_cache",
+        timeout_seconds=_REFRESH_BASE_CACHE_MAX_SECONDS,
+    )
 
 
 async def send_legend_ping(bot, discord_id: int, message: str) -> None:
@@ -95,101 +137,135 @@ async def poll_x(
     pool: asyncpg.Pool, bot: disnake.Client, scheduler: AsyncIOScheduler | None = None
 ) -> None:
     """Scheduled job: poll watched X accounts and post new posts to Discord."""
-    global _x_consecutive_connect_failures, _x_polling_disabled
-    try:
-        summary = await poll_x_accounts(pool, bot)
-    except Exception:
-        logger.exception("poll_x_accounts raised")
-        return
+    timeout = _interval_job_timeout(settings.X_POLL_INTERVAL_MINUTES)
 
-    if summary.get("connect_failed"):
-        _x_consecutive_connect_failures += 1
-        logger.warning(
-            "X poll connection failure %d/%d",
-            _x_consecutive_connect_failures,
-            settings.X_MAX_CONSECUTIVE_FAILURES,
-        )
-        if (
-            not _x_polling_disabled
-            and _x_consecutive_connect_failures >= settings.X_MAX_CONSECUTIVE_FAILURES
-        ):
-            _x_polling_disabled = True
-            await _alert_x_polling_stopped(bot, _x_consecutive_connect_failures)
-            if scheduler is not None:
-                try:
-                    scheduler.pause_job("poll_x_accounts")
-                    logger.error(
-                        "X polling paused after %d consecutive connection failures",
-                        _x_consecutive_connect_failures,
-                    )
-                except Exception:
-                    logger.exception("Failed to pause poll_x_accounts job")
-        return
+    async def _body() -> None:
+        global _x_consecutive_connect_failures, _x_polling_disabled
+        try:
+            summary = await poll_x_accounts(pool, bot)
+        except Exception:
+            logger.exception("poll_x_accounts raised")
+            return
 
-    # Reached X successfully — clear the failure streak.
-    if _x_consecutive_connect_failures:
-        logger.info(
-            "X poll recovered after %d consecutive connection failure(s)",
-            _x_consecutive_connect_failures,
-        )
-    _x_consecutive_connect_failures = 0
+        if summary.get("connect_failed"):
+            _x_consecutive_connect_failures += 1
+            logger.warning(
+                "X poll connection failure %d/%d",
+                _x_consecutive_connect_failures,
+                settings.X_MAX_CONSECUTIVE_FAILURES,
+            )
+            if (
+                not _x_polling_disabled
+                and _x_consecutive_connect_failures >= settings.X_MAX_CONSECUTIVE_FAILURES
+            ):
+                _x_polling_disabled = True
+                await _alert_x_polling_stopped(bot, _x_consecutive_connect_failures)
+                if scheduler is not None:
+                    try:
+                        scheduler.pause_job("poll_x_accounts")
+                        logger.error(
+                            "X polling paused after %d consecutive connection failures",
+                            _x_consecutive_connect_failures,
+                        )
+                    except Exception:
+                        logger.exception("Failed to pause poll_x_accounts job")
+            return
 
-    if summary["accounts_polled"] or summary["tweets_posted"] or summary["errors"]:
-        logger.info("X poll summary: %s", summary)
+        if _x_consecutive_connect_failures:
+            logger.info(
+                "X poll recovered after %d consecutive connection failure(s)",
+                _x_consecutive_connect_failures,
+            )
+        _x_consecutive_connect_failures = 0
+
+        if summary["accounts_polled"] or summary["tweets_posted"] or summary["errors"]:
+            logger.info("X poll summary: %s", summary)
+
+    await _run_with_timeout(_body(), job_id="poll_x_accounts", timeout_seconds=timeout)
 
 
 async def poll_youtube(pool: asyncpg.Pool, bot: disnake.Client) -> None:
     """Scheduled job: poll watched YouTube channels and post new videos to Discord."""
-    try:
-        summary = await poll_youtube_channels(pool, bot)
-        if summary["channels_polled"] or summary["videos_posted"] or summary["errors"]:
-            logger.info("YouTube poll summary: %s", summary)
-    except Exception:
-        logger.exception("poll_youtube_channels raised")
+    timeout = _interval_job_timeout(settings.YOUTUBE_FEED_POLL_INTERVAL_MINUTES)
+
+    async def _body() -> None:
+        try:
+            summary = await poll_youtube_channels(pool, bot)
+            if summary["channels_polled"] or summary["videos_posted"] or summary["errors"]:
+                logger.info("YouTube poll summary: %s", summary)
+        except Exception:
+            logger.exception("poll_youtube_channels raised")
+
+    await _run_with_timeout(_body(), job_id="poll_youtube_feed", timeout_seconds=timeout)
 
 
 async def poll_clan_watch_job(pool: asyncpg.Pool, bot: disnake.Client) -> None:
     """Scheduled job: alert on watched-roster members leaving/rejoining the family."""
-    try:
-        summary = await poll_clan_watch(pool, bot)
-        if summary.get("alerts") or summary.get("error"):
-            logger.info("Clan watch summary: %s", summary)
-    except Exception:
-        logger.exception("poll_clan_watch raised")
+    timeout = _interval_job_timeout(settings.CLAN_WATCH_POLL_INTERVAL_MINUTES)
+
+    async def _body() -> None:
+        try:
+            summary = await poll_clan_watch(pool, bot)
+            if summary.get("alerts") or summary.get("error"):
+                logger.info("Clan watch summary: %s", summary)
+        except Exception:
+            logger.exception("poll_clan_watch raised")
+
+    await _run_with_timeout(_body(), job_id="poll_clan_watch", timeout_seconds=timeout)
 
 
 async def daily_watchlist_job(pool: asyncpg.Pool, bot: disnake.Client) -> None:
     """Scheduled job (1am): post each watched roster's daily leaderboard, then reset."""
-    try:
-        summary = await run_daily_watchlist(pool, bot)
-        logger.info("Daily watchlist summary: %s", summary)
-    except Exception:
-        logger.exception("run_daily_watchlist raised")
+
+    async def _body() -> None:
+        try:
+            summary = await run_daily_watchlist(pool, bot)
+            logger.info("Daily watchlist summary: %s", summary)
+        except Exception:
+            logger.exception("run_daily_watchlist raised")
+
+    await _run_with_timeout(_body(), job_id="daily_watchlist", timeout_seconds=1800)
 
 
 async def ranked_tracking_job(pool: asyncpg.Pool, bot: disnake.Client) -> None:
     """Scheduled job: DM subscribers on a likely-to-be-hit status change."""
-    try:
-        summary = await poll_ranked_tracking(pool, bot)
-        if summary["notified"] or summary["errors"]:
-            logger.info("Ranked tracking summary: %s", summary)
-    except Exception:
-        logger.exception("poll_ranked_tracking raised")
+    timeout = _interval_job_timeout(settings.RANKED_TRACKING_POLL_INTERVAL_MINUTES)
+
+    async def _body() -> None:
+        try:
+            summary = await poll_ranked_tracking(pool, bot)
+            if summary["notified"] or summary["errors"]:
+                logger.info("Ranked tracking summary: %s", summary)
+        except Exception:
+            logger.exception("poll_ranked_tracking raised")
+
+    await _run_with_timeout(_body(), job_id="poll_ranked_tracking", timeout_seconds=timeout)
 
 
 async def subscriber_refresh_job(pool: asyncpg.Pool) -> None:
     """Scheduled job: re-check stored subscriptions against Stripe."""
-    try:
-        summary = await refresh_subscribers(pool)
-        if summary["changed"] or summary["errors"]:
-            logger.info("Subscriber refresh summary: %s", summary)
-    except Exception:
-        logger.exception("refresh_subscribers raised")
+    timeout = _interval_job_timeout(settings.SUBSCRIBER_REFRESH_INTERVAL_MINUTES)
+
+    async def _body() -> None:
+        try:
+            summary = await refresh_subscribers(pool)
+            if summary["changed"] or summary["errors"]:
+                logger.info("Subscriber refresh summary: %s", summary)
+        except Exception:
+            logger.exception("refresh_subscribers raised")
+
+    await _run_with_timeout(_body(), job_id="refresh_subscribers", timeout_seconds=timeout)
 
 
 def create_scheduler(pool: asyncpg.Pool, bot: disnake.Client) -> AsyncIOScheduler:
     """Build (but do not start) an AsyncIOScheduler with all recurring jobs."""
-    scheduler = AsyncIOScheduler()
+    scheduler = AsyncIOScheduler(
+        job_defaults={
+            "coalesce": True,
+            "max_instances": 1,
+            "misfire_grace_time": 120,
+        }
+    )
 
     scheduler.add_job(
         poll_legend_players,
