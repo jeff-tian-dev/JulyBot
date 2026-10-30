@@ -30,6 +30,8 @@ The bot runs locally on the Mac Studio at `/Users/jefftian/JulyBot`. All command
 
 **Remove the launchd agent entirely:** `./deploy/uninstall-service.sh`
 
+**Auto-deploy on push:** `./deploy/install-autoupdate.sh` installs `com.julybot.autoupdate`, which checks GitHub every 60s and redeploys when `origin/main` moves (log: `logs/auto-update.log`). `./deploy/uninstall-autoupdate.sh` turns it off. It **skips** while the checkout has uncommitted edits to tracked files, so local work in progress blocks auto-deploys until it's committed or stashed. See the 2026-10-30 entry.
+
 - Foreground vs. background are mutually exclusive — if the launchd service is running, stop it before `start.sh` or you'll get two bots double-posting.
 - Background logs: `logs/julybot.stdout.log` and `logs/julybot.stderr.log`.
 - launchd label is `com.julybot`; inspect with `launchctl print gui/$(id -u)/com.julybot`.
@@ -498,3 +500,13 @@ When you discover a non-obvious convention, an architectural decision, or a work
 - `/subscribe`'s "not set up" guard now checks `SUBSCRIBE_URL`, not the tier links. `TIERS`, `build_subscribe_embed`/`build_subscribe_view`, `_payment_buttons` and `STRIPE_PAYMENT_LINK_*` are no longer used by the command (left in place; `test_configured_tier_prices_match_what_stripe_charges` still pins `TIERS`). `/product sell` is untouched — products keep their own link button.
 - **The pending copy no longer states an access length.** It said "one month of access", but the website's Terms define fixed **28-day access periods**. The copy now says only what holds however the site changes — one-time, no auto-renewal, pay through Stripe on the website — and leaves tiers, prices and the period to the site. Don't put a duration back in this copy; if the site's billing model ever becomes recurring, this copy must change in the same commit (same chargeback reasoning as earlier entries).
 - `AGREEMENT_FULL_TEXT` in `modules/agreements/document.py` still says "one month"; it's only the transcript for historical signed rows and `/agreement record`. The website's Terms (updated 2026-10-28) are what a Stripe buyer actually accepts.
+
+## 2026-10-30 — auto-deploy on push (polling, not a GitHub runner)
+
+- [deploy/auto-update.sh](deploy/auto-update.sh), run every 60s by the launchd agent `com.julybot.autoupdate` (`install-autoupdate.sh` / `uninstall-autoupdate.sh`), fetches `origin/main` and redeploys when it has moved. It **polls** on purpose, with no GitHub Actions self-hosted runner: the repo is public, and GitHub warns against self-hosted runners on public repos because fork PRs can run code on the host, which holds `.env`. Polling needs no token, no inbound connection and no GitHub-side setup. The cost is up to 60s of delay.
+- **It deploys only if:** the checkout is on `main`; there are no uncommitted changes to tracked files (untracked files are ignored); local `main` hasn't diverged; and `pytest tests/` passes **in a throwaway `git worktree` of the new commit**, so a failing commit never reaches the live checkout. If `requirements.txt` changed, it runs `pip install` into the shared `.venv` first.
+- **Restart is `launchctl kickstart -k`**, not `install-service.sh`. Bootout + bootstrap races the old process's shutdown (`Bootstrap failed: 5`, see 2026-10-29). Consequence: a change to `deploy/com.julybot.plist.template` is **not** applied automatically. The log says so; run `install-service.sh` by hand.
+- **Health check + rollback:** after the restart it waits up to 180s for `Discord bot ready as` to appear in `logs/julybot.stderr.log` *after the byte offset at restart*. If it doesn't, it runs `git reset --keep` back to the previous commit and restarts again. It does not undo a `pip install`. Don't change the bot's ready log line in `discord_bot/bot.py` without updating `READY_PATTERN`.
+- **One attempt per state:** `data/auto-update.last-attempt` stores (remote sha, local sha, hash of local edits). A skipped, failed or rolled-back commit isn't retried every minute. It is retried when any of those three change, so committing or stashing local edits picks up a pending push on the next tick. To force a retry, delete that file.
+- **The script edits itself on pull**, so its body is all inside `main()`, which bash parses in full before running anything. Don't add top-level commands after the function definitions other than `main "$@"; exit`.
+- New `.env` keys still need adding by hand. The script only logs a NOTE when `.env.example` changes, and a new `REQUIRED_VARS` entry will fail the health check and roll back.

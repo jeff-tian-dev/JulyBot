@@ -40,6 +40,24 @@ copy the new keys from `.env.example` into this machine's `.env` by hand **befor
 [config/settings.py](../config/settings.py) raises at import time if a variable in
 `REQUIRED_VARS` is unset, naming the one that's missing; check `logs/julybot.stderr.log`.
 
+## Automatic deploys on push
+
+`./deploy/install-autoupdate.sh` installs a launchd agent (`com.julybot.autoupdate`) that
+checks GitHub every 60 seconds. When `main` has a new commit it runs the tests against that
+commit, pulls it, installs dependencies if `requirements.txt` changed, and restarts the bot.
+If the bot doesn't log in afterwards, it rolls back to the previous commit.
+
+```bash
+./deploy/install-autoupdate.sh     # turn on
+./deploy/uninstall-autoupdate.sh   # turn off (the bot keeps running)
+tail -f logs/auto-update.log       # what it did, and why it skipped anything
+```
+
+It **won't deploy** while this checkout has uncommitted edits to tracked files, or local commits
+that aren't on GitHub. It logs a `SKIP` line once, then picks the push up as soon as the edits
+are committed or stashed. New `.env` keys and changes to the bot's plist template are still
+manual steps (it logs a `NOTE` when it sees either).
+
 ## Pending update — `/subscribe` purchase flow (2026-09-03)
 
 This release is **not yet deployed to this machine.** It needs all four optional steps
