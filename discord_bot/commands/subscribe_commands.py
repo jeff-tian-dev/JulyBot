@@ -33,14 +33,20 @@ one-time payments, because which kind the Payment Links create is a Stripe
 Dashboard setting the bot can't see and which has already been switched once.
 Each option is labelled "monthly" or "one-time". See stripe_api.py.
 
-The payment buttons are disnake.ButtonStyle.link buttons, which carry a URL
-instead of a custom_id: Discord opens them client-side, so there is no callback
-to dispatch for those. The other three buttons are ordinary callbacks on a
-persistent view, restored on startup by register_persistent_views().
+**Buyers pay on the website (`settings.SUBSCRIBE_URL`)**, which lists the tiers
+and runs Stripe checkout; the purchase message carries one link button to it
+rather than a button per tier. Confirm is unchanged — the payment still lands in
+Stripe, and the admin picks it out of Stripe as before. (`TIERS`,
+`build_subscribe_embed`/`build_subscribe_view` and `_payment_buttons` predate
+the website and are no longer used by the command.)
 
-**The buyer-facing copy says ONE-TIME, no auto-renewal** — build_subscribe_embed
-and the pending status embed both state the purchase buys one month and is not
-charged again. That wording is load-bearing for chargebacks, in both directions:
+Link buttons carry a URL instead of a custom_id: Discord opens them client-side,
+so there is no callback to dispatch for those. Confirm/Cancel are ordinary
+callbacks on a persistent view, restored on startup by register_persistent_views().
+
+**The buyer-facing copy says ONE-TIME, no auto-renewal** — the pending status
+embed states the purchase is one-time and not charged again, and leaves tiers,
+prices and the access period to the website's Terms so the two can't disagree. That wording is load-bearing for chargebacks, in both directions:
 promising a renewal that never comes, or an unexpected second charge, are each a
 dispute. The billing model is a per-Payment-Link Stripe Dashboard setting the bot
 cannot see and which has already been switched twice, so **if it changes back to
@@ -61,6 +67,7 @@ import asyncpg
 import disnake
 from disnake.ext import commands
 
+from config.settings import settings
 from modules.agreements import storage
 from modules.agreements import storage as agreement_storage
 from modules.agreements.validation import status_embed
@@ -78,6 +85,7 @@ MAX_CANCEL_REASON_LENGTH = 512
 MAX_PAYER_NAME_LENGTH = 200
 # The admin is mid-confirmation; if they wander off, clicking Confirm again is cheap.
 PICKER_TIMEOUT_SECONDS = 300
+WEBSITE_BUTTON_LABEL = "Buy on our website"
 
 
 def build_subscribe_embed() -> disnake.Embed:
@@ -115,6 +123,20 @@ def build_subscribe_view() -> disnake.ui.View | None:
     for button in buttons:
         view.add_item(button)
     return view
+
+
+def _website_button() -> disnake.ui.Button | None:
+    """The single "buy" button on a /subscribe purchase: a link to the website.
+
+    None when SUBSCRIBE_URL is empty — Discord rejects a link button with no URL.
+    """
+    if not settings.SUBSCRIBE_URL:
+        return None
+    return disnake.ui.Button(
+        label=WEBSITE_BUTTON_LABEL,
+        style=disnake.ButtonStyle.link,
+        url=settings.SUBSCRIBE_URL,
+    )
 
 
 def _payment_buttons() -> list[disnake.ui.Button]:
@@ -389,7 +411,10 @@ class PurchaseView(disnake.ui.View):
                     )
                 )
         else:
-            for button in _payment_buttons():
+            # One link to the website, which lists the tiers and runs Stripe
+            # checkout. Confirm still matches the payment out of Stripe.
+            button = _website_button()
+            if button is not None:
                 self.add_item(button)
 
     def _id_from(self, inter: disnake.MessageInteraction) -> int:
@@ -499,10 +524,10 @@ class SubscribeCommands(commands.Cog):
 
         # Check purchasability before creating anything, so no purchase is
         # started for something that can't actually be bought.
-        if not _payment_buttons():
-            logger.warning("/subscribe used with no payment links configured")
+        if _website_button() is None:
+            logger.warning("/subscribe used with no SUBSCRIBE_URL configured")
             await inter.edit_original_response(
-                "Subscriptions aren't set up yet — no Stripe payment links are configured."
+                "Subscriptions aren't set up yet — no website link (`SUBSCRIBE_URL`) is configured."
             )
             return
 

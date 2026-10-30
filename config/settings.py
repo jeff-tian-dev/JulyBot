@@ -96,7 +96,11 @@ class Settings:
     CLAN_WATCH_DAILY_HOUR: int = 1
     CLAN_WATCH_TIMEZONE: str = "America/New_York"
     RANKED_TRACKING_POLL_INTERVAL_MINUTES: int = 20
-    # Stripe Payment Links surfaced by /subscribe. Created in the Stripe
+    # The website /subscribe sends buyers to (it lists the tiers and runs
+    # Stripe checkout). Empty means /subscribe replies that it isn't set up.
+    SUBSCRIBE_URL: str = "https://seventhmonth.com/sub/"
+    # Stripe Payment Links, no longer used by /subscribe (which links to
+    # SUBSCRIBE_URL instead); kept because modules/subscriptions/tiers.py reads them. Created in the Stripe
     # Dashboard (Payment Links); empty means the tier is unavailable and
     # /subscribe says so rather than posting a dead button.
     STRIPE_PAYMENT_LINK_L2_L3: str = ""
@@ -147,6 +151,7 @@ def _load() -> Settings:
         CLAN_WATCH_DAILY_HOUR=_int("CLAN_WATCH_DAILY_HOUR", 1),
         CLAN_WATCH_TIMEZONE=_optional("CLAN_WATCH_TIMEZONE", "America/New_York"),
         RANKED_TRACKING_POLL_INTERVAL_MINUTES=_int("RANKED_TRACKING_POLL_INTERVAL_MINUTES", 20),
+        SUBSCRIBE_URL=_optional("SUBSCRIBE_URL", "https://seventhmonth.com/sub/"),
         STRIPE_PAYMENT_LINK_L2_L3=_optional("STRIPE_PAYMENT_LINK_L2_L3", ""),
         STRIPE_PAYMENT_LINK_L1=_optional("STRIPE_PAYMENT_LINK_L1", ""),
         STRIPE_SECRET_KEY=_optional("STRIPE_SECRET_KEY", ""),

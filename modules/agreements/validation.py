@@ -120,7 +120,7 @@ def status_embed(record) -> disnake.Embed:
             )
         else:
             nxt = (
-                "**Next:** pick a tier below and pay through Stripe. Once the payment "
+                "**Next:** buy your tier on our website below and pay through Stripe there. Once the payment "
                 "shows up in Stripe, a moderator will confirm it here."
             )
         embed = disnake.Embed(
@@ -174,13 +174,17 @@ def status_embed(record) -> disnake.Embed:
         )
         return embed
 
+    # Tiers, prices and how long access lasts are on the website (its Terms
+    # define the access period), so this copy only states what stays true
+    # however the site changes: it's one-time and does not renew.
     embed = disnake.Embed(
         title="Purchase",
         description=(
-            f"**{buyer}:** pick a tier below and pay through Stripe. You'll accept "
-            "the Terms and Conditions as part of Stripe's checkout.\n\n"
-            "This is a **one-time payment for one month of access** — it does "
-            "**not** auto-renew, and nothing is charged again."
+            f"**{buyer}:** buy your tier on our website with the button below and "
+            "pay through Stripe there. You'll accept the Terms and Conditions at "
+            "checkout.\n\n"
+            "This is a **one-time payment** — it does **not** auto-renew, and "
+            "nothing is charged again."
         ),
         colour=AGREEMENT_EMBED_COLOUR,
     )

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import disnake
@@ -154,13 +155,17 @@ def _button_interaction(*, custom_id: str, author_id: int, admin: bool = False):
 
 
 @pytest.mark.asyncio
-async def test_pending_view_shows_payment_links_immediately() -> None:
-    """Terms are accepted in Stripe Checkout, so nothing gates the links."""
-    with patch.object(subscribe_commands, "TIERS", _tiers()):
+async def test_pending_view_links_to_the_website_immediately() -> None:
+    """One button to the website (it lists the tiers and runs Stripe checkout)
+    replaces the per-tier Payment Link buttons; nothing gates it."""
+    site = SimpleNamespace(SUBSCRIBE_URL="https://seventhmonth.com/sub/")
+    with patch.object(subscribe_commands, "TIERS", _tiers()), \
+         patch.object(subscribe_commands, "settings", site):
         view = subscribe_commands.PurchaseView(_row(signed_at=None))
 
     urls = [i.url for i in view.children if getattr(i, "url", None)]
-    assert urls == ["https://buy.stripe.com/l2", "https://buy.stripe.com/l1"]
+    # Configured tier links must NOT appear — the website is the only way in.
+    assert urls == ["https://seventhmonth.com/sub/"]
     confirm = next(i for i in view.children if i.label == "Confirm Payment")
     assert confirm.disabled is False
 
@@ -461,8 +466,8 @@ async def test_subscribe_rolls_back_when_the_send_fails() -> None:
 
 
 @pytest.mark.asyncio
-async def test_subscribe_refuses_when_no_tiers_are_purchasable() -> None:
-    """Nobody should be asked to sign for something they cannot buy."""
+async def test_subscribe_refuses_when_no_website_is_configured() -> None:
+    """No purchase is started when there's nowhere to send the buyer."""
     bot = MagicMock()
     cog = subscribe_commands.SubscribeCommands(bot)
 
@@ -472,7 +477,7 @@ async def test_subscribe_refuses_when_no_tiers_are_purchasable() -> None:
     inter.channel.send = AsyncMock()
     member = MagicMock(id=4242)
 
-    with patch.object(subscribe_commands, "TIERS", _tiers(l2_link="", l1_link="")), \
+    with patch.object(subscribe_commands, "settings", SimpleNamespace(SUBSCRIBE_URL="")), \
          patch.object(
              subscribe_commands.storage, "create_pending_agreement", new=AsyncMock()
          ) as create:
@@ -480,6 +485,7 @@ async def test_subscribe_refuses_when_no_tiers_are_purchasable() -> None:
 
     create.assert_not_awaited()
     inter.channel.send.assert_not_awaited()
+    assert "SUBSCRIBE_URL" in inter.edit_original_response.await_args.args[0]
 
 
 
