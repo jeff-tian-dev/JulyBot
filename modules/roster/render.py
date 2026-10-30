@@ -24,6 +24,8 @@ COLUMN_SPECS = {
     "trophies": ("Trophies", 5),
     "check": ("In clan", 2),
     "out": ("Time Out", 3),
+    # Daily-board pair (in-clan mark + today's time out) as one toggleable column.
+    "inout": ("In/Out", 8),
     "coctag": ("CoC Tag", 10),
     "discord": ("Discord", 14),
 }
@@ -33,6 +35,9 @@ WATCHED_COLUMNS = ("user", "ign", "clan", "status", "total")
 LEADERBOARD_COLUMNS = ("trophies", "check", "out", "ign")
 # /roster view columns (every roster), in order. CoC tag + Discord start hidden.
 VIEW_COLUMNS = ("trophies", "coctag", "ign", "discord")
+# Tracked rosters insert the daily-board In/Out column between trophies and the
+# name. It starts visible; the button hides it.
+VIEW_WATCHED_COLUMNS = ("trophies", "inout", "coctag", "ign", "discord")
 VIEW_HIDDEN = ("coctag", "discord")
 # Columns that start hidden; "total" only exists on watched rosters but listing
 # it here is harmless when it's not a column.
@@ -146,12 +151,31 @@ def leaderboard_embed(name: str, raw_rows: list[dict]) -> disnake.Embed:
     return render_embed(name, rows, LEADERBOARD_COLUMNS, show)
 
 
-def view_cells(m: dict, discord_label: str) -> dict:
-    """Cells for /roster view (VIEW_COLUMNS) from a build_roster_view member."""
+def inout_cell(m: dict) -> str:
+    """The daily-board mark and today's time out, as one cell.
+
+    Same text the 1am leaderboard shows in its check and out columns:
+    ✅/❌ for in a family clan right now, then today's accumulated time out.
+    """
+    if m.get("in_main_clan") is None:
+        return "❔  —"
+    mark = "✅" if m["in_main_clan"] else "❌"
+    return f"{mark}  {_out_compact(m.get('daily_seconds') or 0)}"
+
+
+def view_cells(m: dict, discord_label: str, *, watched: bool = False) -> dict:
+    """Cells for /roster view from a build_roster_view member.
+
+    `inout` is only present for a tracked roster. It sits between trophies and
+    the name when that column is shown.
+    """
     tag = m["coc_tag"] or "Unlinked"
     if not m["coc_tag"]:
         ign = "Unlinked"
     else:
         ign = m["coc_name"] if m["coc_api_ok"] else "Unknown"
     trophies = str(m["trophies"]) if m.get("trophies") is not None else "—"
-    return {"trophies": trophies, "coctag": tag, "ign": ign, "discord": discord_label}
+    row = {"trophies": trophies, "coctag": tag, "ign": ign, "discord": discord_label}
+    if watched:
+        row["inout"] = inout_cell(m)
+    return row

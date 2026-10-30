@@ -19,6 +19,7 @@ def _stub_side_effects(monkeypatch):
     """Stub the poll's fire-and-forget DB writes (tested on their own elsewhere)."""
     monkeypatch.setattr(watcher.storage, "warm_player_cache", AsyncMock())
     monkeypatch.setattr(watcher.storage, "add_daily_absent", AsyncMock())
+    monkeypatch.setattr(watcher, "CLAN_FETCH_RETRY_DELAY_SECONDS", 0)
 
 
 def test_format_alert_variants() -> None:
@@ -190,7 +191,10 @@ async def test_poll_aborts_on_any_clan_fetch_failure(monkeypatch) -> None:
     monkeypatch.setattr(
         watcher,
         "get_clan",
-        AsyncMock(side_effect=[{"name": "ClanA", "memberList": [{"tag": "#IN"}]}, None]),
+        AsyncMock(
+            side_effect=[{"name": "ClanA", "memberList": [{"tag": "#IN"}]}]
+            + [None] * watcher.CLAN_FETCH_ATTEMPTS
+        ),
     )
     mark_left = AsyncMock()
     monkeypatch.setattr(watcher.storage, "mark_left", mark_left)
@@ -317,3 +321,32 @@ async def test_poll_warms_cache_from_clan_data(monkeypatch) -> None:
     warm.assert_awaited_once()
     entries = list(warm.await_args.args[1])
     assert ("#X", "Xx", "July", None) in entries  # (tag, name, clan, trophies)
+
+
+@pytest.mark.asyncio
+async def test_poll_retries_a_failed_clan_fetch(monkeypatch) -> None:
+    # A clan that fails once then answers must not cost the whole poll.
+    monkeypatch.setattr(watcher, "family_tags", lambda: ["#A"])
+    monkeypatch.setattr(
+        watcher.storage,
+        "get_watched_tags",
+        AsyncMock(return_value=[{"guild_id": 1, "roster_name": "July", "coc_tag": "#X"}]),
+    )
+    get_clan = AsyncMock(
+        side_effect=[None, {"name": "July", "memberList": [{"tag": "#X", "name": "Xx"}]}]
+    )
+    monkeypatch.setattr(watcher, "get_clan", get_clan)
+    monkeypatch.setattr(
+        watcher.storage,
+        "get_membership_map",
+        AsyncMock(
+            return_value={
+                "#X": {"coc_name": "Xx", "in_clan": True, "left_at": None,
+                       "total_absent_seconds": 0, "clan_name": "July"}
+            }
+        ),
+    )
+
+    result = await watcher.poll_clan_watch(MagicMock(), _fake_bot(MagicMock()))
+    assert "error" not in result
+    assert get_clan.await_count == 2

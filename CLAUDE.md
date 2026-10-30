@@ -460,6 +460,38 @@ When you discover a non-obvious convention, an architectural decision, or a work
 - **Fix:** every scheduled coroutine in [modules/ping_automator/scheduler.py](modules/ping_automator/scheduler.py) is wrapped via `_run_with_timeout` (`asyncio.wait` + deadline — not `wait_for`, which never returns if the coroutine ignores `CancelledError`, e.g. tweety) (interval jobs: interval − 60s, floor 120s; daily watchlist 30 min; base cache pipeline 2h). Scheduler `job_defaults`: `coalesce=True`, `misfire_grace_time=120`. Clan-watch Discord `fetch_channel` / `channel.send` capped at 30s in [modules/roster/watcher.py](modules/roster/watcher.py). asyncpg pool `max_size` raised 3 → 8 in [database/connection.py](database/connection.py) to reduce acquire stalls when many jobs overlap.
 - **Recovery:** restart the bot (`./deploy/install-service.sh` or `./deploy/stop.sh` then bootstrap) — paused/stuck state is in-process only.
 
+## 2026-10-25 — YouTube RSS 404s are transient
+
+- **Symptom:** every watched channel logs `HTTP Error 404` and then `IndexError: list index out of range` in `fetch_latest_video_sync`. The channel IDs are valid. YouTube's `feeds/videos.xml` returns 404 or 500 (or HTTP 200 with an HTML error page) for channels that still exist; the same request succeeds minutes later. A 404 here does not mean the channel was deleted.
+- **The crash:** `_fetch_feed_document` turned the HTTP error into `feedparser.parse(b"")`. That parse has no entries and `bozo` is false, so `feed.entries[0]` raised. The poller counted it as an error and skipped the channel for that cycle (`last_seen` stays put, so the next good poll still posts a new video).
+- **Fix:** `modules/youtube_feed/fetcher.py` retries transient statuses (`TRANSIENT_HTTP_STATUSES`, `FEED_MAX_ATTEMPTS`) and a non-Atom body, then returns `None` instead of indexing an empty feed. `fetch_latest_video_sync` goes through `_parse_feed`.
+
+## 2026-10-25 — /roster view was one round trip per member
+
+- **A 90-person roster waited on two serial loops.** `build_roster_view` issued one Supabase query per member to resolve Discord↔tag links, and `_resolve_players` called `GET /players/{tag}` then upserted the cache one tag at a time whenever `coc_player_cache` was older than 5 minutes. Clan watch only refreshes that cache every 10 minutes, so half the time a view refetched everyone.
+- **Fix:** link resolution is one SQL statement. Stale tags refresh together (`PLAYER_FETCH_CONCURRENCY`) and the cache upsert is one `executemany`. `PLAYER_CACHE_TTL_SECONDS` is 15 minutes, longer than the clan-watch gap. Discord display names that miss the guild cache are looked up together (`USER_LOOKUP_CONCURRENCY`), not one `fetch_user` at a time.
+
+## 2026-10-25 — /roster view In/Out column on tracked rosters
+
+- Tracked rosters (`watched`) get one extra column, `inout`, between trophies and the name. It is the daily board's pair in one cell: ✅/❌ for in a family clan right now, then today's `daily_absent_seconds` in the same `2h`/`45m` form. One **In/Out** button shows or hides it. Untracked rosters do not get the button. The cell is rendered from the membership row `/roster view` already loads — it does not call the CoC API.
+
+## 2026-10-26 — wedged asyncpg pool (jobs time out forever, Discord stays up)
+
+- **Symptom:** process alive, gateway resuming, but every scheduled job logs `exceeded Ns; abandoning stuck run` and never finishes. X/YouTube/clan-watch go quiet. Slash commands that need the DB hit "the application did not respond." A fresh `SELECT 1` from another process still works.
+- **Cause:** `pool.acquire()` has no timeout, and `Pool.release()` is `asyncio.shield`ed and reuses that timeout. `_run_with_timeout` cancels a hung job and returns without waiting. On a dead Supabase socket the shielded release never finishes, so the connection stays checked out. After `POOL_MAX_SIZE` of those, every later checkout waits forever. Restart is the only recovery; the 2026-10-25 job timeout stops `max_instances` from sticking but does not return the slot.
+- **Fix:** [database/connection.py](database/connection.py) wraps `Pool.acquire` (on the class — `Pool` is slotted, so assigning on the instance raises) so a checkout that doesn't pass its own timeout gets 30s. `Pool.release()` reuses that value and is `asyncio.shield`ed. With a budget, release gives up and terminates the socket instead of holding the slot. There is deliberately no `command_timeout`: a 60s one crash-looped startup on `MIGRATE_USERS_MULTI_ACCOUNT`. Don't point `acquire` back at the raw method.
+
+## 2026-10-28 — retry transient CoC / Supabase failures
+
+- **Symptom:** clan watch looked like it ran every 30–60 min. The scheduler still fired every 10. About a third of runs failed: either a CoC clan fetch timed out (or returned a 525), which skips the whole poll by design, or Supabase's pooler failed a new connection with `(EAUTHTIMEOUT) timeout while waiting for message`. The EAUTHTIMEOUT failures hit every job at once, not only clan watch.
+- **Fix:** `watcher._fetch_clan` retries `get_clan` (`CLAN_FETCH_ATTEMPTS`, `CLAN_FETCH_RETRY_DELAY_SECONDS`) before the skip-the-poll rule applies. [database/connection.py](database/connection.py) passes `connect=_connect_with_retry` to `create_pool`, which retries a failed connection open once (`CONNECT_ATTEMPTS`). Retries stay inside `ACQUIRE_TIMEOUT_SECONDS`. A connect that hangs for the full 30s still fails, because the retry only helps when the pooler errors out fast.
+
+## 2026-10-29 — stuck server sessions: the root cause behind EAUTHTIMEOUT
+
+- **Symptom:** a restart hung at `ALTER TABLE rosters` (Supabase's 2-minute `statement_timeout` then crashed it into a launchd restart), and all week new connections failed with `EAUTHTIMEOUT`. `pg_stat_activity` showed three of the bot's sessions `state='active'`, `wait_event='ClientRead'`, stuck for 6–30 hours mid-query (a `base_posts` select, the roster list, a `base_post_downloads` insert). Their client connections had died. Supavisor never closed the server side. Each held a pooler slot, and one held the `rosters` lock the migration needed.
+- **No Postgres setting catches this.** `statement_timeout` (2min for `postgres`) didn't fire, and they aren't idle-in-transaction. So `database.connection.terminate_stuck_sessions(pool)` terminates them. It only touches the bot's own role, only `active` + `ClientRead`, and only after `STUCK_SESSION_MINUTES` (10). It runs once in `main.py` before `create_tables` (startup continues if the cleanup itself fails) and as the scheduled job `terminate_stuck_sessions` every 10 minutes. Each kill logs `Terminated stuck DB session pid=…` at WARNING. If those show up often, something is still leaving dead connections behind.
+- **launchd restart race:** `install-service.sh` right after a bootout can fail with `Bootstrap failed: 5: Input/output error` while the old process is still shutting down. Wait for the old `main.py` to exit, then re-run it.
+
 ## 2026-10-29 — /subscribe links to the website instead of per-tier Payment Links
 
 - **Buyers now pay on the website** (`settings.SUBSCRIBE_URL`, default `https://seventhmonth.com/sub/`), which lists the tiers and runs Stripe checkout. A tier purchase's `PurchaseView` carries **one** link button to it (`_website_button`) instead of one Payment Link button per tier. **Confirm is unchanged**: the website's checkout lands the payment in Stripe, and the admin still picks it out of the Stripe dropdown.

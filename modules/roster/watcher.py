@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 
 _DISCORD_OP_TIMEOUT_SECONDS = 30
 
+# CoC clan fetches time out now and then (and the odd 525). One failed clan
+# skips the whole poll, so retry it before giving up on the cycle.
+CLAN_FETCH_ATTEMPTS = 3
+CLAN_FETCH_RETRY_DELAY_SECONDS = 5
+
 # CoC clan names are frequently Arabic/RTL. In a plain-text alert next to " → "
 # and Latin text the Unicode bidi algorithm reorders them, so each clan name is
 # wrapped in a LEFT-TO-RIGHT ISOLATE / POP DIRECTIONAL ISOLATE pair.
@@ -34,6 +39,20 @@ _PDI = "⁩"
 
 def _isolate(text: str) -> str:
     return f"{_LRI}{text}{_PDI}"
+
+
+async def _fetch_clan(clan_tag: str) -> dict | None:
+    """get_clan with retries; None only if every attempt failed."""
+    for attempt in range(1, CLAN_FETCH_ATTEMPTS + 1):
+        clan = await get_clan(clan_tag)
+        if clan is not None or attempt == CLAN_FETCH_ATTEMPTS:
+            return clan
+        logger.info(
+            "Clan watch: fetch failed for %s (attempt %d/%d); retrying",
+            clan_tag, attempt, CLAN_FETCH_ATTEMPTS,
+        )
+        await asyncio.sleep(CLAN_FETCH_RETRY_DELAY_SECONDS)
+    return None
 
 
 def family_tags() -> list[str]:
@@ -234,7 +253,7 @@ async def poll_clan_watch(pool: asyncpg.Pool, bot: disnake.Client) -> dict:
     player_trophies: dict[str, int | None] = {}
     family_clan_of: dict[str, str | None] = {}
     for clan_tag in family:
-        clan = await get_clan(clan_tag)
+        clan = await _fetch_clan(clan_tag)
         if clan is None:
             logger.warning(
                 "Clan watch: fetch failed for %s; skipping poll to avoid false alerts", clan_tag

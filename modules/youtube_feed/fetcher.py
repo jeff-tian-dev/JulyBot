@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -17,18 +18,71 @@ YOUTUBE_FEED_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={channel
 VIDEO_ID_PREFIX = "yt:video:"
 FEED_USER_AGENT = "Mozilla/5.0 (compatible; JulyBot/1.0; +https://www.youtube.com/feeds/videos.xml)"
 FEED_TIMEOUT_SECONDS = 15
+# YouTube's RSS server answers 404 and 500 for channels that still exist.
+# A single failed read is not evidence the channel is gone, so retry before
+# giving up for this poll. The next scheduled poll tries again either way.
+FEED_MAX_ATTEMPTS = 3
+FEED_RETRY_BACKOFF_SECONDS = 2
+TRANSIENT_HTTP_STATUSES = frozenset({404, 408, 429, 500, 502, 503, 504})
+
+
+def _looks_like_feed(body: bytes) -> bool:
+    """True when the body is Atom/XML rather than an HTML error page."""
+    head = body.lstrip()[:80].lower()
+    return head.startswith(b"<?xml") or head.startswith(b"<feed")
+
+
+def _fetch_feed_bytes(channel_id: str) -> bytes | None:
+    """GET the channel feed, retrying transient HTTP failures."""
+    url = YOUTUBE_FEED_URL.format(channel_id=channel_id)
+    last_error: Exception | None = None
+    for attempt in range(1, FEED_MAX_ATTEMPTS + 1):
+        request = urllib.request.Request(url, headers={"User-Agent": FEED_USER_AGENT})
+        try:
+            with urllib.request.urlopen(request, timeout=FEED_TIMEOUT_SECONDS) as response:
+                body = response.read()
+        except urllib.error.HTTPError as exc:
+            # A hand-built HTTPError with no body has nothing to close, and
+            # close() raises KeyError on Python 3.9 in that case.
+            if exc.fp is not None:
+                exc.close()
+            last_error = exc
+            retry = exc.code in TRANSIENT_HTTP_STATUSES and attempt < FEED_MAX_ATTEMPTS
+        except urllib.error.URLError as exc:
+            last_error = exc
+            retry = attempt < FEED_MAX_ATTEMPTS
+        else:
+            if _looks_like_feed(body):
+                return body
+            last_error = ValueError("response was not an Atom feed")
+            retry = attempt < FEED_MAX_ATTEMPTS
+
+        if not retry:
+            break
+        logger.info(
+            "YouTube feed request failed for channel_id=%s (attempt %s/%s): %s",
+            channel_id,
+            attempt,
+            FEED_MAX_ATTEMPTS,
+            last_error,
+        )
+        time.sleep(FEED_RETRY_BACKOFF_SECONDS * attempt)
+
+    logger.warning(
+        "YouTube feed request failed for channel_id=%s after %s attempt(s): %s",
+        channel_id,
+        attempt,
+        last_error,
+    )
+    return None
 
 
 def _fetch_feed_document(channel_id: str):
-    """Fetch and parse a YouTube RSS feed, using an explicit User-Agent."""
-    url = YOUTUBE_FEED_URL.format(channel_id=channel_id)
-    request = urllib.request.Request(url, headers={"User-Agent": FEED_USER_AGENT})
-    try:
-        with urllib.request.urlopen(request, timeout=FEED_TIMEOUT_SECONDS) as response:
-            return feedparser.parse(response.read())
-    except urllib.error.URLError as exc:
-        logger.warning("YouTube feed request failed for channel_id=%s: %s", channel_id, exc)
-        return feedparser.parse(b"")
+    """Fetch and parse a YouTube RSS feed. None when every attempt failed."""
+    body = _fetch_feed_bytes(channel_id)
+    if body is None:
+        return None
+    return feedparser.parse(body)
 
 
 @dataclass(frozen=True)
@@ -99,6 +153,8 @@ def _parse_feed_entry(entry, feed) -> VideoEntry | None:
 def find_video_published_sync(channel_id: str, video_id: str) -> datetime | None:
     """Return the publish time for a video ID if it appears in the channel RSS feed."""
     feed = _fetch_feed_document(channel_id)
+    if feed is None:
+        return None
     for entry in feed.entries:
         if _extract_video_id(entry) == video_id:
             return _parse_published(entry)
@@ -113,10 +169,12 @@ async def find_video_published(channel_id: str, video_id: str) -> datetime | Non
 def fetch_latest_video_sync(channel_id: str) -> VideoEntry | None:
     """Parse the YouTube RSS feed and return the latest video entry."""
     feed = _fetch_feed_document(channel_id)
+    if feed is None:
+        return None
     if getattr(feed, "bozo", False) and not feed.entries:
         logger.warning("YouTube feed parse issue for channel_id=%s: %s", channel_id, feed.bozo_exception)
         return None
-    return _parse_feed_entry(feed.entries[0], feed)
+    return _parse_feed(feed)
 
 
 async def fetch_latest_video(channel_id: str) -> VideoEntry | None:
@@ -127,6 +185,8 @@ async def fetch_latest_video(channel_id: str) -> VideoEntry | None:
 def fetch_channel_title_sync(channel_id: str) -> str | None:
     """Return the channel title from the YouTube RSS feed metadata."""
     feed = _fetch_feed_document(channel_id)
+    if feed is None:
+        return None
     title = getattr(feed.feed, "title", None)
     if not title:
         return None

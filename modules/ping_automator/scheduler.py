@@ -11,6 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from config.settings import settings
+from database.connection import terminate_stuck_sessions
 from modules.base_finder.pipeline import run_pipeline
 from modules.legend_tracker.poller import poll_all_legend_players
 from modules.legend_tracker.snapshots import save_snapshot
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 # forever and stall every later run (see logs 2026-10-24: poll_clan_watch never finished).
 _JOB_TIMEOUT_BUFFER_SECONDS = 60
 _REFRESH_BASE_CACHE_MAX_SECONDS = 2 * 3600
+_STUCK_SESSION_CHECK_INTERVAL_MINUTES = 10
 
 
 async def _run_with_timeout(coro, *, job_id: str, timeout_seconds: float) -> None:
@@ -257,6 +259,19 @@ async def subscriber_refresh_job(pool: asyncpg.Pool) -> None:
     await _run_with_timeout(_body(), job_id="refresh_subscribers", timeout_seconds=timeout)
 
 
+async def stuck_session_job(pool: asyncpg.Pool) -> None:
+    """Scheduled job: end DB sessions left stuck mid-query by dead connections."""
+    timeout = _interval_job_timeout(_STUCK_SESSION_CHECK_INTERVAL_MINUTES)
+
+    async def _body() -> None:
+        try:
+            await terminate_stuck_sessions(pool)
+        except Exception:
+            logger.exception("terminate_stuck_sessions raised")
+
+    await _run_with_timeout(_body(), job_id="terminate_stuck_sessions", timeout_seconds=timeout)
+
+
 def create_scheduler(pool: asyncpg.Pool, bot: disnake.Client) -> AsyncIOScheduler:
     """Build (but do not start) an AsyncIOScheduler with all recurring jobs."""
     scheduler = AsyncIOScheduler(
@@ -272,6 +287,14 @@ def create_scheduler(pool: asyncpg.Pool, bot: disnake.Client) -> AsyncIOSchedule
         trigger=IntervalTrigger(minutes=settings.LEGEND_POLL_INTERVAL_MINUTES),
         kwargs={"pool": pool},
         id="poll_legend_players",
+        replace_existing=True,
+    )
+
+    scheduler.add_job(
+        stuck_session_job,
+        trigger=IntervalTrigger(minutes=_STUCK_SESSION_CHECK_INTERVAL_MINUTES),
+        kwargs={"pool": pool},
+        id="terminate_stuck_sessions",
         replace_existing=True,
     )
 

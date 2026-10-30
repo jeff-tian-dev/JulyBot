@@ -101,6 +101,37 @@ async def test_view_is_posted_publicly() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tracked_roster_view_has_an_inout_button() -> None:
+    cog = roster_commands.RosterCommands(MagicMock())
+    inter = _command_inter()
+    inter.guild.get_member.return_value.display_name = "Jeff"
+    built = {
+        "name": "Main",
+        "watched": True,
+        "members": [
+            {
+                "discord_id": 1,
+                "coc_tag": "#ABC",
+                "coc_name": "Bob",
+                "coc_api_ok": True,
+                "trophies": 5000,
+                "in_main_clan": False,
+                "daily_seconds": 7200,
+            }
+        ],
+    }
+
+    with patch.object(roster_commands.storage, "build_roster_view", new=AsyncMock(return_value=built)):
+        await cog.view.callback(cog, inter, name="Main")
+
+    posted = inter.edit_original_response.await_args.kwargs["view"]
+    assert [child.label for child in posted.children] == ["Trophies", "In/Out", "CoC Tag", "IGN", "Discord"]
+    assert "❌" in posted.embed().description
+    inout = next(child for child in posted.children if child.label == "In/Out")
+    assert inout.style == disnake.ButtonStyle.success
+
+
+@pytest.mark.asyncio
 async def test_unknown_roster_error_is_shown_only_to_the_invoker() -> None:
     cog = roster_commands.RosterCommands(MagicMock())
     inter = _command_inter()

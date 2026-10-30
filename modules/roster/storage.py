@@ -8,6 +8,7 @@ the Discord layer to render as "Unlinked".
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import asyncpg
@@ -22,7 +23,13 @@ logger = logging.getLogger(__name__)
 MAX_NAME_LEN = 100
 # /roster view reuses cached CoC data (name + clan) this fresh instead of
 # calling the API again. Keyed per tag, shared across every roster.
-PLAYER_CACHE_TTL_SECONDS = 300
+# Clan watch rewrites this cache every poll (default 10 min) for anyone in a
+# family clan. The TTL is longer than that gap so a roster view between polls
+# does not refetch those players one API call at a time.
+PLAYER_CACHE_TTL_SECONDS = 15 * 60
+# How many stale tags to refresh from the CoC API at once. The API has no
+# bulk-player endpoint, and a wide-open burst gets rate-limited.
+PLAYER_FETCH_CONCURRENCY = 8
 
 
 def _clean_name(name: str) -> str:
@@ -356,28 +363,28 @@ async def build_roster_view(pool: asyncpg.Pool, guild_id: int, name: str) -> dic
     roster = await _require_roster(pool, guild_id, name)
 
     async with pool.acquire() as conn:
+        # One round trip. The old per-member lookups were a Supabase query
+        # each, which is most of the wait on a roster of ~90.
         members = await conn.fetch(
-            "SELECT discord_id, coc_tag FROM roster_members WHERE roster_id = $1 ORDER BY added_at ASC;",
+            """
+            SELECT
+                COALESCE(
+                    m.discord_id,
+                    (SELECT u.discord_id FROM users u WHERE u.coc_tag = m.coc_tag LIMIT 1)
+                ) AS discord_id,
+                COALESCE(
+                    m.coc_tag,
+                    (SELECT u.coc_tag FROM users u
+                     WHERE u.discord_id = m.discord_id
+                     ORDER BY u.linked_at ASC LIMIT 1)
+                ) AS coc_tag
+            FROM roster_members m
+            WHERE m.roster_id = $1
+            ORDER BY m.added_at ASC;
+            """,
             roster["id"],
         )
-        resolved: list[dict] = []
-        for m in members:
-            discord_id = m["discord_id"]
-            coc_tag = m["coc_tag"]
-            if coc_tag is None and discord_id is not None:
-                link = await conn.fetchrow(
-                    "SELECT coc_tag FROM users WHERE discord_id = $1 ORDER BY linked_at ASC LIMIT 1;",
-                    discord_id,
-                )
-                if link is not None:
-                    coc_tag = link["coc_tag"]
-            elif discord_id is None and coc_tag is not None:
-                link = await conn.fetchrow(
-                    "SELECT discord_id FROM users WHERE coc_tag = $1;", coc_tag
-                )
-                if link is not None:
-                    discord_id = link["discord_id"]
-            resolved.append({"discord_id": discord_id, "coc_tag": coc_tag})
+        resolved = [{"discord_id": m["discord_id"], "coc_tag": m["coc_tag"]} for m in members]
 
     # Resolve CoC name/clan for every tag through the TTL cache (calls the API
     # only for stale/missing tags). Done after the DB connection is released.
@@ -402,6 +409,7 @@ async def build_roster_view(pool: asyncpg.Pool, guild_id: int, name: str) -> dic
                 "in_main_clan": mem["in_clan"] if mem else None,
                 "out_seconds": mem["out_seconds"] if mem else None,
                 "total_seconds": mem["total_seconds"] if mem else None,
+                "daily_seconds": mem["daily_absent_seconds"] if mem else None,
             }
         )
     return {"name": roster["name"], "watched": watched, "members": out}
@@ -415,7 +423,7 @@ async def _membership_for_view(pool: asyncpg.Pool, tags: list[str]) -> dict[str,
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT coc_tag, in_clan,
+            SELECT coc_tag, in_clan, daily_absent_seconds,
                    CASE WHEN NOT in_clan AND left_at IS NOT NULL
                         THEN EXTRACT(EPOCH FROM (NOW() - left_at))::bigint END AS out_seconds,
                    (total_absent_seconds
@@ -560,29 +568,15 @@ async def touch_name(
         )
 
 
-async def _upsert_player_cache(
-    pool: asyncpg.Pool,
-    coc_tag: str,
-    coc_name: str | None,
-    clan_name: str | None,
-    trophies: int | None,
-) -> None:
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO coc_player_cache (coc_tag, coc_name, clan_name, trophies, fetched_at)
-            VALUES ($1, $2, $3, $4, NOW())
-            ON CONFLICT (coc_tag) DO UPDATE
-                SET coc_name = EXCLUDED.coc_name,
-                    clan_name = EXCLUDED.clan_name,
-                    trophies = EXCLUDED.trophies,
-                    fetched_at = NOW();
-            """,
-            coc_tag,
-            coc_name,
-            clan_name,
-            trophies,
-        )
+_PLAYER_CACHE_UPSERT = """
+INSERT INTO coc_player_cache (coc_tag, coc_name, clan_name, trophies, fetched_at)
+VALUES ($1, $2, $3, $4, NOW())
+ON CONFLICT (coc_tag) DO UPDATE
+    SET coc_name = EXCLUDED.coc_name,
+        clan_name = EXCLUDED.clan_name,
+        trophies = EXCLUDED.trophies,
+        fetched_at = NOW();
+"""
 
 
 async def _resolve_players(pool: asyncpg.Pool, tags: list[str]) -> dict[str, dict]:
@@ -618,27 +612,43 @@ async def _resolve_players(pool: asyncpg.Pool, tags: list[str]) -> dict[str, dic
         }
 
     result: dict[str, dict] = {}
+    pending: list[tuple[str, object]] = []
     for tag in unique:
         row = cache.get(tag)
         if row is not None and row["fresh"]:
             result[tag] = _hit(row)
-            continue
+        else:
+            pending.append((tag, row))
 
-        player = await get_player(tag)
+    if not pending:
+        return result
+
+    missing = {"coc_name": None, "clan_name": None, "trophies": None, "coc_api_ok": False}
+    sem = asyncio.Semaphore(PLAYER_FETCH_CONCURRENCY)
+
+    async def _refresh(tag: str, row) -> tuple:
+        async with sem:
+            player = await get_player(tag)
         if player is not None:
-            coc_name = player.get("name")
-            clan_name = (player.get("clan") or {}).get("name")
-            trophies = player.get("trophies")
-            await _upsert_player_cache(pool, tag, coc_name, clan_name, trophies)
-            result[tag] = {
-                "coc_name": coc_name,
-                "clan_name": clan_name,
-                "trophies": trophies,
+            info = {
+                "coc_name": player.get("name"),
+                "clan_name": (player.get("clan") or {}).get("name"),
+                "trophies": player.get("trophies"),
                 "coc_api_ok": True,
             }
-        elif row is not None:
-            # API failed but we have a stale copy — better than "Unknown".
-            result[tag] = _hit(row)
-        else:
-            result[tag] = {"coc_name": None, "clan_name": None, "trophies": None, "coc_api_ok": False}
+            return tag, info, (tag, info["coc_name"], info["clan_name"], info["trophies"])
+        # API failed but we have a stale copy — better than "Unknown".
+        if row is not None:
+            return tag, _hit(row), None
+        return tag, dict(missing), None
+
+    refreshed = await asyncio.gather(*(_refresh(tag, row) for tag, row in pending))
+    writes = []
+    for tag, info, write in refreshed:
+        result[tag] = info
+        if write is not None:
+            writes.append(write)
+    if writes:
+        async with pool.acquire() as conn:
+            await conn.executemany(_PLAYER_CACHE_UPSERT, writes)
     return result

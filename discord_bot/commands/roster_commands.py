@@ -6,6 +6,8 @@ Members can be added by Discord user (add/remove/move) or by raw CoC tag
 """
 from __future__ import annotations
 
+import asyncio
+
 import disnake
 from disnake.ext import commands
 
@@ -15,6 +17,7 @@ from modules.roster.render import (
     ROSTER_COLOR,
     VIEW_COLUMNS,
     VIEW_HIDDEN,
+    VIEW_WATCHED_COLUMNS,
     render_embed,
     view_cells,
 )
@@ -23,6 +26,9 @@ ADMIN_PERMS = disnake.Permissions(administrator=True)
 NO_PINGS = disnake.AllowedMentions.none()
 # How long the column buttons on a posted roster stay clickable.
 VIEW_TIMEOUT_SECONDS = 300
+# Discord name lookups that miss the guild cache. A 90-person roster used to
+# await these one at a time.
+USER_LOOKUP_CONCURRENCY = 10
 
 
 async def _roster_name_autocomplete(
@@ -39,7 +45,8 @@ class RosterView(disnake.ui.View):
 
     Holds the already-resolved rows so toggling re-renders instantly without
     re-hitting the DB or CoC API. A button is green when its column is shown,
-    grey when hidden. Watched rosters add Status and Total Out columns.
+    grey when hidden. Tracked rosters add an In/Out button: the daily board's
+    checkmark and today's time out, between trophies and the name.
 
     The message is public, so a toggle changes it for every viewer — only the
     admin who ran the command (`owner_id`) may click. On timeout the buttons
@@ -220,13 +227,19 @@ class RosterCommands(commands.Cog):
         members = sorted(
             view["members"], key=lambda m: m["trophies"] if m["trophies"] is not None else -1, reverse=True
         )
-        rows = []
-        for m in members:
-            discord = await self._user_label(inter.guild, m["discord_id"])
-            rows.append(view_cells(m, discord))
+        sem = asyncio.Semaphore(USER_LOOKUP_CONCURRENCY)
+
+        async def _label(discord_id: int | None) -> str:
+            async with sem:
+                return await self._user_label(inter.guild, discord_id)
+
+        labels = await asyncio.gather(*(_label(m["discord_id"]) for m in members))
+        watched = view["watched"]
+        rows = [view_cells(m, label, watched=watched) for m, label in zip(members, labels)]
+        columns = VIEW_WATCHED_COLUMNS if watched else VIEW_COLUMNS
 
         roster_view = RosterView(
-            f"{view['name']}{marker}", rows, VIEW_COLUMNS, VIEW_HIDDEN, owner_id=inter.author.id
+            f"{view['name']}{marker}", rows, columns, VIEW_HIDDEN, owner_id=inter.author.id
         )
         roster_view.message = await inter.edit_original_response(
             embed=roster_view.embed(), view=roster_view, allowed_mentions=NO_PINGS

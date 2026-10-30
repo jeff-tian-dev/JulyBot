@@ -97,17 +97,12 @@ async def test_move_member_not_in_source() -> None:
 async def test_build_roster_view_marks_unlinked(monkeypatch) -> None:
     # One member added by discord id with no CoC link, one added by tag.
     conn = MagicMock()
-    conn.fetchrow = AsyncMock(
-        side_effect=[
-            {"id": 5, "name": "War A"},  # _require_roster -> get_roster
-            None,  # users lookup for the discord-only member -> unlinked
-            {"discord_id": 111},  # users lookup for the tag member -> linked back
-        ]
-    )
+    conn.fetchrow = AsyncMock(return_value={"id": 5, "name": "War A"})
+    # The member query resolves links in SQL, so the rows arrive already joined.
     conn.fetch = AsyncMock(
         return_value=[
             {"discord_id": 42, "coc_tag": None},
-            {"discord_id": None, "coc_tag": "#ABC"},
+            {"discord_id": 111, "coc_tag": "#ABC"},
         ]
     )
     # Player enrichment is covered by the _resolve_players tests below.
@@ -149,14 +144,14 @@ async def test_resolve_players_refetches_when_stale(monkeypatch) -> None:
     conn.fetch = AsyncMock(
         return_value=[{"coc_tag": "#ABC", "coc_name": "Old", "clan_name": None, "fresh": False}]
     )
-    conn.execute = AsyncMock(return_value="INSERT 0 1")
+    conn.executemany = AsyncMock()
     monkeypatch.setattr(
         storage, "get_player", AsyncMock(return_value={"name": "New", "clan": {"name": "July"}})
     )
 
     result = await storage._resolve_players(_fake_pool(conn), ["#ABC"])
     assert result["#ABC"]["coc_name"] == "New" and result["#ABC"]["clan_name"] == "July"
-    conn.execute.assert_awaited()  # cache refreshed
+    conn.executemany.assert_awaited()  # cache refreshed in one batch
 
 
 @pytest.mark.asyncio
@@ -236,3 +231,33 @@ def test_bubble_isolates_rtl_cells_from_neighbours() -> None:
     # ...and the Arabic clan sits inside its own isolate, never fused to "5m".
     assert f"{rc._LRI}دردشه{rc._PDI}" in bubble
     assert f"{rc._LRI}❌ 5m{rc._PDI}" in bubble
+
+
+def test_tracked_view_puts_inout_between_trophies_and_name() -> None:
+    from modules.roster.render import VIEW_HIDDEN, VIEW_WATCHED_COLUMNS, _bubble, view_cells
+
+    out = {
+        "coc_tag": "#ABC",
+        "coc_name": "Bob",
+        "coc_api_ok": True,
+        "trophies": 5000,
+        "in_main_clan": False,
+        "daily_seconds": 2 * 3600,
+    }
+    inside = {
+        "coc_tag": "#ABC",
+        "coc_name": "Bob",
+        "coc_api_ok": True,
+        "trophies": 5000,
+        "in_main_clan": True,
+        "daily_seconds": 0,
+    }
+    assert view_cells(out, "jeff", watched=True)["inout"] == "❌   2h"
+    assert view_cells(inside, "jeff", watched=True)["inout"] == "✅   0m"
+    assert "inout" not in view_cells(out, "jeff")
+
+    row = view_cells(out, "jeff", watched=True)
+    show = {key: key not in VIEW_HIDDEN for key in VIEW_WATCHED_COLUMNS}
+    bubble = _bubble(1, row, VIEW_WATCHED_COLUMNS, show)
+    assert bubble.index("5000") < bubble.index("❌") < bubble.index("Bob")
+    assert "#ABC" not in bubble

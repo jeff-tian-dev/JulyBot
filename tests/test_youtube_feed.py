@@ -1,6 +1,7 @@
 """Unit tests for modules.youtube_feed."""
 from __future__ import annotations
 
+import urllib.error
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch, ANY
@@ -81,6 +82,100 @@ def test_parse_feed_returns_latest_entry() -> None:
     assert entry.video_id == "latestVid01"
     assert entry.title == "Latest Upload"
     assert entry.channel_title == "My Channel"
+
+
+_FEED_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns="http://www.w3.org/2005/Atom">
+  <title>My Channel</title>
+  <entry>
+    <id>yt:video:latestVid01</id>
+    <yt:videoId>latestVid01</yt:videoId>
+    <title>Latest Upload</title>
+    <link rel="alternate" href="https://www.youtube.com/watch?v=latestVid01"/>
+    <published>Mon, 01 Jan 2026 12:00:00 GMT</published>
+  </entry>
+</feed>
+"""
+
+
+class _FeedBody:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+def _http_error(code: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError("https://www.youtube.com/feeds/videos.xml", code, "error", None, None)
+
+
+def _raise_http_error(code: int):
+    def _raise(*_args, **_kwargs):
+        raise _http_error(code)
+
+    return _raise
+
+
+def test_fetch_latest_video_retries_transient_404() -> None:
+    channel_id = "UC" + "a" * 22
+    with patch.object(
+        fetcher.urllib.request,
+        "urlopen",
+        side_effect=[_http_error(404), _FeedBody(_FEED_XML)],
+    ) as urlopen, patch.object(fetcher.time, "sleep") as sleep:
+        entry = fetcher.fetch_latest_video_sync(channel_id)
+
+    assert urlopen.call_count == 2
+    sleep.assert_called_once_with(fetcher.FEED_RETRY_BACKOFF_SECONDS)
+    assert entry is not None
+    assert entry.video_id == "latestVid01"
+    assert entry.channel_title == "My Channel"
+
+
+def test_fetch_latest_video_gives_up_without_raising_on_repeated_404() -> None:
+    channel_id = "UC" + "b" * 22
+    with patch.object(
+        fetcher.urllib.request, "urlopen", side_effect=_raise_http_error(404)
+    ) as urlopen, patch.object(fetcher.time, "sleep") as sleep:
+        entry = fetcher.fetch_latest_video_sync(channel_id)
+
+    assert entry is None
+    assert urlopen.call_count == fetcher.FEED_MAX_ATTEMPTS
+    assert sleep.call_count == fetcher.FEED_MAX_ATTEMPTS - 1
+
+
+def test_fetch_latest_video_does_not_retry_client_error() -> None:
+    channel_id = "UC" + "c" * 22
+    with patch.object(
+        fetcher.urllib.request, "urlopen", side_effect=_http_error(400)
+    ) as urlopen, patch.object(fetcher.time, "sleep") as sleep:
+        entry = fetcher.fetch_latest_video_sync(channel_id)
+
+    assert entry is None
+    assert urlopen.call_count == 1
+    sleep.assert_not_called()
+
+
+def test_fetch_latest_video_retries_html_body() -> None:
+    channel_id = "UC" + "d" * 22
+    html = b"<!DOCTYPE html><title>Error 404 (Not Found)!!1</title>"
+    with patch.object(
+        fetcher.urllib.request,
+        "urlopen",
+        side_effect=[_FeedBody(html), _FeedBody(_FEED_XML)],
+    ) as urlopen, patch.object(fetcher.time, "sleep"):
+        entry = fetcher.fetch_latest_video_sync(channel_id)
+
+    assert urlopen.call_count == 2
+    assert entry is not None
+    assert entry.video_id == "latestVid01"
 
 
 @pytest.mark.asyncio

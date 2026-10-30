@@ -10,7 +10,7 @@ import logging
 import signal
 
 from config.settings import settings
-from database.connection import close_pool, get_pool
+from database.connection import close_pool, get_pool, terminate_stuck_sessions
 from database.models import create_tables
 from discord_bot.bot import create_bot
 from modules.legend_tracker.poller import close_session as close_legend_session
@@ -31,6 +31,12 @@ def _configure_logging() -> None:
 
 async def _run() -> None:
     pool = await get_pool()
+    # A stuck session left by the previous process can hold a lock that the
+    # migrations below would wait on.
+    try:
+        await terminate_stuck_sessions(pool)
+    except Exception:
+        logger.exception("Stuck-session cleanup failed; continuing startup")
     await create_tables(pool)
 
     seeded = await seed_unseeded_channels(pool)
