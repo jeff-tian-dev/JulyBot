@@ -175,6 +175,7 @@ cp .env.example .env   # only if setup.sh didn't already create it
 | `X_PING_COOLDOWN_HOURS`         | no       | `3`                                    | After a ping, new X posts within this window post silently |
 | `X_MAX_CONSECUTIVE_FAILURES`    | no       | `3`                                    | Consecutive connection failures before the poller alerts once and pauses (resumes on restart) |
 | `X_ALERT_CHANNEL_ID`            | no       | `0`                                    | Channel for the "X monitoring stopped" alert (0 = fall back to `MOD_LOG_CHANNEL_ID`) |
+| `X_WEBSITE_ACCOUNTS`            | no       | `yun2k411`                             | Comma-separated X accounts whose posts are saved to `website_x_posts` for seventhmonth.com; never posted to Discord |
 | `YOUTUBE_FEED_POLL_INTERVAL_MINUTES` | no  | `10`                                   | YouTube RSS poll cadence                           |
 | `YOUTUBE_PING_ROLE_ID`          | no       | `0`                                    | **Legacy** — per server via `/setup pingrole`; copied into the home server once |
 | `YOUTUBE_PING_COOLDOWN_HOURS`   | no       | `3`                                    | After a ping, new YouTube videos within this window post silently |
@@ -241,6 +242,7 @@ chmod +x deploy/*.sh                        # only if the release added new scri
 | `guild_settings`   | Per-guild ping, X, and YouTube channel settings                     |
 | `twitter_watched_accounts` | X accounts watched per guild, with `last_seen_tweet_id` (legacy table name) |
 | `seen_tweets`      | Posted tweet IDs for deduplication across restarts                        |
+| `website_x_posts`  | Post IDs from `X_WEBSITE_ACCOUNTS`, saved for seventhmonth.com and never posted to Discord. The site reads it with a read-only login |
 | `youtube_watched_channels` | YouTube channels watched per guild, with `last_seen_video_id`     |
 | `rosters`          | Named player groups per guild (`watched` flag opts into clan-watch)       |
 | `roster_members`   | Roster membership — one row per Discord user **or** raw CoC tag            |

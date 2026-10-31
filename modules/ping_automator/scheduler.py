@@ -18,7 +18,7 @@ from modules.legend_tracker.snapshots import save_snapshot
 from modules.ranked_tracker.tracking import poll_ranked_tracking
 from modules.roster.watcher import poll_clan_watch, run_daily_watchlist
 from modules.subscriptions.refresh import refresh_subscribers
-from modules.x_monitor.poller import poll_x_accounts
+from modules.x_monitor.poller import poll_website_accounts, poll_x_accounts
 from modules.youtube_feed.poller import poll_youtube_channels
 
 logger = logging.getLogger(__name__)
@@ -138,7 +138,8 @@ async def _alert_x_polling_stopped(bot: disnake.Client, failures: int) -> None:
 async def poll_x(
     pool: asyncpg.Pool, bot: disnake.Client, scheduler: AsyncIOScheduler | None = None
 ) -> None:
-    """Scheduled job: poll watched X accounts and post new posts to Discord."""
+    """Scheduled job: poll watched X accounts and post new posts to Discord, then save
+    website accounts' posts for seventhmonth.com."""
     timeout = _interval_job_timeout(settings.X_POLL_INTERVAL_MINUTES)
 
     async def _body() -> None:
@@ -182,6 +183,11 @@ async def poll_x(
 
         if summary["accounts_polled"] or summary["tweets_posted"] or summary["errors"]:
             logger.info("X poll summary: %s", summary)
+
+        try:
+            await poll_website_accounts(pool)
+        except Exception:
+            logger.exception("poll_website_accounts raised")
 
     await _run_with_timeout(_body(), job_id="poll_x_accounts", timeout_seconds=timeout)
 

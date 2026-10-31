@@ -508,3 +508,69 @@ async def test_poll_skips_repost_when_content_already_seen() -> None:
     assert summary["tweets_posted"] == 0
     channel.send.assert_not_awaited()
     mock_update.assert_awaited_once_with(pool, 1, "testuser", 101)
+
+
+def test_own_posts_skips_reposts_and_replies_and_opens_self_threads() -> None:
+    own = SimpleNamespace(id=300, is_retweet=False, is_reply=False)
+    repost = SimpleNamespace(id=301, is_retweet=True, is_reply=False)
+    reply = SimpleNamespace(id=302, is_retweet=False, is_reply=True)
+    thread = SimpleNamespace(
+        tweets=[
+            SimpleNamespace(id=303, is_retweet=False, is_reply=False),
+            SimpleNamespace(id=304, is_retweet=False, is_reply=True),
+        ]
+    )
+    assert [t.id for t in poller._own_posts([own, repost, reply, thread])] == [300, 303]
+
+
+@pytest.mark.asyncio
+async def test_save_website_posts_returns_only_new_ids() -> None:
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(side_effect=[{"tweet_id": 300}, None])
+    pool = _fake_pool(conn)
+
+    result = await storage.save_website_posts(pool, "yun2k411", [300, 301])
+    assert result == [300]
+    assert conn.fetchrow.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_poll_website_accounts_saves_new_posts_only_for_the_site() -> None:
+    tweets_page = [
+        SimpleNamespace(id=303, is_retweet=False, is_reply=False),
+        SimpleNamespace(id=302, is_retweet=True, is_reply=False),
+        SimpleNamespace(id=150, is_retweet=False, is_reply=False),
+    ]
+    mock_app = MagicMock()
+    mock_app.get_tweets = AsyncMock(return_value=tweets_page)
+    pool = _fake_pool(MagicMock())
+
+    with (
+        patch.object(poller, "settings", SimpleNamespace(X_WEBSITE_ACCOUNTS=["@Yun2k411"])),
+        patch.object(client, "is_configured", return_value=True),
+        patch.object(client, "get_client", AsyncMock(return_value=mock_app)),
+        patch.object(storage, "latest_website_post_id", AsyncMock(return_value=200)),
+        patch.object(storage, "save_website_posts", AsyncMock(return_value=[303])) as mock_save,
+        patch.object(storage, "mark_tweets_seen", AsyncMock()) as mock_seen,
+        patch("modules.x_monitor.poller.asyncio.sleep", AsyncMock()),
+    ):
+        saved = await poller.poll_website_accounts(pool)
+
+    assert saved == 1
+    mock_app.get_tweets.assert_awaited_once_with("yun2k411", pages=1, replies=False)
+    # The repost and the already-saved post (150 <= 200) are left out
+    mock_save.assert_awaited_once_with(pool, "yun2k411", [303])
+    # Website posts never claim seen_tweets, so they can't block a server's X channel
+    mock_seen.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_poll_website_accounts_skips_without_accounts() -> None:
+    get_client = AsyncMock()
+    with (
+        patch.object(poller, "settings", SimpleNamespace(X_WEBSITE_ACCOUNTS=[])),
+        patch.object(client, "is_configured", return_value=True),
+        patch.object(client, "get_client", get_client),
+    ):
+        assert await poller.poll_website_accounts(_fake_pool(MagicMock())) == 0
+    get_client.assert_not_awaited()

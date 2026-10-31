@@ -1,4 +1,4 @@
-"""Poll watched X accounts and post new posts to Discord."""
+"""Poll watched X accounts and post new posts to Discord; save website accounts' posts for the site."""
 from __future__ import annotations
 
 import asyncio
@@ -57,6 +57,58 @@ def _content_dedup_id(tweet) -> int | None:
             if dedup_id is not None:
                 return dedup_id
     return _tweet_id(tweet)
+
+
+def _own_posts(tweets) -> list:
+    """An account's own posts on a timeline page: no reposts or replies, self-threads opened up."""
+    posts = []
+    for entry in tweets:
+        # A self-thread has no ID of its own; its opening post is the one that isn't a reply
+        for tweet in getattr(entry, "tweets", None) or [entry]:
+            if _tweet_id(tweet) is None or _is_retweet(tweet) or getattr(tweet, "is_reply", False):
+                continue
+            posts.append(tweet)
+    return posts
+
+
+async def poll_website_accounts(pool: asyncpg.Pool) -> int:
+    """Save new posts from X_WEBSITE_ACCOUNTS for seventhmonth.com. Never posts to Discord.
+
+    The newest saved post is the high-water mark, so the first poll saves the account's
+    recent posts and later polls only what's newer. Returns how many posts were saved.
+    """
+    if not settings.X_WEBSITE_ACCOUNTS or not x_client.is_configured():
+        return 0
+
+    try:
+        app = await x_client.get_client()
+    except Exception:
+        logger.exception("Failed to connect X client for the website feed")
+        return 0
+
+    saved_total = 0
+    for raw_username in settings.X_WEBSITE_ACCOUNTS:
+        try:
+            username = storage.normalize_username(raw_username)
+            latest = await storage.latest_website_post_id(pool, username)
+            tweets_page = await app.get_tweets(username, pages=1, replies=False)
+            ids = {_tweet_id(tweet) for tweet in _own_posts(tweets_page)}
+            saved = await storage.save_website_posts(
+                pool, username, sorted(i for i in ids if i > latest)
+            )
+        except RateLimitReached:
+            logger.warning("X rate limit hit; the website feed waits for the next poll")
+            break
+        except Exception:
+            logger.exception("Website feed: failed to save posts for %r", raw_username)
+            continue
+
+        if saved:
+            logger.info("Saved %d post(s) from @%s for the website", len(saved), username)
+            saved_total += len(saved)
+        await asyncio.sleep(ACCOUNT_POLL_DELAY_SECONDS)
+
+    return saved_total
 
 
 async def poll_x_accounts(pool: asyncpg.Pool, bot: disnake.Client) -> dict:

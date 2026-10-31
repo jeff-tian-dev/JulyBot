@@ -243,3 +243,36 @@ async def update_last_seen(
             username,
             tweet_id,
         )
+
+
+async def latest_website_post_id(pool: asyncpg.Pool, username: str) -> int:
+    """Newest post ID already saved for the website from this account (0 if none)."""
+    async with pool.acquire() as conn:
+        latest = await conn.fetchval(
+            "SELECT COALESCE(MAX(tweet_id), 0) FROM website_x_posts WHERE username = $1;",
+            username,
+        )
+    return int(latest)
+
+
+async def save_website_posts(pool: asyncpg.Pool, username: str, tweet_ids: list[int]) -> list[int]:
+    """Insert post IDs into website_x_posts; return only newly saved IDs."""
+    if not tweet_ids:
+        return []
+
+    saved: list[int] = []
+    async with pool.acquire() as conn:
+        for tweet_id in tweet_ids:
+            result = await conn.fetchrow(
+                """
+                INSERT INTO website_x_posts (tweet_id, username)
+                VALUES ($1, $2)
+                ON CONFLICT (tweet_id) DO NOTHING
+                RETURNING tweet_id;
+                """,
+                tweet_id,
+                username,
+            )
+            if result is not None:
+                saved.append(result["tweet_id"])
+    return saved

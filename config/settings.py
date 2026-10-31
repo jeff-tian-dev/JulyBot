@@ -58,8 +58,8 @@ def _int_with_legacy(name: str, legacy: str, default: int) -> int:
         ) from e
 
 
-def _csv(name: str) -> list[str]:
-    raw = os.getenv(name, "")
+def _csv(name: str, default: str = "") -> list[str]:
+    raw = os.getenv(name, default)
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
@@ -85,6 +85,9 @@ class Settings:
     X_MAX_CONSECUTIVE_FAILURES: int = 3
     # Where the "X monitoring stopped" alert is posted. 0 -> fall back to MOD_LOG_CHANNEL_ID.
     X_ALERT_CHANNEL_ID: int = 0
+    # X accounts whose posts are saved for seventhmonth.com (its Underground page) and never
+    # posted to Discord.
+    X_WEBSITE_ACCOUNTS: list[str] = field(default_factory=list)
     YOUTUBE_FEED_POLL_INTERVAL_MINUTES: int = 10
     YOUTUBE_PING_ROLE_ID: int = 0
     YOUTUBE_PING_COOLDOWN_HOURS: int = 3
@@ -137,6 +140,7 @@ def _load() -> Settings:
         X_PING_COOLDOWN_HOURS=_int("X_PING_COOLDOWN_HOURS", 3),
         X_MAX_CONSECUTIVE_FAILURES=_int("X_MAX_CONSECUTIVE_FAILURES", 3),
         X_ALERT_CHANNEL_ID=_int("X_ALERT_CHANNEL_ID", 0),
+        X_WEBSITE_ACCOUNTS=_csv("X_WEBSITE_ACCOUNTS", "yun2k411"),
         YOUTUBE_FEED_POLL_INTERVAL_MINUTES=_int("YOUTUBE_FEED_POLL_INTERVAL_MINUTES", 10),
         YOUTUBE_PING_ROLE_ID=_int("YOUTUBE_PING_ROLE_ID", 0),
         YOUTUBE_PING_COOLDOWN_HOURS=_int("YOUTUBE_PING_COOLDOWN_HOURS", 3),

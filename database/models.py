@@ -174,6 +174,17 @@ BEGIN
 END $$;
 """
 
+# Posts saved for seventhmonth.com from X_WEBSITE_ACCOUNTS. They never reach a server, so
+# they stay out of seen_tweets (a server's "already posted" list). The website reads this
+# table with its own read-only login (RLS, role and policy were set up by hand; see CLAUDE.md).
+CREATE_WEBSITE_X_POSTS = """
+CREATE TABLE IF NOT EXISTS website_x_posts (
+    tweet_id BIGINT PRIMARY KEY,
+    username VARCHAR(50) NOT NULL,
+    saved_at TIMESTAMP DEFAULT NOW()
+);
+"""
+
 CREATE_ROSTERS = """
 CREATE TABLE IF NOT EXISTS rosters (
     id SERIAL PRIMARY KEY,
@@ -649,6 +660,7 @@ ALL_TABLES = (
     "products",
     "base_post_downloads",
     "base_posts",
+    "website_x_posts",
     "seen_tweets",
     "twitter_watched_accounts",
     "youtube_watched_channels",
@@ -695,6 +707,7 @@ async def create_tables(pool: asyncpg.Pool, home_guild_id: int = 0) -> None:
         x_ddls = (
             (CREATE_TWITTER_WATCHED_ACCOUNTS, "twitter_watched_accounts"),
             (CREATE_SEEN_TWEETS, "seen_tweets"),
+            (CREATE_WEBSITE_X_POSTS, "website_x_posts"),
         )
         for ddl, name in x_ddls:
             logger.info("Creating table %s if not exists", name)

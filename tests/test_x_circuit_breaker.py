@@ -136,3 +136,22 @@ async def test_alert_falls_back_to_mod_log_channel():
 
     bot.get_channel.assert_called_with(4242)
     channel.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_website_feed_runs_only_after_x_connects():
+    bot, channel = _bot_with_channel()
+    pool = MagicMock()
+    website = AsyncMock(return_value=0)
+
+    fail = {"connect_failed": True, "errors": 1}
+    ok = {"accounts_polled": 1, "tweets_posted": 0, "errors": 0}
+    with (
+        patch.object(scheduler, "poll_website_accounts", website),
+        patch.object(scheduler, "poll_x_accounts", AsyncMock(side_effect=[fail, ok])),
+    ):
+        await scheduler.poll_x(pool, bot, MagicMock())
+        website.assert_not_awaited()
+        await scheduler.poll_x(pool, bot, MagicMock())
+
+    website.assert_awaited_once_with(pool)
