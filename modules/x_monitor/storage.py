@@ -95,7 +95,8 @@ async def get_all_watched_accounts(pool: asyncpg.Pool) -> list[dict]:
             """
             SELECT w.id, w.guild_id, w.username, w.last_seen_tweet_id, w.added_at,
                    g.twitter_channel_id AS x_channel_id,
-                   g.twitter_enabled AS x_enabled
+                   g.twitter_enabled AS x_enabled,
+                   g.twitter_ping_role_id AS x_ping_role_id
             FROM twitter_watched_accounts w
             LEFT JOIN guild_settings g ON g.guild_id = w.guild_id
             ORDER BY w.guild_id, w.username;
@@ -202,7 +203,7 @@ async def mark_tweets_seen(
                 """
                 INSERT INTO seen_tweets (tweet_id, guild_id, username)
                 VALUES ($1, $2, $3)
-                ON CONFLICT (tweet_id) DO NOTHING
+                ON CONFLICT (guild_id, tweet_id) DO NOTHING
                 RETURNING tweet_id;
                 """,
                 tweet_id,
@@ -214,11 +215,12 @@ async def mark_tweets_seen(
     return newly_seen
 
 
-async def unmark_tweet_seen(pool: asyncpg.Pool, tweet_id: int) -> None:
-    """Release a dedup claim so a failed post can be retried on the next poll."""
+async def unmark_tweet_seen(pool: asyncpg.Pool, guild_id: int, tweet_id: int) -> None:
+    """Release a server's dedup claim so a failed post can be retried on the next poll."""
     async with pool.acquire() as conn:
         await conn.execute(
-            "DELETE FROM seen_tweets WHERE tweet_id = $1;",
+            "DELETE FROM seen_tweets WHERE guild_id = $1 AND tweet_id = $2;",
+            guild_id,
             tweet_id,
         )
 

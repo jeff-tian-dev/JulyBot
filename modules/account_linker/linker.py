@@ -179,19 +179,25 @@ async def get_linked_accounts(pool: asyncpg.Pool, discord_id: int) -> list[dict]
     ]
 
 
-async def get_all_accounts(pool: asyncpg.Pool) -> list[dict]:
-    """Return every linked account, grouped by Discord user (oldest link first).
+async def get_all_accounts(pool: asyncpg.Pool, discord_ids: list[int]) -> list[dict]:
+    """Return the linked accounts of the given Discord users, grouped by user.
 
-    Used by the admin dump command. Ordered by discord_id then linked_at so
-    the caller can group consecutive rows by the same user without sorting.
+    Used by the admin dump command, which passes the invoking server's member
+    ids: links are global, but one server's admin must only see its own members.
+    Ordered by discord_id then linked_at so the caller can group consecutive
+    rows by the same user without sorting.
     """
+    if not discord_ids:
+        return []
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT discord_id, coc_tag, coc_name, verified, linked_at
             FROM users
+            WHERE discord_id = ANY($1::bigint[])
             ORDER BY discord_id, linked_at ASC;
-            """
+            """,
+            list(discord_ids),
         )
     return [
         {

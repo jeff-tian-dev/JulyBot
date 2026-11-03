@@ -300,7 +300,7 @@ async def test_restore_picks_the_view_class_matching_the_flow() -> None:
     ]
     with patch.object(
         subscribe_commands.storage, "list_views_to_restore", new=AsyncMock(return_value=rows)
-    ), patch.object(subscribe_commands, "TIERS", {}):
+    ):
         await subscribe_commands.register_persistent_views(bot)
 
     restored = [call.args[0] for call in bot.add_view.call_args_list]
@@ -320,3 +320,42 @@ def test_payment_methods_fit_the_column() -> None:
     assert "WeChat" in agreement_commands.PAYMENT_METHODS
     # "Other" stays last so it reads as the fallback, not a peer.
     assert agreement_commands.PAYMENT_METHODS[-1] == "Other"
+
+
+@pytest.mark.asyncio
+async def test_receipt_treats_another_servers_agreement_as_unknown() -> None:
+    """Agreement ids are global; one server's admin must not pull another's receipt."""
+    inter = MagicMock()
+    inter.guild.id = 1
+    inter.response.send_message = AsyncMock()
+    cog = agreement_commands.AgreementCommands(MagicMock())
+    cog.bot.pool = MagicMock()
+
+    with patch.object(
+        agreement_commands.storage,
+        "get_agreement",
+        new=AsyncMock(return_value=_row(guild_id=999)),
+    ):
+        await cog.receipt.callback(cog, inter, agreement_id=5)
+
+    message = inter.response.send_message.await_args.args[0]
+    assert "No agreement found with id 5" in message
+    assert "file" not in inter.response.send_message.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_lookup_is_scoped_to_the_current_server() -> None:
+    inter = MagicMock()
+    inter.guild.id = 1
+    inter.response.send_message = AsyncMock()
+    member = MagicMock(spec=disnake.User)
+    member.id = 4242
+    cog = agreement_commands.AgreementCommands(MagicMock())
+    cog.bot.pool = MagicMock()
+
+    with patch.object(
+        agreement_commands.storage, "list_agreements_for_buyer", new=AsyncMock(return_value=[])
+    ) as listing:
+        await cog.lookup.callback(cog, inter, member=member)
+
+    assert listing.await_args.args[1:] == (1, 4242)

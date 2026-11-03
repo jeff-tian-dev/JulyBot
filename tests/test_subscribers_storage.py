@@ -181,10 +181,14 @@ async def test_list_subscribers_for_discord_id_is_newest_first() -> None:
     conn = MagicMock()
     conn.fetch = AsyncMock(return_value=[{"id": 2}, {"id": 1}])
 
-    rows = await storage.list_subscribers_for_discord_id(_fake_pool(conn), 4242)
+    rows = await storage.list_subscribers_for_discord_id(_fake_pool(conn), 7, 4242)
 
     assert [r["id"] for r in rows] == [2, 1]
-    assert "ORDER BY s.created_at DESC" in conn.fetch.await_args.args[0]
+    sql, *args = conn.fetch.await_args.args
+    assert "ORDER BY s.created_at DESC" in sql
+    # Scoped to the asking server: another server's purchases never show up.
+    assert "s.guild_id = $1" in sql
+    assert args == [7, 4242]
 
 
 # --- relink (fixing a mislinked payment) --------------------------------------
@@ -207,12 +211,14 @@ async def test_relink_rewrites_stripe_fields_but_not_the_buyer() -> None:
         status="succeeded",
         current_period_end=None,
         relinked_by=555,
+        product_id=4,
     )
 
     sql, *args = conn.fetchrow.await_args.args
     assert "UPDATE subscribers" in sql
     assert "discord_id" not in sql
     assert "relinked_by = $8" in sql
+    assert "product_id = $9" in sql and args[8] == 4
     assert "relinked_at = NOW()" in sql
     assert args[0] == 3
     assert args[1] == "pi_right"

@@ -88,25 +88,22 @@ class Settings:
     YOUTUBE_FEED_POLL_INTERVAL_MINUTES: int = 10
     YOUTUBE_PING_ROLE_ID: int = 0
     YOUTUBE_PING_COOLDOWN_HOURS: int = 3
+    # LEGACY single-server values. Channels, ping roles and clan families are per
+    # server now (guild_settings / guild_clans, set with /setup). These are only
+    # read once, by guild_config.storage.import_legacy_config, to seed the home
+    # server (DISCORD_GUILD_ID) — plus MOD_LOG_CHANNEL_ID as the X-down alert
+    # fallback, which is an operator alert, not a per-server one.
     MOD_LOG_CHANNEL_ID: int = 0
     COC_CLAN_TAG: str = ""
     COC_FAMILY_CLAN_TAGS: list[str] = field(default_factory=list)
-    CLAN_WATCH_CHANNEL_ID: int = 1528897151625592993
+    CLAN_WATCH_CHANNEL_ID: int = 0
     CLAN_WATCH_POLL_INTERVAL_MINUTES: int = 10
     CLAN_WATCH_DAILY_HOUR: int = 1
     CLAN_WATCH_TIMEZONE: str = "America/New_York"
     RANKED_TRACKING_POLL_INTERVAL_MINUTES: int = 20
-    # The website /subscribe sends buyers to (it lists the tiers and runs
-    # Stripe checkout). Empty means /subscribe replies that it isn't set up.
-    SUBSCRIBE_URL: str = "https://seventhmonth.com/sub/"
-    # Stripe Payment Links, no longer used by /subscribe (which links to
-    # SUBSCRIBE_URL instead); kept because modules/subscriptions/tiers.py reads them. Created in the Stripe
-    # Dashboard (Payment Links); empty means the tier is unavailable and
-    # /subscribe says so rather than posting a dead button.
-    STRIPE_PAYMENT_LINK_L2_L3: str = ""
-    STRIPE_PAYMENT_LINK_L1: str = ""
-    # Read-only use: looking up subscriptions when an admin confirms a payment,
-    # and re-checking their status on a schedule. Deliberately NOT required —
+    # Read-only use: mapping product pages' Payment Links, listing a server's
+    # checkouts when an admin confirms a payment, and re-checking status on a
+    # schedule. Deliberately NOT required —
     # a missing key must never stop the Discord bot, only disable these lookups.
     STRIPE_SECRET_KEY: str = ""
     SUBSCRIBER_REFRESH_INTERVAL_MINUTES: int = 60
@@ -141,19 +138,16 @@ def _load() -> Settings:
         X_MAX_CONSECUTIVE_FAILURES=_int("X_MAX_CONSECUTIVE_FAILURES", 3),
         X_ALERT_CHANNEL_ID=_int("X_ALERT_CHANNEL_ID", 0),
         YOUTUBE_FEED_POLL_INTERVAL_MINUTES=_int("YOUTUBE_FEED_POLL_INTERVAL_MINUTES", 10),
-        YOUTUBE_PING_ROLE_ID=_int("YOUTUBE_PING_ROLE_ID", 1508359179440750602),
+        YOUTUBE_PING_ROLE_ID=_int("YOUTUBE_PING_ROLE_ID", 0),
         YOUTUBE_PING_COOLDOWN_HOURS=_int("YOUTUBE_PING_COOLDOWN_HOURS", 3),
-        MOD_LOG_CHANNEL_ID=_int("MOD_LOG_CHANNEL_ID", 1514111681222148219),
+        MOD_LOG_CHANNEL_ID=_int("MOD_LOG_CHANNEL_ID", 0),
         COC_CLAN_TAG=_optional("COC_CLAN_TAG", ""),
         COC_FAMILY_CLAN_TAGS=_csv("COC_FAMILY_CLAN_TAGS"),
-        CLAN_WATCH_CHANNEL_ID=_int("CLAN_WATCH_CHANNEL_ID", 1528897151625592993),
+        CLAN_WATCH_CHANNEL_ID=_int("CLAN_WATCH_CHANNEL_ID", 0),
         CLAN_WATCH_POLL_INTERVAL_MINUTES=_int("CLAN_WATCH_POLL_INTERVAL_MINUTES", 10),
         CLAN_WATCH_DAILY_HOUR=_int("CLAN_WATCH_DAILY_HOUR", 1),
         CLAN_WATCH_TIMEZONE=_optional("CLAN_WATCH_TIMEZONE", "America/New_York"),
         RANKED_TRACKING_POLL_INTERVAL_MINUTES=_int("RANKED_TRACKING_POLL_INTERVAL_MINUTES", 20),
-        SUBSCRIBE_URL=_optional("SUBSCRIBE_URL", "https://seventhmonth.com/sub/"),
-        STRIPE_PAYMENT_LINK_L2_L3=_optional("STRIPE_PAYMENT_LINK_L2_L3", ""),
-        STRIPE_PAYMENT_LINK_L1=_optional("STRIPE_PAYMENT_LINK_L1", ""),
         STRIPE_SECRET_KEY=_optional("STRIPE_SECRET_KEY", ""),
         SUBSCRIBER_REFRESH_INTERVAL_MINUTES=_int("SUBSCRIBER_REFRESH_INTERVAL_MINUTES", 60),
     )

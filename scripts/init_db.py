@@ -52,7 +52,7 @@ async def main() -> int:
         return 1
 
     try:
-        await create_tables(pool)
+        await create_tables(pool, settings.DISCORD_GUILD_ID)
         seeded = await _seed_watched_channels(pool)
         print(f"Tables ready. Seeded {seeded} watched channel(s).")
         return 0

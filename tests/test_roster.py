@@ -207,8 +207,37 @@ async def test_get_watched_tags_drops_untagged() -> None:
 async def test_mark_joined_returns_absence_seconds() -> None:
     conn = MagicMock()
     conn.fetchrow = AsyncMock(return_value={"absent_seconds": 7200})
-    seconds = await storage.mark_joined(_fake_pool(conn), "#ABC", "Bob")
+    seconds = await storage.mark_joined(_fake_pool(conn), 7, "#ABC", "Bob")
     assert seconds == 7200
+    sql, *args = conn.fetchrow.await_args.args
+    assert "c.guild_id = $1" in sql
+    assert args[:2] == [7, "#ABC"]
+
+
+@pytest.mark.asyncio
+async def test_clan_membership_queries_are_scoped_to_one_server() -> None:
+    """The same tag can be in one server's family and out of another's, so every
+    clan_membership read and write filters by guild_id."""
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[])
+    conn.execute = AsyncMock()
+    pool = _fake_pool(conn)
+
+    await storage.get_membership_map(pool, 7, ["#A"])
+    await storage.get_daily_board_state(pool, 7, ["#A"])
+    await storage._membership_for_view(pool, 7, ["#A"])
+    for call in conn.fetch.await_args_list:
+        assert "guild_id = $1" in call.args[0]
+        assert call.args[1] == 7
+
+    await storage.seed_membership(pool, 7, "#A", "Al", True, "July")
+    await storage.mark_left(pool, 7, "#A", "Al", "Rogues")
+    await storage.touch_name(pool, 7, "#A", "Al", "July")
+    await storage.add_daily_absent(pool, 7, ["#A"], 600)
+    await storage.reset_daily_absent(pool, 7)
+    for call in conn.execute.await_args_list:
+        assert "guild_id" in call.args[0]
+        assert call.args[1] == 7
 
 
 # --- view rendering (bidi isolation) ---------------------------------------

@@ -1,17 +1,16 @@
-"""Admin-managed one-time products — anything sold besides the L1/L2 tiers.
+"""Admin-managed products: the link buttons /subscribe shows, per server.
 
-A product is just a name and a Stripe Payment Link (plus an optional
-description), per guild. Selling one runs through the same purchase pipeline as
-a tier — an `agreements` row, the status message with Confirm/Cancel, then a
-`subscribers` row once an admin links the Stripe payment — so it gets the same
-receipts and purchase history. `product_id` on those rows is the only thing
-that marks them as a product sale.
+A product is a button label (`name`) plus a website page (`payment_link`, a
+historical column name — it now usually holds a page like
+https://seventhmonth.com/sub/, though a bare https://buy.stripe.com/... Payment
+Link works too). `/product add|remove|list` manage them; `/subscribe <member>`
+posts one link button per live product of that server.
 
-**Products are always one-time purchases**, never access for a month: product
-rows are excluded from `list_active_subscribers` and from the monthly archive.
-That is decided here, not by Stripe — the bot cannot see a Payment Link's
-billing model, so a product link set to recurring in the Dashboard would still
-be treated as one-time. Configure product links as one-time.
+Which product a purchase was for is learned at confirmation: the Stripe payment
+the admin picks came through a Payment Link found on one product's page (see
+modules/subscriptions/payment_links.py), and that sets `product_id` on the
+`agreements` and `subscribers` rows. Every purchase counts towards
+`/purchases active` and the monthly archive, whatever was bought.
 
 Removal is a soft delete: past purchases reference the row. See the products
 table comment in database/models.py.
@@ -26,12 +25,16 @@ from urllib.parse import urlparse
 
 import asyncpg
 
-MAX_NAME_LENGTH = 100
+# The name is a Discord button label, which Discord caps at 80 characters.
+MAX_NAME_LENGTH = 80
 MAX_DESCRIPTION_LENGTH = 300
 MAX_LINK_LENGTH = 500
 ALLOWED_LINK_SCHEMES = ("https",)
 # Autocomplete can return at most 25 choices (Discord's limit).
 MAX_AUTOCOMPLETE_CHOICES = 25
+# The /subscribe message carries one link button per product plus Confirm and
+# Cancel; Discord allows 25 buttons on a message.
+MAX_PRODUCTS_PER_GUILD = 20
 
 _WHITESPACE = re.compile(r"\s+")
 
@@ -57,20 +60,18 @@ def validate_payment_link(link: str) -> str:
     """Return the cleaned link, or raise ProductError.
 
     https only: it becomes a Discord link button a buyer pays through, so a
-    plain-http or `javascript:` URL has no business there. The host is not
-    pinned to buy.stripe.com, because Stripe lets a Payment Link run on a
-    custom domain.
+    plain-http or `javascript:` URL has no business there. Any host is allowed —
+    it's the page buyers are sent to, usually the website.
     """
     cleaned = _WHITESPACE.sub("", link or "")
     if not cleaned:
-        raise ProductError("The payment link can't be empty.")
+        raise ProductError("The link can't be empty.")
     if len(cleaned) > MAX_LINK_LENGTH:
         raise ProductError(f"That link is too long (limit {MAX_LINK_LENGTH} characters).")
     parsed = urlparse(cleaned)
     if parsed.scheme.lower() not in ALLOWED_LINK_SCHEMES or not parsed.netloc:
         raise ProductError(
-            "The payment link must be a full https:// URL "
-            "(e.g. a https://buy.stripe.com/... Payment Link)."
+            "The link must be a full https:// URL (e.g. https://seventhmonth.com/sub/)."
         )
     return cleaned
 
@@ -95,12 +96,21 @@ async def add_product(
     description: str | None,
     created_by: int,
 ) -> asyncpg.Record:
-    """Create a product. Raises ProductError on bad input or a duplicate name."""
+    """Create a product. Raises ProductError on bad input, a duplicate name, or a
+    server that already has MAX_PRODUCTS_PER_GUILD products."""
     name = validate_name(name)
     payment_link = validate_payment_link(payment_link)
     description = validate_description(description)
     try:
         async with pool.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM products WHERE guild_id = $1 AND removed_at IS NULL;",
+                guild_id,
+            )
+            if count >= MAX_PRODUCTS_PER_GUILD:
+                raise ProductError(
+                    f"This server already has {MAX_PRODUCTS_PER_GUILD} products. Remove one first."
+                )
             return await conn.fetchrow(
                 """
                 INSERT INTO products (guild_id, name, payment_link, description, created_by)
@@ -122,9 +132,9 @@ async def remove_product(
 ) -> asyncpg.Record | None:
     """Soft-delete a live product by name (case-insensitive); None if there is none.
 
-    Never a DELETE — past purchases reference the row. A purchase already open
-    for this product is unaffected: its message keeps its link button and can
-    still be confirmed.
+    Never a DELETE — past purchases reference the row. A purchase message
+    already posted keeps its button. The caller releases the product's Stripe
+    links (payment_links.release_product_links).
     """
     async with pool.acquire() as conn:
         return await conn.fetchrow(
@@ -177,6 +187,7 @@ def matching_names(products, typed: str) -> list[str]:
 
 
 __all__ = [
+    "MAX_PRODUCTS_PER_GUILD",
     "DuplicateProductError",
     "ProductError",
     "add_product",

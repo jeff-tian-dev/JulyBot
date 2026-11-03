@@ -164,7 +164,7 @@ async def get_all_watched_channels(pool: asyncpg.Pool) -> list[dict]:
         rows = await conn.fetch(
             """
             SELECT w.id, w.guild_id, w.channel_id, w.channel_name, w.last_seen_video_id, w.added_at,
-                   g.youtube_channel_id, g.youtube_enabled
+                   g.youtube_channel_id, g.youtube_enabled, g.youtube_ping_role_id
             FROM youtube_watched_channels w
             LEFT JOIN guild_settings g ON g.guild_id = w.guild_id
             ORDER BY w.guild_id, w.channel_id;

@@ -247,12 +247,14 @@ async def test_list_agreements_for_buyer_orders_newest_first() -> None:
     conn = MagicMock()
     conn.fetch = AsyncMock(return_value=[_self_serve_row(id=2), _self_serve_row(id=1)])
 
-    rows = await storage.list_agreements_for_buyer(_fake_pool(conn), 4242)
+    rows = await storage.list_agreements_for_buyer(_fake_pool(conn), 7, 4242)
 
     assert [r["id"] for r in rows] == [2, 1]
     sql, *args = conn.fetch.await_args.args
     assert "ORDER BY created_at DESC" in sql
-    assert args == [4242]
+    # Scoped to the asking server: another server's agreements never show up.
+    assert "guild_id = $1" in sql
+    assert args == [7, 4242]
 
 
 @pytest.mark.asyncio
@@ -409,8 +411,21 @@ async def test_create_pending_agreement_inserts_unsigned() -> None:
     sql, *args = conn.fetchrow.await_args.args
     assert "INSERT INTO agreements" in sql
     assert "signed_at" not in sql
-    # product_id / product_name trail: NULL for a tier purchase.
-    assert args == [1, 99, 4242, 555, "TERMS", None, None]
+    # No product yet: the buyer picks on the website; set_product fills it in.
+    assert "product_id" not in sql
+    assert args == [1, 99, 4242, 555, "TERMS"]
+
+
+@pytest.mark.asyncio
+async def test_set_product_never_overwrites_a_known_product() -> None:
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+
+    await storage.set_product(_fake_pool(conn), 7, 3, "July Sub")
+
+    sql, *args = conn.execute.await_args.args
+    assert "product_id IS NULL" in sql
+    assert args == [7, 3, "July Sub"]
 
 
 @pytest.mark.asyncio
@@ -525,15 +540,21 @@ def test_historical_paypal_rows_still_render() -> None:
     assert "jane@example.com" in text
 
 
-def test_agreement_text_describes_stripe_not_paypal() -> None:
-    """The signed terms are stored per-row as dispute evidence, so they must
-    describe the processor actually used."""
+def test_agreement_text_is_the_websites_terms() -> None:
+    """The signed terms are stored per-row as dispute evidence, so they must be
+    the terms buyers are actually shown: the website's, which cover both July
+    and Underground, and say purchases are one-time."""
     from modules.agreements import document
 
-    assert "PayPal" not in document.AGREEMENT_FULL_TEXT
-    assert "Paypal" not in document.AGREEMENT_FULL_TEXT
-    assert "PayPal" not in document.AGREEMENT_SUMMARY
-    assert "Stripe" in document.AGREEMENT_FULL_TEXT
+    text = document.AGREEMENT_FULL_TEXT
+    assert document.TERMS_URL in text
+    assert "Last Updated: October 31, 2026" in text
+    assert "JULY LEGENDS" in text and "Underground" in text
+    assert "No Automatic Renewal" in text
+    assert "PayPal" not in text and "PayPal" not in document.AGREEMENT_SUMMARY
+    # The summary shown before I Agree states the same billing model.
+    assert "one-time" in document.AGREEMENT_SUMMARY
+    assert "28-day" in document.AGREEMENT_SUMMARY
 
 
 # --- manual (non-Stripe) purchases --------------------------------------------

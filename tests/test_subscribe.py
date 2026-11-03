@@ -1,121 +1,25 @@
-"""Unit tests for /subscribe: tier rendering and the ticket purchase flow."""
+"""Unit tests for /subscribe: product buttons and the ticket purchase flow."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import disnake
 import pytest
 
 from discord_bot.commands import subscribe_commands
+from modules.agreements.validation import status_embed
 from modules.subscriptions.stripe_api import (
     StripeApiError,
     StripeNotConfiguredError,
     SubscriptionSummary,
 )
-from modules.subscriptions.tiers import TierConfig
 
 SIGNED = datetime(2026, 8, 30, 12, 0, 0, tzinfo=timezone.utc)
-
-
-def _tiers(l2_link: str = "https://buy.stripe.com/l2", l1_link: str = "https://buy.stripe.com/l1"):
-    return {
-        "l2_l3": TierConfig(
-            key="l2_l3",
-            name="L2/L3",
-            price_usd=20,
-            description="L2/L3 base access for one month.",
-            payment_link=l2_link,
-        ),
-        "l1": TierConfig(
-            key="l1",
-            name="L1",
-            price_usd=35,
-            description="L1 base access for one month.",
-            payment_link=l1_link,
-        ),
-    }
-
-
-def test_tier_available_reflects_payment_link() -> None:
-    tiers = _tiers(l1_link="")
-    assert tiers["l2_l3"].available is True
-    assert tiers["l1"].available is False
-
-
-def test_embed_lists_every_tier_with_price() -> None:
-    with patch.object(subscribe_commands, "TIERS", _tiers()):
-        embed = subscribe_commands.build_subscribe_embed()
-
-    names = [f.name for f in embed.fields]
-    values = " ".join(f.value for f in embed.fields)
-    assert names == ["L2/L3", "L1"]
-    assert "$20" in values
-    assert "$35" in values
-    # Priced per month of access, not as a monthly recurring charge.
-    assert "/month" not in values
-
-
-def test_embed_marks_unavailable_tier() -> None:
-    """A tier with no payment link is still listed, but flagged — dropping it
-    silently would look like the tier no longer exists."""
-    with patch.object(subscribe_commands, "TIERS", _tiers(l1_link="")):
-        embed = subscribe_commands.build_subscribe_embed()
-
-    by_name = {f.name: f.value for f in embed.fields}
-    assert "unavailable" in by_name["L1"].lower()
-    assert "unavailable" not in by_name["L2/L3"].lower()
-
-
-@pytest.mark.asyncio
-async def test_view_builds_one_link_button_per_available_tier() -> None:
-    with patch.object(subscribe_commands, "TIERS", _tiers()):
-        view = subscribe_commands.build_subscribe_view()
-
-    assert view is not None
-    assert len(view.children) == 2
-    for button in view.children:
-        assert button.style is disnake.ButtonStyle.link
-        # A link button carries a URL and has no custom_id, so there's no
-        # callback to dispatch and nothing to restore after a restart.
-        assert button.url.startswith("https://buy.stripe.com/")
-        assert button.custom_id is None
-
-
-@pytest.mark.asyncio
-async def test_view_omits_unavailable_tier() -> None:
-    """Discord rejects a link button with an empty URL, so an unconfigured
-    tier must be left out of the view entirely."""
-    with patch.object(subscribe_commands, "TIERS", _tiers(l1_link="")):
-        view = subscribe_commands.build_subscribe_view()
-
-    assert view is not None
-    assert len(view.children) == 1
-    assert view.children[0].url == "https://buy.stripe.com/l2"
-
-
-@pytest.mark.asyncio
-async def test_view_is_none_when_nothing_configured() -> None:
-    with patch.object(subscribe_commands, "TIERS", _tiers(l2_link="", l1_link="")):
-        assert subscribe_commands.build_subscribe_view() is None
-
-
-def test_embed_discloses_that_the_purchase_does_not_renew() -> None:
-    """The billing disclosure is load-bearing, not decoration, and it cuts both
-    ways: an unexpected second charge produces chargebacks, and so does a buyer
-    who expected access to continue and finds it lapsed. A dispute cites what
-    the buyer was shown. If the billing model changes back to recurring, this
-    assertion should fail and force the copy to change with it."""
-    with patch.object(subscribe_commands, "TIERS", _tiers()):
-        embed = subscribe_commands.build_subscribe_embed()
-
-    description = embed.description.lower()
-    assert "one-time" in description
-    assert "not** auto-renew" in description or "does not auto-renew" in description
-    # Nothing recurring means nothing to cancel; promising a cancellation route
-    # would imply a subscription the buyer doesn't have.
-    assert "billed automatically" not in description
+LINKS = [
+    ("July Sub", "https://seventhmonth.com/sub/"),
+    ("CWL packs", "https://seventhmonth.com/cwl-pack/"),
+]
 
 
 # --- the ticket purchase flow -------------------------------------------------
@@ -137,6 +41,8 @@ def _row(**overrides):
         "confirmed_by": None,
         "voided_at": None,
         "void_reason": None,
+        "product_id": None,
+        "product_name": None,
     }
     row.update(overrides)
     return row
@@ -147,35 +53,67 @@ def _button_interaction(*, custom_id: str, author_id: int, admin: bool = False):
     inter.author.id = author_id
     inter.author.guild_permissions = disnake.Permissions(administrator=admin)
     inter.data.custom_id = custom_id
+    inter.guild.id = 1
     inter.bot.pool = MagicMock()
     inter.response.send_message = AsyncMock()
     inter.response.edit_message = AsyncMock()
     inter.response.send_modal = AsyncMock()
+    inter.response.defer = AsyncMock()
+    inter.edit_original_response = AsyncMock()
     return inter
 
 
 @pytest.mark.asyncio
-async def test_pending_view_links_to_the_website_immediately() -> None:
-    """One button to the website (it lists the tiers and runs Stripe checkout)
-    replaces the per-tier Payment Link buttons; nothing gates it."""
-    site = SimpleNamespace(SUBSCRIBE_URL="https://seventhmonth.com/sub/")
-    with patch.object(subscribe_commands, "TIERS", _tiers()), \
-         patch.object(subscribe_commands, "settings", site):
-        view = subscribe_commands.PurchaseView(_row(signed_at=None))
+async def test_pending_view_shows_one_button_per_product_immediately() -> None:
+    view = subscribe_commands.PurchaseView(_row(signed_at=None), links=LINKS)
 
-    urls = [i.url for i in view.children if getattr(i, "url", None)]
-    # Configured tier links must NOT appear — the website is the only way in.
-    assert urls == ["https://seventhmonth.com/sub/"]
+    links = [(i.label, i.url) for i in view.children if getattr(i, "url", None)]
+    assert links == LINKS
+    for button in view.children:
+        if getattr(button, "url", None):
+            # A link button has no custom_id, so nothing to dispatch or restore.
+            assert button.style is disnake.ButtonStyle.link
+            assert button.custom_id is None
     confirm = next(i for i in view.children if i.label == "Confirm Payment")
     assert confirm.disabled is False
+
+
+@pytest.mark.asyncio
+async def test_restored_view_without_links_still_has_working_buttons() -> None:
+    """After a restart the links aren't known; the message already shows them."""
+    view = subscribe_commands.PurchaseView(_row(signed_at=None))
+    labels = [i.label for i in view.children]
+    assert labels == ["Confirm Payment", "Cancel"]
+
+
+@pytest.mark.asyncio
+async def test_the_most_products_still_fit_on_one_message() -> None:
+    from modules.subscriptions.products import MAX_PRODUCTS_PER_GUILD
+
+    links = [(f"P{i}", f"https://example.com/{i}") for i in range(MAX_PRODUCTS_PER_GUILD)]
+    view = subscribe_commands.PurchaseView(_row(), links=links)
+    assert len(view.children) == MAX_PRODUCTS_PER_GUILD + 2  # + Confirm, Cancel
+
+
+def test_pending_copy_discloses_that_the_purchase_does_not_renew() -> None:
+    """The billing disclosure is load-bearing, not decoration, and it cuts both
+    ways: an unexpected second charge produces chargebacks, and so does a buyer
+    who expected access to continue and finds it lapsed. A dispute cites what
+    the buyer was shown. If the billing model changes back to recurring, this
+    assertion should fail and force the copy to change with it."""
+    description = status_embed(_row()).description.lower()
+    assert "one-time" in description
+    assert "not** auto-renew" in description
+    assert "billed automatically" not in description
+    # What's for sale is per server now; the copy must not name a tier.
+    assert "tier" not in description
 
 
 @pytest.mark.asyncio
 async def test_no_agree_button_remains() -> None:
     """The in-Discord agree step is gone; a leftover button would ask buyers to
     accept the same terms twice, and its callback no longer exists."""
-    with patch.object(subscribe_commands, "TIERS", _tiers()):
-        view = subscribe_commands.PurchaseView(_row(signed_at=None))
+    view = subscribe_commands.PurchaseView(_row(signed_at=None), links=LINKS)
 
     labels = [i.label for i in view.children]
     assert "I Agree" not in labels
@@ -187,8 +125,7 @@ async def test_no_agree_button_remains() -> None:
 async def test_historical_signed_row_still_renders_a_usable_view() -> None:
     """Purchases started before the agree step was removed are still open in
     real tickets; their buttons must keep working."""
-    with patch.object(subscribe_commands, "TIERS", _tiers()):
-        view = subscribe_commands.PurchaseView(_row(signed_at=SIGNED))
+    view = subscribe_commands.PurchaseView(_row(signed_at=SIGNED), links=LINKS)
 
     labels = [i.label for i in view.children]
     assert "Confirm Payment" in labels
@@ -198,14 +135,11 @@ async def test_historical_signed_row_still_renders_a_usable_view() -> None:
 
 @pytest.mark.asyncio
 async def test_confirmed_view_is_terminal() -> None:
-    with patch.object(subscribe_commands, "TIERS", _tiers()):
-        view = subscribe_commands.PurchaseView(
-            _row(signed_at=SIGNED, confirmed_at=SIGNED, confirmed_by=555)
-        )
+    view = subscribe_commands.PurchaseView(
+        _row(signed_at=SIGNED, confirmed_at=SIGNED, confirmed_by=555), links=LINKS
+    )
 
-    labels = [i.label for i in view.children]
-    assert "Confirm Payment" not in labels
-    assert "Cancel" not in labels
+    assert view.children == []
     assert view.is_finished()
 
 
@@ -213,57 +147,61 @@ async def test_confirmed_view_is_terminal() -> None:
 async def test_non_admin_cannot_confirm_payment() -> None:
     inter = _button_interaction(custom_id="purchase:confirm:7", author_id=4242, admin=False)
 
-    with patch.object(subscribe_commands, "TIERS", _tiers()), \
-         patch.object(subscribe_commands.storage, "confirm_agreement", new=AsyncMock()) as confirm:
+    with patch.object(
+        subscribe_commands.payment_links, "list_guild_checkouts", new=AsyncMock()
+    ) as lookup:
         view = subscribe_commands.PurchaseView(_row(signed_at=SIGNED))
         button = next(i for i in view.children if i.label == "Confirm Payment")
         await button.callback(inter)
 
-    confirm.assert_not_awaited()
+    lookup.assert_not_awaited()  # no buyer details fetched for a non-admin
     assert "Only a moderator" in inter.response.send_message.call_args.args[0]
 
 
-def _summary(name="Jane Doe", subscription_id="sub_123"):
+def _summary(name="Jane Doe", subscription_id="pi_123", payment_link_id="plink_sub"):
     return SubscriptionSummary(
         subscription_id=subscription_id,
-        customer_id="cus_1",
+        customer_id="",
         name=name,
         email="jane@example.com",
-        status="active",
-        amount_cents=3000,
+        status="succeeded",
+        amount_cents=3500,
         currency="usd",
         created=SIGNED,
-        current_period_end=SIGNED,
+        current_period_end=None,
+        kind="payment",
+        payment_link_id=payment_link_id,
     )
 
 
 async def _click_confirm(inter, *, subscriptions=None, side_effect=None, row=None):
-    """Drive the Confirm Payment button with a mocked Stripe lookup."""
+    """Drive the Confirm Payment button with a mocked per-server Stripe lookup."""
     row = row or _row(signed_at=SIGNED)
     lookup = AsyncMock(side_effect=side_effect) if side_effect else AsyncMock(
         return_value=subscriptions if subscriptions is not None else [_summary()]
     )
-    with patch.object(subscribe_commands, "TIERS", _tiers()), \
-         patch.object(subscribe_commands.storage, "get_agreement", new=AsyncMock(return_value=row)), \
-         patch.object(subscribe_commands.stripe_api, "list_recent_subscriptions", new=lookup):
+    with patch.object(subscribe_commands.payment_links, "list_guild_checkouts", new=lookup):
         view = subscribe_commands.PurchaseView(row)
         button = next(i for i in view.children if i.label == "Confirm Payment")
         await button.callback(inter)
+    return lookup
 
 
 @pytest.mark.asyncio
-async def test_confirm_opens_the_stripe_picker_rather_than_confirming() -> None:
-    """Confirming requires linking a real subscription, so the click opens a
-    picker instead of stamping the row."""
+async def test_confirm_opens_a_picker_of_this_servers_checkouts() -> None:
+    """Confirming requires linking a real payment, so the click opens a picker
+    instead of stamping the row — listing only this server's checkouts."""
     inter = _button_interaction(custom_id="purchase:confirm:7", author_id=555, admin=True)
 
     with patch.object(subscribe_commands.storage, "confirm_agreement", new=AsyncMock()) as confirm:
-        await _click_confirm(inter)
+        lookup = await _click_confirm(inter)
 
     confirm.assert_not_awaited()
-    kwargs = inter.response.send_message.call_args.kwargs
-    assert kwargs["ephemeral"] is True
-    assert isinstance(kwargs["view"], subscribe_commands.StripePickerView)
+    assert lookup.await_args.args[1] == 1  # the guild the button was clicked in
+    inter.response.defer.assert_awaited_once_with(ephemeral=True)
+    assert isinstance(
+        inter.edit_original_response.call_args.kwargs["view"], subscribe_commands.StripePickerView
+    )
 
 
 @pytest.mark.asyncio
@@ -274,7 +212,7 @@ async def test_confirm_reports_stripe_not_configured() -> None:
         await _click_confirm(inter, side_effect=StripeNotConfiguredError())
 
     confirm.assert_not_awaited()
-    assert "isn't configured" in inter.response.send_message.call_args.args[0]
+    assert "isn't configured" in inter.edit_original_response.call_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -285,49 +223,77 @@ async def test_confirm_reports_a_stripe_outage_without_confirming() -> None:
         await _click_confirm(inter, side_effect=StripeApiError("down"))
 
     confirm.assert_not_awaited()
-    assert "Couldn't reach Stripe" in inter.response.send_message.call_args.args[0]
+    assert "Couldn't reach Stripe" in inter.edit_original_response.call_args.args[0]
 
 
 @pytest.mark.asyncio
-async def test_confirm_reports_when_stripe_has_no_subscriptions() -> None:
+async def test_confirm_explains_an_empty_list() -> None:
     inter = _button_interaction(custom_id="purchase:confirm:7", author_id=555, admin=True)
 
     with patch.object(subscribe_commands.storage, "confirm_agreement", new=AsyncMock()) as confirm:
         await _click_confirm(inter, subscriptions=[])
 
     confirm.assert_not_awaited()
-    assert "no active subscriptions" in inter.response.send_message.call_args.args[0]
+    message = inter.edit_original_response.call_args.args[0]
+    assert "this server's products" in message and "/product list" in message
+
+
+def _confirm_patches(confirmed, *, product=None):
+    return (
+        patch.object(
+            subscribe_commands.storage, "confirm_agreement", new=AsyncMock(return_value=confirmed)
+        ),
+        patch.object(subscribe_commands.agreement_storage, "set_payer_name", new=AsyncMock()),
+        patch.object(subscribe_commands.agreement_storage, "set_product", new=AsyncMock()),
+        patch.object(
+            subscribe_commands.payment_links, "product_for_link", new=AsyncMock(return_value=product)
+        ),
+        patch.object(subscribe_commands.subscriber_storage, "create_subscriber", new=AsyncMock()),
+        patch.object(
+            subscribe_commands.storage, "get_agreement", new=AsyncMock(return_value=confirmed)
+        ),
+    )
 
 
 @pytest.mark.asyncio
-async def test_picking_a_subscription_confirms_links_and_names() -> None:
+async def test_picking_a_payment_confirms_links_names_and_records_the_product() -> None:
     inter = _button_interaction(custom_id="", author_id=555, admin=True)
-    inter.data.values = ["sub_123"]
+    inter.data.values = ["pi_123"]
     confirmed = _row(signed_at=SIGNED, confirmed_at=SIGNED, confirmed_by=555)
     message = MagicMock()
     message.edit = AsyncMock()
+    patches = _confirm_patches(confirmed, product={"id": 3, "name": "July Sub"})
 
-    with patch.object(subscribe_commands, "TIERS", _tiers()), \
-         patch.object(
-             subscribe_commands.storage, "confirm_agreement", new=AsyncMock(return_value=confirmed)
-         ) as confirm, \
-         patch.object(
-             subscribe_commands.agreement_storage, "set_payer_name", new=AsyncMock()
-         ) as set_name, \
-         patch.object(
-             subscribe_commands.subscriber_storage, "create_subscriber", new=AsyncMock()
-         ) as create, \
-         patch.object(
-             subscribe_commands.storage, "get_agreement", new=AsyncMock(return_value=confirmed)
-         ):
+    with patches[0] as confirm, patches[1] as set_name, patches[2] as set_product, \
+         patches[3] as product_for_link, patches[4] as create, patches[5]:
         view = subscribe_commands.StripePickerView(7, [_summary()], message=message)
         await view.children[0].callback(inter)
 
     assert confirm.await_args.kwargs["confirmed_by"] == 555
     assert set_name.await_args.args[2] == "Jane Doe"
-    assert create.await_args.kwargs["stripe_subscription_id"] == "sub_123"
+    # The payment's Payment Link says what was bought, in this server only.
+    assert product_for_link.await_args.args[1:] == (1, "plink_sub")
+    assert set_product.await_args.args[1:] == (7, 3, "July Sub")
+    assert create.await_args.kwargs["product_id"] == 3
+    assert create.await_args.kwargs["stripe_subscription_id"] == "pi_123"
     assert create.await_args.kwargs["linked_by"] == 555
     message.edit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_payment_with_no_known_product_still_confirms() -> None:
+    inter = _button_interaction(custom_id="", author_id=555, admin=True)
+    inter.data.values = ["pi_123"]
+    confirmed = _row(signed_at=SIGNED, confirmed_at=SIGNED, confirmed_by=555)
+    patches = _confirm_patches(confirmed, product=None)
+
+    with patches[0], patches[1], patches[2] as set_product, patches[3], \
+         patches[4] as create, patches[5]:
+        view = subscribe_commands.StripePickerView(7, [_summary()], message=None)
+        await view.children[0].callback(inter)
+
+    set_product.assert_not_awaited()
+    assert create.await_args.kwargs["product_id"] is None
 
 
 @pytest.mark.asyncio
@@ -335,10 +301,9 @@ async def test_picking_asks_for_a_name_when_stripe_has_none() -> None:
     """Stripe's name is preferred because it's the one on the payment; the
     admin is only asked when Stripe has nothing."""
     inter = _button_interaction(custom_id="", author_id=555, admin=True)
-    inter.data.values = ["sub_123"]
+    inter.data.values = ["pi_123"]
 
-    with patch.object(subscribe_commands, "TIERS", _tiers()), \
-         patch.object(subscribe_commands.storage, "confirm_agreement", new=AsyncMock()) as confirm:
+    with patch.object(subscribe_commands.storage, "confirm_agreement", new=AsyncMock()) as confirm:
         view = subscribe_commands.StripePickerView(7, [_summary(name=None)], message=MagicMock())
         await view.children[0].callback(inter)
 
@@ -349,13 +314,12 @@ async def test_picking_asks_for_a_name_when_stripe_has_none() -> None:
 
 @pytest.mark.asyncio
 async def test_picking_reports_an_ineligible_purchase() -> None:
-    """The SQL guards refuse an unsigned/already-confirmed/cancelled row; the
-    handler has to say so rather than silently recording a subscriber."""
+    """The SQL guards refuse an already-confirmed/cancelled row; the handler has
+    to say so rather than silently recording a subscriber."""
     inter = _button_interaction(custom_id="", author_id=555, admin=True)
-    inter.data.values = ["sub_123"]
+    inter.data.values = ["pi_123"]
 
-    with patch.object(subscribe_commands, "TIERS", _tiers()), \
-         patch.object(
+    with patch.object(
              subscribe_commands.storage, "confirm_agreement", new=AsyncMock(return_value=None)
          ), \
          patch.object(
@@ -375,14 +339,11 @@ async def test_already_linked_subscription_names_the_owner() -> None:
     import asyncpg
 
     inter = _button_interaction(custom_id="", author_id=555, admin=True)
-    inter.data.values = ["sub_123"]
+    inter.data.values = ["pi_123"]
     confirmed = _row(signed_at=SIGNED, confirmed_at=SIGNED, confirmed_by=555)
+    patches = _confirm_patches(confirmed)
 
-    with patch.object(subscribe_commands, "TIERS", _tiers()), \
-         patch.object(
-             subscribe_commands.storage, "confirm_agreement", new=AsyncMock(return_value=confirmed)
-         ), \
-         patch.object(subscribe_commands.agreement_storage, "set_payer_name", new=AsyncMock()), \
+    with patches[0], patches[1], patches[2], patches[3], patches[5], \
          patch.object(
              subscribe_commands.subscriber_storage,
              "create_subscriber",
@@ -405,10 +366,9 @@ async def test_already_linked_subscription_names_the_owner() -> None:
 async def test_non_admin_cannot_cancel() -> None:
     inter = _button_interaction(custom_id="purchase:cancel:7", author_id=4242, admin=False)
 
-    with patch.object(subscribe_commands, "TIERS", _tiers()):
-        view = subscribe_commands.PurchaseView(_row(signed_at=SIGNED))
-        button = next(i for i in view.children if i.label == "Cancel")
-        await button.callback(inter)
+    view = subscribe_commands.PurchaseView(_row(signed_at=SIGNED))
+    button = next(i for i in view.children if i.label == "Cancel")
+    await button.callback(inter)
 
     inter.response.send_modal.assert_not_awaited()
     assert "Only a moderator" in inter.response.send_message.call_args.args[0]
@@ -421,37 +381,68 @@ async def test_id_comes_from_the_clicked_button_not_the_instance() -> None:
     instead of the custom_id is exactly the bug /postbase hit."""
     inter = _button_interaction(custom_id="purchase:agree:99", author_id=4242)
 
-    with patch.object(subscribe_commands, "TIERS", _tiers()):
-        view = subscribe_commands.PurchaseView(_row(id=7))
-        assert view._id_from(inter) == 99
+    view = subscribe_commands.PurchaseView(_row(id=7))
+    assert view._id_from(inter) == 99
 
 
 @pytest.mark.asyncio
 async def test_unparsable_custom_id_falls_back_to_the_instance() -> None:
     inter = _button_interaction(custom_id="garbage", author_id=4242)
 
-    with patch.object(subscribe_commands, "TIERS", _tiers()):
-        view = subscribe_commands.PurchaseView(_row(id=7))
-        assert view._id_from(inter) == 7
+    view = subscribe_commands.PurchaseView(_row(id=7))
+    assert view._id_from(inter) == 7
 
 
-@pytest.mark.asyncio
-async def test_subscribe_rolls_back_when_the_send_fails() -> None:
-    """No orphan row should point at a message that never existed."""
-    bot = MagicMock()
-    bot.pool = MagicMock()
-    cog = subscribe_commands.SubscribeCommands(bot)
-
+def _subscribe_interaction():
     inter = MagicMock()
     inter.guild.id = 1
     inter.channel.id = 99
     inter.author.id = 555
     inter.response.defer = AsyncMock()
     inter.edit_original_response = AsyncMock()
+    inter.channel.send = AsyncMock(return_value=MagicMock(id=100, jump_url="url"))
+    return inter
+
+
+PRODUCT_ROWS = [
+    {"id": 3, "name": "July Sub", "payment_link": "https://seventhmonth.com/sub/"},
+    {"id": 4, "name": "CWL packs", "payment_link": "https://seventhmonth.com/cwl-pack/"},
+]
+
+
+@pytest.mark.asyncio
+async def test_subscribe_posts_this_servers_products_as_buttons() -> None:
+    cog = subscribe_commands.SubscribeCommands(MagicMock())
+    inter = _subscribe_interaction()
+    member = MagicMock(id=4242, mention="<@4242>")
+
+    with patch.object(
+             subscribe_commands.products, "list_products", new=AsyncMock(return_value=PRODUCT_ROWS)
+         ) as listing, \
+         patch.object(
+             subscribe_commands.storage, "create_pending_agreement",
+             new=AsyncMock(return_value=_row()),
+         ), \
+         patch.object(subscribe_commands.storage, "attach_message", new=AsyncMock()):
+        await cog.subscribe.callback(cog, inter, member)
+
+    assert listing.await_args.args[1] == 1  # this server's products only
+    view = inter.channel.send.await_args.kwargs["view"]
+    links = [(i.label, i.url) for i in view.children if getattr(i, "url", None)]
+    assert links == LINKS
+
+
+@pytest.mark.asyncio
+async def test_subscribe_rolls_back_when_the_send_fails() -> None:
+    """No orphan row should point at a message that never existed."""
+    cog = subscribe_commands.SubscribeCommands(MagicMock())
+    inter = _subscribe_interaction()
     inter.channel.send = AsyncMock(side_effect=RuntimeError("no perms"))
     member = MagicMock(id=4242, mention="<@4242>")
 
-    with patch.object(subscribe_commands, "TIERS", _tiers()), \
+    with patch.object(
+             subscribe_commands.products, "list_products", new=AsyncMock(return_value=PRODUCT_ROWS)
+         ), \
          patch.object(
              subscribe_commands.storage,
              "create_pending_agreement",
@@ -466,39 +457,19 @@ async def test_subscribe_rolls_back_when_the_send_fails() -> None:
 
 
 @pytest.mark.asyncio
-async def test_subscribe_refuses_when_no_website_is_configured() -> None:
-    """No purchase is started when there's nowhere to send the buyer."""
-    bot = MagicMock()
-    cog = subscribe_commands.SubscribeCommands(bot)
+async def test_subscribe_refuses_when_the_server_has_no_products() -> None:
+    """No purchase is started when there's nothing for the buyer to click."""
+    cog = subscribe_commands.SubscribeCommands(MagicMock())
+    inter = _subscribe_interaction()
 
-    inter = MagicMock()
-    inter.response.defer = AsyncMock()
-    inter.edit_original_response = AsyncMock()
-    inter.channel.send = AsyncMock()
-    member = MagicMock(id=4242)
-
-    with patch.object(subscribe_commands, "settings", SimpleNamespace(SUBSCRIBE_URL="")), \
+    with patch.object(
+             subscribe_commands.products, "list_products", new=AsyncMock(return_value=[])
+         ), \
          patch.object(
              subscribe_commands.storage, "create_pending_agreement", new=AsyncMock()
          ) as create:
-        await cog.subscribe.callback(cog, inter, member)
+        await cog.subscribe.callback(cog, inter, MagicMock(id=4242))
 
     create.assert_not_awaited()
     inter.channel.send.assert_not_awaited()
-    assert "SUBSCRIBE_URL" in inter.edit_original_response.await_args.args[0]
-
-
-
-
-def test_configured_tier_prices_match_what_stripe_charges() -> None:
-    """Pins the real TIERS constant, not the test fixture above.
-
-    The price here is display copy only — Stripe charges whatever its Payment
-    Link says, and the bot cannot read that. So this asserts the intended
-    prices explicitly: if a Dashboard price changes, update both together or
-    buyers are quoted one number and charged another.
-    """
-    from modules.subscriptions.tiers import TIERS
-
-    assert TIERS["l2_l3"].price_usd == 20
-    assert TIERS["l1"].price_usd == 35
+    assert "/product add" in inter.edit_original_response.await_args.args[0]

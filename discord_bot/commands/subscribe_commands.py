@@ -28,17 +28,17 @@ this buyer, and the result is stored in `subscribers` along with who made that
 call. Stripe has no idea who its customers are on Discord, so that match is
 human judgement; everything around it is verified.
 
-The dropdown lists **both** active recurring subscriptions and successful
-one-time payments, because which kind the Payment Links create is a Stripe
-Dashboard setting the bot can't see and which has already been switched once.
-Each option is labelled "monthly" or "one-time". See stripe_api.py.
+**The dropdown only lists checkouts made through this server's own Stripe
+Payment Links** — the ones found on its product pages and owned by it (see
+modules/subscriptions/payment_links.py). Every server shares one Stripe account,
+so listing the whole account would show one server's admins another server's
+buyers. Picking a payment also records which product was bought, since its
+Payment Link was found on that product's page. Each option is labelled
+"one-time" or "monthly".
 
-**Buyers pay on the website (`settings.SUBSCRIBE_URL`)**, which lists the tiers
-and runs Stripe checkout; the purchase message carries one link button to it
-rather than a button per tier. Confirm is unchanged — the payment still lands in
-Stripe, and the admin picks it out of Stripe as before. (`TIERS`,
-`build_subscribe_embed`/`build_subscribe_view` and `_payment_buttons` predate
-the website and are no longer used by the command.)
+**Buyers pay on the website.** The purchase message carries one link button per
+product the server set up with `/product add` (e.g. "July Sub" →
+seventhmonth.com/sub/), and the buyer pays through Stripe there.
 
 Link buttons carry a URL instead of a custom_id: Discord opens them client-side,
 so there is no callback to dispatch for those. Confirm/Cancel are ordinary
@@ -53,11 +53,8 @@ cannot see and which has already been switched twice, so **if it changes back to
 recurring, this copy must change in the same commit**. There is nothing to cancel
 now, so the copy no longer points buyers at a moderator for that.
 
-**Products** (`/product sell`, see product_commands.py) reuse this whole flow —
-the same row, status message, Confirm/Cancel buttons and custom_ids. The row's
-`product_id` is what differs: its view shows one link button for that product
-instead of the tier buttons, and the confirm picker offers only one-time
-payments, since a product is never a subscription.
+Older rows may carry a product from the retired `/product sell` command; they
+render and confirm the same way.
 """
 from __future__ import annotations
 
@@ -67,13 +64,11 @@ import asyncpg
 import disnake
 from disnake.ext import commands
 
-from config.settings import settings
 from modules.agreements import storage
 from modules.agreements import storage as agreement_storage
 from modules.agreements.validation import status_embed
-from modules.subscriptions import stripe_api
+from modules.subscriptions import payment_links, products, stripe_api
 from modules.subscriptions import storage as subscriber_storage
-from modules.subscriptions.tiers import TIERS
 
 logger = logging.getLogger(__name__)
 
@@ -85,70 +80,11 @@ MAX_CANCEL_REASON_LENGTH = 512
 MAX_PAYER_NAME_LENGTH = 200
 # The admin is mid-confirmation; if they wander off, clicking Confirm again is cheap.
 PICKER_TIMEOUT_SECONDS = 300
-WEBSITE_BUTTON_LABEL = "Buy on our website"
 
 
-def build_subscribe_embed() -> disnake.Embed:
-    """The tier list. Renders every tier, marking any that aren't purchasable."""
-    embed = disnake.Embed(
-        title="Subscriptions",
-        description=(
-            "Pick a tier below to pay securely through Stripe.\n"
-            "This is a **one-time payment for one month of access** — it does "
-            "**not** auto-renew, and nothing is charged again. To keep your "
-            "access, purchase again when the month is up."
-        ),
-        colour=EMBED_COLOUR,
-    )
-    for tier in TIERS.values():
-        value = f"**${tier.price_usd}** for one month\n{tier.description}"
-        if not tier.available:
-            value += "\n*Currently unavailable — ask a moderator.*"
-        embed.add_field(name=tier.name, value=value, inline=True)
-    embed.set_footer(text="After paying, a moderator will confirm it here.")
-    return embed
-
-
-def build_subscribe_view() -> disnake.ui.View | None:
-    """Link buttons for the purchasable tiers, or None if none are configured.
-
-    A link button with an empty URL is rejected by Discord, so unavailable
-    tiers are left out of the view entirely (the embed still lists them).
-    """
-    buttons = _payment_buttons()
-    if not buttons:
-        return None
-
-    view = disnake.ui.View(timeout=None)
-    for button in buttons:
-        view.add_item(button)
-    return view
-
-
-def _website_button() -> disnake.ui.Button | None:
-    """The single "buy" button on a /subscribe purchase: a link to the website.
-
-    None when SUBSCRIBE_URL is empty — Discord rejects a link button with no URL.
-    """
-    if not settings.SUBSCRIBE_URL:
-        return None
-    return disnake.ui.Button(
-        label=WEBSITE_BUTTON_LABEL,
-        style=disnake.ButtonStyle.link,
-        url=settings.SUBSCRIBE_URL,
-    )
-
-
-def _payment_buttons() -> list[disnake.ui.Button]:
-    return [
-        disnake.ui.Button(
-            label=f"{tier.name} — ${tier.price_usd}",
-            style=disnake.ButtonStyle.link,
-            url=tier.payment_link,
-        )
-        for tier in TIERS.values()
-        if tier.available
-    ]
+def product_links(rows) -> list[tuple[str, str]]:
+    """(button label, url) for each of a server's products."""
+    return [(row["name"], row["payment_link"]) for row in rows]
 
 
 class CancelReasonModal(disnake.ui.Modal):
@@ -218,6 +154,17 @@ async def finalize_confirmation(
 
     await agreement_storage.set_payer_name(inter.bot.pool, agreement_id, payer_name)
 
+    # The payment's Payment Link was found on one of this server's product pages,
+    # which is what says what was bought. Unknown (None) for a link since released.
+    product = await payment_links.product_for_link(
+        inter.bot.pool, confirmed["guild_id"], subscription.payment_link_id
+    )
+    if product is not None:
+        await agreement_storage.set_product(
+            inter.bot.pool, agreement_id, product["id"], product["name"]
+        )
+    product_id = product["id"] if product is not None else confirmed.get("product_id")
+
     try:
         await subscriber_storage.create_subscriber(
             inter.bot.pool,
@@ -233,7 +180,7 @@ async def finalize_confirmation(
             current_period_end=subscription.current_period_end,
             linked_by=inter.author.id,
             amount_cents=subscription.amount_cents,
-            product_id=confirmed.get("product_id"),
+            product_id=product_id,
         )
     except asyncpg.UniqueViolationError:
         # Already attributed to someone — say who rather than silently
@@ -369,7 +316,7 @@ class PurchaseView(disnake.ui.View):
     the record on every edit rather than mutated in place.
     """
 
-    def __init__(self, record, *, product_link: str | None = None) -> None:
+    def __init__(self, record, *, links: list[tuple[str, str]] | None = None) -> None:
         super().__init__(timeout=None)
         self.agreement_id = record["id"]
 
@@ -395,27 +342,14 @@ class PurchaseView(disnake.ui.View):
         cancel.callback = self._on_cancel
         self.add_item(cancel)
 
-        # Shown immediately. Terms are accepted in Stripe Checkout now, so there
-        # is no in-Discord step gating these any more.
-        if record.get("product_id"):
-            # A product sale shows only that product's link. `product_link` is
-            # None when restoring after a restart — fine, because link buttons
-            # carry no custom_id and so play no part in dispatch; the posted
-            # message already shows the button.
-            if product_link:
-                self.add_item(
-                    disnake.ui.Button(
-                        label=f"Pay for {record['product_name']}"[:80],
-                        style=disnake.ButtonStyle.link,
-                        url=product_link,
-                    )
-                )
-        else:
-            # One link to the website, which lists the tiers and runs Stripe
-            # checkout. Confirm still matches the payment out of Stripe.
-            button = _website_button()
-            if button is not None:
-                self.add_item(button)
+        # One link button per product, shown immediately. `links` is None when
+        # restoring after a restart — fine, because link buttons carry no
+        # custom_id and so play no part in dispatch; the posted message already
+        # shows them.
+        for label, url in links or ():
+            self.add_item(
+                disnake.ui.Button(label=label[:80], style=disnake.ButtonStyle.link, url=url)
+            )
 
     def _id_from(self, inter: disnake.MessageInteraction) -> int:
         """The agreement id encoded in the clicked button's custom_id.
@@ -447,53 +381,38 @@ class PurchaseView(disnake.ui.View):
             return
 
         agreement_id = self._id_from(inter)
-        record = await storage.get_agreement(inter.bot.pool, agreement_id)
-        is_product = bool(record and record.get("product_id"))
+        # Scanning product pages and listing Stripe can outrun the 3s deadline.
+        await inter.response.defer(ephemeral=True)
 
         try:
-            subscriptions = await stripe_api.list_recent_subscriptions()
+            subscriptions = await payment_links.list_guild_checkouts(
+                inter.bot.pool, inter.guild.id
+            )
         except stripe_api.StripeNotConfiguredError:
-            await inter.response.send_message(
+            await inter.edit_original_response(
                 "Stripe isn't configured (`STRIPE_SECRET_KEY` is unset), so payments "
-                "can't be verified. Ask whoever runs the bot to add it.",
-                ephemeral=True,
+                "can't be verified. Ask whoever runs the bot to add it."
             )
             return
         except stripe_api.StripeApiError as exc:
             logger.warning("Stripe lookup failed while confirming id=%s: %s", agreement_id, exc)
-            await inter.response.send_message(
-                f"Couldn't reach Stripe: {exc}", ephemeral=True
-            )
+            await inter.edit_original_response(f"Couldn't reach Stripe: {exc}")
             return
 
-        if is_product:
-            # A product is always a one-time purchase; offering subscriptions
-            # would only invite linking the wrong payment.
-            subscriptions = [s for s in subscriptions if s.is_one_time]
-            if not subscriptions:
-                await inter.response.send_message(
-                    "Stripe has no recent successful one-time payments to link. If the "
-                    "payment just went through, give it a moment and try again.",
-                    ephemeral=True,
-                )
-                return
-
         if not subscriptions:
-            await inter.response.send_message(
-                "Stripe has no recent purchases to link — no active subscriptions and "
-                "no successful one-time payments. If the payment just went through, "
-                "give it a moment and try again; if it's older, it may have scrolled "
-                "past the most recent "
-                f"{stripe_api.RECENT_SUBSCRIPTION_LIMIT}.",
-                ephemeral=True,
+            await inter.edit_original_response(
+                "No paid Stripe checkouts were found for this server's products. If the "
+                "payment just went through, give it a moment and try again. If it never "
+                "shows up, check `/product list` — a product page whose Stripe links "
+                "belong to another server, or has none, won't list payments here. A "
+                "payment made another way can be recorded with `/agreement record`."
             )
             return
 
         # Ephemeral: only the admin needs this, and it carries buyer emails.
-        await inter.response.send_message(
+        await inter.edit_original_response(
             "Pick the Stripe purchase for this buyer:",
             view=StripePickerView(agreement_id, subscriptions, message=inter.message),
-            ephemeral=True,
         )
 
     async def _on_cancel(self, inter: disnake.MessageInteraction) -> None:
@@ -511,7 +430,7 @@ class SubscribeCommands(commands.Cog):
 
     @commands.slash_command(
         name="subscribe",
-        description="Start a purchase for a member: Stripe payment, then confirmation.",
+        description="Start a purchase for a member: they pay on the website, then you confirm.",
         default_member_permissions=ADMIN_PERMS,
         contexts=disnake.InteractionContextTypes(guild=True),
     )
@@ -522,29 +441,28 @@ class SubscribeCommands(commands.Cog):
     ) -> None:
         await inter.response.defer(ephemeral=True)
 
-        # Check purchasability before creating anything, so no purchase is
-        # started for something that can't actually be bought.
-        if _website_button() is None:
-            logger.warning("/subscribe used with no SUBSCRIBE_URL configured")
+        # Check there is something to buy before creating anything, so no
+        # purchase is started that the buyer can't act on.
+        rows = await products.list_products(self.bot.pool, inter.guild.id)
+        if not rows:
             await inter.edit_original_response(
-                "Subscriptions aren't set up yet — no website link (`SUBSCRIBE_URL`) is configured."
+                "This server has no products yet — add the buttons buyers should see "
+                "with `/product add`."
             )
             return
 
-        await start_purchase(inter, member)
+        await start_purchase(inter, member, product_links(rows))
 
 
 async def start_purchase(
     inter: disnake.ApplicationCommandInteraction,
     member: disnake.User,
-    *,
-    product=None,
+    links: list[tuple[str, str]],
 ) -> None:
     """Create the purchase row and post its status message in this channel.
 
-    Shared by /subscribe (tiers, `product` None) and /product sell (one product
-    record), so both produce the same row, message and buttons. Expects the
-    interaction to be deferred already.
+    `links` are the (label, url) product buttons. Expects the interaction to be
+    deferred already.
     """
     pool = inter.bot.pool
     record = await storage.create_pending_agreement(
@@ -553,17 +471,13 @@ async def start_purchase(
         channel_id=inter.channel.id,
         buyer_id=member.id,
         sent_by=inter.author.id,
-        product_id=product["id"] if product else None,
-        product_name=product["name"] if product else None,
     )
 
     try:
         message = await inter.channel.send(
             content=member.mention,
             embed=status_embed(record),
-            view=PurchaseView(
-                record, product_link=product["payment_link"] if product else None
-            ),
+            view=PurchaseView(record, links=links),
             allowed_mentions=disnake.AllowedMentions(users=[member]),
         )
     except Exception as exc:  # noqa: BLE001 — surface any failure + log
@@ -574,9 +488,8 @@ async def start_purchase(
         return
 
     await storage.attach_message(pool, record["id"], message.id)
-    what = f" of **{product['name']}**" if product else ""
     await inter.edit_original_response(
-        f"Purchase #{record['id']}{what} started for {member.mention} — {message.jump_url}",
+        f"Purchase #{record['id']} started for {member.mention} — {message.jump_url}",
         allowed_mentions=NO_PINGS,
     )
 

@@ -39,7 +39,8 @@ class ModerationCommands(commands.Cog):
         quip = messages.pick_kick_quip()
         await inter.response.send_message(messages.format_public_message(member, quip))
         await logging.send_mod_log(
-            self.bot,
+            self.bot.pool,
+            inter.guild,
             action="kick",
             target_label=str(member),
             target_id=member.id,
@@ -67,7 +68,8 @@ class ModerationCommands(commands.Cog):
         quip = messages.pick_ban_quip()
         await inter.response.send_message(messages.format_public_message(member, quip))
         await logging.send_mod_log(
-            self.bot,
+            self.bot.pool,
+            inter.guild,
             action="ban",
             target_label=str(member),
             target_id=member.id,
@@ -94,7 +96,8 @@ class ModerationCommands(commands.Cog):
 
         await inter.response.send_message(f"Unbanned **{target_label}**.", ephemeral=True)
         await logging.send_mod_log(
-            self.bot,
+            self.bot.pool,
+            inter.guild,
             action="unban",
             target_label=target_label,
             target_id=target_id,
@@ -162,7 +165,8 @@ class ModerationCommands(commands.Cog):
         await self._respond(inter, summary)
 
         await logging.send_mod_log(
-            self.bot,
+            self.bot.pool,
+            inter.guild,
             action="purge",
             target_label=str(member) if member is not None else "Everyone",
             target_id=member.id if member is not None else None,

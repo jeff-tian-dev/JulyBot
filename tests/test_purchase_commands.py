@@ -110,6 +110,8 @@ async def test_list_for_a_member_uses_their_history() -> None:
         await cog.list_purchases.callback(cog, inter, member=member)
 
     by_member.assert_awaited_once()
+    # Scoped to the server the command was run in.
+    assert by_member.await_args.args[1:] == (1, 4242)
     recent.assert_not_awaited()
 
 
@@ -125,13 +127,33 @@ async def test_relink_rejects_an_unknown_purchase_id() -> None:
     with patch.object(
         purchase_commands.subscriber_storage, "get_subscriber", new=AsyncMock(return_value=None)
     ), patch.object(
-        purchase_commands.stripe_api, "list_recent_subscriptions", new=AsyncMock()
+        purchase_commands.payment_links, "list_guild_checkouts", new=AsyncMock()
     ) as listing:
         await cog.relink.callback(cog, inter, purchase_id=999)
 
     # Never bothers Stripe for a row that doesn't exist.
     listing.assert_not_awaited()
     assert "No purchase #999" in inter.edit_original_response.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_relink_treats_another_servers_purchase_as_unknown() -> None:
+    """Purchase ids are global; an admin must not reach another server's row."""
+    inter = _interaction()
+    cog = purchase_commands.PurchaseCommands(MagicMock())
+    cog.bot.pool = inter.bot.pool
+
+    with patch.object(
+        purchase_commands.subscriber_storage,
+        "get_subscriber",
+        new=AsyncMock(return_value=_record(guild_id=999)),
+    ), patch.object(
+        purchase_commands.payment_links, "list_guild_checkouts", new=AsyncMock()
+    ) as listing:
+        await cog.relink.callback(cog, inter, purchase_id=3)
+
+    listing.assert_not_awaited()
+    assert "No purchase #3" in inter.edit_original_response.call_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -146,8 +168,8 @@ async def test_relink_opens_a_picker_without_asking_for_a_member() -> None:
         "get_subscriber",
         new=AsyncMock(return_value=_record()),
     ), patch.object(
-        purchase_commands.stripe_api,
-        "list_recent_subscriptions",
+        purchase_commands.payment_links,
+        "list_guild_checkouts",
         new=AsyncMock(return_value=[_summary()]),
     ), patch.object(
         purchase_commands.subscriber_storage,
@@ -175,8 +197,8 @@ async def test_relink_does_not_treat_the_rows_own_payment_as_a_conflict() -> Non
         "get_subscriber",
         new=AsyncMock(return_value=_record()),
     ), patch.object(
-        purchase_commands.stripe_api,
-        "list_recent_subscriptions",
+        purchase_commands.payment_links,
+        "list_guild_checkouts",
         new=AsyncMock(return_value=[_summary("pi_wrong"), _summary("pi_other")]),
     ), patch.object(
         purchase_commands.subscriber_storage,
@@ -213,6 +235,29 @@ async def test_picking_a_payment_rewrites_every_stripe_field() -> None:
     assert kwargs["relinked_by"] == 555
     # The buyer is never among the updated fields.
     assert "discord_id" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_relinking_also_updates_what_was_bought() -> None:
+    """The product follows the payment: its Payment Link was found on one of this
+    server's product pages."""
+    inter = _interaction()
+    inter.data.values = ["pi_right"]
+    payment = SubscriptionSummary(**{**_summary().__dict__, "payment_link_id": "plink_cwl"})
+    view = purchase_commands.RelinkPickerView(3, [payment], already_linked=set())
+
+    with patch.object(
+        purchase_commands.payment_links, "product_for_link",
+        new=AsyncMock(return_value={"id": 4, "name": "CWL packs"}),
+    ) as product_for_link, patch.object(
+        purchase_commands.subscriber_storage,
+        "relink_subscriber",
+        new=AsyncMock(return_value=_record(stripe_subscription_id="pi_right")),
+    ) as relink:
+        await view.children[0].callback(inter)
+
+    assert product_for_link.await_args.args[1:] == (1, "plink_cwl")
+    assert relink.await_args.kwargs["product_id"] == 4
 
 
 @pytest.mark.asyncio

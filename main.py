@@ -13,6 +13,7 @@ from config.settings import settings
 from database.connection import close_pool, get_pool, terminate_stuck_sessions
 from database.models import create_tables
 from discord_bot.bot import create_bot
+from modules.guild_config.storage import import_legacy_config
 from modules.legend_tracker.poller import close_session as close_legend_session
 from modules.ping_automator.scheduler import create_scheduler
 from modules.ranked_tracker.poller import close_session as close_ranked_session
@@ -37,7 +38,16 @@ async def _run() -> None:
         await terminate_stuck_sessions(pool)
     except Exception:
         logger.exception("Stuck-session cleanup failed; continuing startup")
-    await create_tables(pool)
+    await create_tables(pool, settings.DISCORD_GUILD_ID)
+    await import_legacy_config(
+        pool,
+        settings.DISCORD_GUILD_ID,
+        mod_log_channel_id=settings.MOD_LOG_CHANNEL_ID,
+        clan_watch_channel_id=settings.CLAN_WATCH_CHANNEL_ID,
+        twitter_ping_role_id=settings.X_PING_ROLE_ID,
+        youtube_ping_role_id=settings.YOUTUBE_PING_ROLE_ID,
+        clan_tags=[*settings.COC_FAMILY_CLAN_TAGS, settings.COC_CLAN_TAG],
+    )
 
     seeded = await seed_unseeded_channels(pool)
     if seeded:

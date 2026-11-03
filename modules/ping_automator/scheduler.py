@@ -323,25 +323,27 @@ def create_scheduler(pool: asyncpg.Pool, bot: disnake.Client) -> AsyncIOSchedule
         replace_existing=True,
     )
 
-    if settings.COC_CLAN_TAG or settings.COC_FAMILY_CLAN_TAGS:
-        scheduler.add_job(
-            poll_clan_watch_job,
-            trigger=IntervalTrigger(minutes=settings.CLAN_WATCH_POLL_INTERVAL_MINUTES),
-            kwargs={"pool": pool, "bot": bot},
-            id="poll_clan_watch",
-            replace_existing=True,
-        )
-        scheduler.add_job(
-            daily_watchlist_job,
-            trigger=CronTrigger(
-                hour=settings.CLAN_WATCH_DAILY_HOUR,
-                minute=0,
-                timezone=settings.CLAN_WATCH_TIMEZONE,
-            ),
-            kwargs={"pool": pool, "bot": bot},
-            id="daily_watchlist",
-            replace_existing=True,
-        )
+    # Always registered: clan families are per server now (/setup clan add), so
+    # there's no single config value to gate on. Servers with no clans are skipped
+    # inside the poll.
+    scheduler.add_job(
+        poll_clan_watch_job,
+        trigger=IntervalTrigger(minutes=settings.CLAN_WATCH_POLL_INTERVAL_MINUTES),
+        kwargs={"pool": pool, "bot": bot},
+        id="poll_clan_watch",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        daily_watchlist_job,
+        trigger=CronTrigger(
+            hour=settings.CLAN_WATCH_DAILY_HOUR,
+            minute=0,
+            timezone=settings.CLAN_WATCH_TIMEZONE,
+        ),
+        kwargs={"pool": pool, "bot": bot},
+        id="daily_watchlist",
+        replace_existing=True,
+    )
 
     scheduler.add_job(
         ranked_tracking_job,

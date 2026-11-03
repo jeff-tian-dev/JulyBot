@@ -4,9 +4,10 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
+import asyncpg
 import disnake
 
-from config.settings import settings
+from modules.guild_config import storage as guild_config
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,8 @@ _ACTION_TITLES: dict[Action, str] = {
 
 
 async def send_mod_log(
-    bot: disnake.Client,
+    pool: asyncpg.Pool,
+    guild: disnake.Guild,
     *,
     action: Action,
     target_label: str,
@@ -36,14 +38,20 @@ async def send_mod_log(
     moderator: disnake.Member,
     reason: str | None,
 ) -> None:
-    channel_id = settings.MOD_LOG_CHANNEL_ID
+    """Post to the server's own mod-log channel (/setup modlog); skip if it has none.
+
+    The channel is looked up on `guild` itself, so a server's log can never land
+    in another server's channel.
+    """
+    config = await guild_config.get_guild_config(pool, guild.id)
+    channel_id = config.get("mod_log_channel_id")
     if not channel_id:
-        logger.warning("MOD_LOG_CHANNEL_ID is not configured; skipping mod log")
+        logger.debug("No mod-log channel set for guild=%s; skipping mod log", guild.id)
         return
 
-    channel = bot.get_channel(channel_id)
+    channel = guild.get_channel(channel_id)
     if channel is None:
-        logger.warning("Mod log channel %s not found", channel_id)
+        logger.warning("Mod log channel %s not found in guild=%s", channel_id, guild.id)
         return
 
     embed = disnake.Embed(

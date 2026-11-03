@@ -13,17 +13,21 @@ dual/triple support is the thing most likely to regress:
 Shapes 1 and 2 are historical but carry real dispute evidence, so none of these
 renderers may assume a field is present.
 
-Shape 3 has a variant: a `/product sell` purchase sets `product_name`. It is a
-one-time product (anything an admin defined), NOT a month of access, so its copy must
-never say "one month". `product_name` is read with `.get` because rows and test
-fixtures predating the column don't carry it. See the table comment in
-database/models.py.
+Shape 3 has a variant: `product_name` is set once the purchase is known — at
+confirmation, from the Stripe Payment Link the chosen payment came through
+(see modules/subscriptions/payment_links.py), or at creation on historical
+`/product sell` rows. A pending purchase made with `/subscribe` has none yet,
+because the buyer picks what to buy on the website. `product_name` is read with
+`.get` because rows and test fixtures predating the column don't carry it. See
+the table comment in database/models.py.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
 import disnake
+
+from modules.agreements.document import AGREEMENT_SUMMARY
 
 
 AGREEMENT_EMBED_COLOUR = 0x2ECC71
@@ -143,8 +147,8 @@ def status_embed(record) -> disnake.Embed:
             description=(
                 f"**{buyer}:** a payment{paid} by **{record['payment_method']}** has "
                 "been recorded for you.\n\n"
-                "Read the Terms and Conditions and click **I Agree** below. A "
-                "moderator will then confirm the payment."
+                f"{AGREEMENT_SUMMARY}\n\n"
+                "A moderator will then confirm the payment."
             ),
             colour=AGREEMENT_EMBED_COLOUR,
         )
@@ -174,15 +178,15 @@ def status_embed(record) -> disnake.Embed:
         )
         return embed
 
-    # Tiers, prices and how long access lasts are on the website (its Terms
-    # define the access period), so this copy only states what stays true
+    # What's for sale, prices and how long access lasts are on the website (its
+    # Terms define the access period), so this copy only states what stays true
     # however the site changes: it's one-time and does not renew.
     embed = disnake.Embed(
         title="Purchase",
         description=(
-            f"**{buyer}:** buy your tier on our website with the button below and "
-            "pay through Stripe there. You'll accept the Terms and Conditions at "
-            "checkout.\n\n"
+            f"**{buyer}:** pick what you're buying with a button below and pay "
+            "through Stripe on our website. You'll accept the Terms and Conditions "
+            "at checkout.\n\n"
             "This is a **one-time payment** — it does **not** auto-renew, and "
             "nothing is charged again."
         ),

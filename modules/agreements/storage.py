@@ -20,8 +20,6 @@ async def create_pending_agreement(
     buyer_id: int,
     sent_by: int,
     agreement_text: str = "",
-    product_id: int | None = None,
-    product_name: str | None = None,
 ) -> asyncpg.Record:
     """Insert a pending purchase, before the status message is posted.
 
@@ -38,18 +36,14 @@ async def create_pending_agreement(
     NULL — Stripe knows who paid. See the agreements table comment in
     database/models.py.
 
-    `product_id` / `product_name` are set for a `/product sell` purchase and
-    NULL for a tier purchase. The name is a snapshot, so the row still says
-    what was sold after the product is removed.
+    `product_id` / `product_name` start NULL — the buyer picks on the website —
+    and are filled in at confirmation by `set_product`.
     """
     async with pool.acquire() as conn:
         return await conn.fetchrow(
             """
-            INSERT INTO agreements (
-                guild_id, channel_id, buyer_id, sent_by, agreement_text,
-                product_id, product_name
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO agreements (guild_id, channel_id, buyer_id, sent_by, agreement_text)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING *;
             """,
             guild_id,
@@ -57,8 +51,6 @@ async def create_pending_agreement(
             buyer_id,
             sent_by,
             agreement_text,
-            product_id,
-            product_name,
         )
 
 
@@ -88,6 +80,28 @@ async def set_payer_name(
             "UPDATE agreements SET payer_name = $2 WHERE id = $1 RETURNING *;",
             agreement_id,
             payer_name,
+        )
+
+
+async def set_product(
+    pool: asyncpg.Pool, agreement_id: int, product_id: int, product_name: str
+) -> None:
+    """Record what a /subscribe purchase turned out to be, at confirmation.
+
+    The buyer picks on the website, so nothing is known when the row is created;
+    the Payment Link of the payment the admin confirms says which product it was.
+    `product_name` is a snapshot, like on any other row. An agreement that
+    already names a product (a historical /product sell row) is left alone.
+    """
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE agreements SET product_id = $2, product_name = $3
+            WHERE id = $1 AND product_id IS NULL;
+            """,
+            agreement_id,
+            product_id,
+            product_name,
         )
 
 
@@ -222,12 +236,14 @@ async def void_agreement(
 
 
 async def list_agreements_for_buyer(
-    pool: asyncpg.Pool, buyer_id: int
+    pool: asyncpg.Pool, guild_id: int, buyer_id: int
 ) -> list[asyncpg.Record]:
-    """Every agreement sent to a buyer, newest first."""
+    """Every agreement sent to a buyer in one server, newest first."""
     async with pool.acquire() as conn:
         return await conn.fetch(
-            "SELECT * FROM agreements WHERE buyer_id = $1 ORDER BY created_at DESC;",
+            "SELECT * FROM agreements WHERE guild_id = $1 AND buyer_id = $2 "
+            "ORDER BY created_at DESC;",
+            guild_id,
             buyer_id,
         )
 

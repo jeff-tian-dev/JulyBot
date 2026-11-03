@@ -18,6 +18,10 @@ from modules.account_linker.linker import (
 X_BLUE = disnake.Color.from_rgb(45, 136, 255)
 ADMIN_PERMS = disnake.Permissions(administrator=True)
 MAX_MESSAGE_LEN = 1900  # Discord's hard limit is 2000; leave headroom.
+# Personal commands: they only touch the invoker's own (global) data, so they
+# also work in a DM with the bot. Everything else is server-only by default
+# (bot-wide default_contexts in discord_bot/bot.py).
+PERSONAL_CONTEXTS = disnake.InteractionContextTypes(guild=True, bot_dm=True)
 
 
 def _accounts_embed(title: str, accounts: list[dict]) -> disnake.Embed:
@@ -40,7 +44,11 @@ class AccountCommands(commands.Cog):
     def __init__(self, bot: commands.InteractionBot) -> None:
         self.bot = bot
 
-    @commands.slash_command(name="link", description="Link a CoC account to your Discord account.")
+    @commands.slash_command(
+        name="link",
+        description="Link a CoC account to your Discord account.",
+        contexts=PERSONAL_CONTEXTS,
+    )
     async def link(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -66,7 +74,11 @@ class AccountCommands(commands.Cog):
             content=f"✅ Linked **{name}** (`{tag}`) to your Discord account."
         )
 
-    @commands.slash_command(name="unlink", description="Unlink one of your CoC accounts.")
+    @commands.slash_command(
+        name="unlink",
+        description="Unlink one of your CoC accounts.",
+        contexts=PERSONAL_CONTEXTS,
+    )
     async def unlink(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -86,7 +98,11 @@ class AccountCommands(commands.Cog):
                 content="That tag isn't linked to your Discord account. Use `/accounts` to see your links."
             )
 
-    @commands.slash_command(name="accounts", description="Show your linked CoC accounts.")
+    @commands.slash_command(
+        name="accounts",
+        description="Show your linked CoC accounts.",
+        contexts=PERSONAL_CONTEXTS,
+    )
     async def accounts(self, inter: disnake.ApplicationCommandInteraction) -> None:
         await inter.response.defer(ephemeral=True)
         accounts = await get_linked_accounts(self.bot.pool, inter.author.id)
@@ -99,7 +115,11 @@ class AccountCommands(commands.Cog):
         embed = _accounts_embed("Your linked CoC accounts", accounts)
         await inter.edit_original_response(embed=embed)
 
-    @commands.slash_command(name="whois", description="Look up a user's linked CoC accounts.")
+    @commands.slash_command(
+        name="whois",
+        description="Look up a user's linked CoC accounts.",
+        contexts=PERSONAL_CONTEXTS,
+    )
     async def whois(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -119,14 +139,15 @@ class AccountCommands(commands.Cog):
 
     @commands.slash_command(
         name="dumpaccounts",
-        description="Admin: list every user and their linked CoC accounts.",
+        description="Admin: list this server's members and their linked CoC accounts.",
         default_member_permissions=ADMIN_PERMS,
     )
     async def dumpaccounts(self, inter: disnake.ApplicationCommandInteraction) -> None:
         await inter.response.defer(ephemeral=True)
-        accounts = await get_all_accounts(self.bot.pool)
+        member_ids = [m.id for m in inter.guild.members]
+        accounts = await get_all_accounts(self.bot.pool, member_ids)
         if not accounts:
-            await inter.edit_original_response(content="No linked accounts yet.")
+            await inter.edit_original_response(content="No members of this server have linked accounts yet.")
             return
 
         # Rows arrive grouped by discord_id (oldest link first); render one
@@ -147,7 +168,7 @@ class AccountCommands(commands.Cog):
             blocks.append("\n".join(lines))
 
         user_count = len({a["discord_id"] for a in accounts})
-        header = f"**All linked accounts** — {user_count} users, {len(accounts)} accounts\n\n"
+        header = f"**Linked accounts in this server** — {user_count} users, {len(accounts)} accounts\n\n"
 
         chunks: list[str] = []
         buf = header

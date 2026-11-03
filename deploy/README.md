@@ -58,74 +58,44 @@ that aren't on GitHub. It logs a `SKIP` line once, then picks the push up as soo
 are committed or stashed. New `.env` keys and changes to the bot's plist template are still
 manual steps (it logs a `NOTE` when it sees either).
 
-## Pending update — `/subscribe` purchase flow (2026-09-03)
+## Multi-server update (2026-11)
 
-This release is **not yet deployed to this machine.** It needs all four optional steps
-above, so run the sequence in full:
+The bot now works in any server it's added to, with each server's data kept apart. Nothing
+manual is needed to deploy it — `create_tables` migrates on startup — but there are a few
+steps in Discord afterwards.
 
-```bash
-cd /Users/jefftian/JulyBot
-git pull
-.venv/bin/pip install -r requirements.txt   # `stripe` is a dependency again
-# --- edit .env by hand first, see the table below ---
-.venv/bin/python scripts/init_db.py         # creates `subscribers`, drops `subscriptions`
-./deploy/install-service.sh                 # restart
-```
+**What startup does once:**
 
-**New `.env` keys** (add by hand — `.env` is not in git; all four are also in `.env.example`):
+- Copies the old single-server `.env` values (`MOD_LOG_CHANNEL_ID`, `CLAN_WATCH_CHANNEL_ID`,
+  `X_PING_ROLE_ID`/`TWITTER_PING_ROLE_ID`, `YOUTUBE_PING_ROLE_ID`, `COC_FAMILY_CLAN_TAGS`,
+  `COC_CLAN_TAG`) into the home server's (`DISCORD_GUILD_ID`) `/setup` settings. After that
+  they're ignored; change them with `/setup`.
+- Re-keys `clan_membership` and `seen_tweets` per server, assigning existing rows to the home
+  server.
+- Registers every command globally and removes the home server's old server-only copies, so
+  nothing shows twice. New global commands can take a little while to appear.
 
-| Variable | Value | Required? |
-|----------|-------|-----------|
-| `STRIPE_PAYMENT_LINK_L2_L3` | Payment Link URL for the $20 L2/L3 tier | Tier is hidden if unset |
-| `STRIPE_PAYMENT_LINK_L1` | Payment Link URL for the $35 L1 tier | Tier is hidden if unset |
-| `STRIPE_SECRET_KEY` | `sk_live_…` (or `sk_test_…` to rehearse) | Optional — see below |
-| `SUBSCRIBER_REFRESH_INTERVAL_MINUTES` | `60` | Optional, defaults to 60 |
+**Then, in the home server:**
 
-Both Payment Links must be created in the Stripe Dashboard as **one-time** payments (each
-buys a single month; nothing auto-renews), and both must be **live-mode** links if
-`STRIPE_SECRET_KEY` is a live key — a test link paired with a live key produces payments the
-confirm step cannot find.
+1. `/setup status` — check the copied channels, roles and clans look right.
+2. `/product list` — any products from the old `/product sell` era are now `/subscribe`
+   buttons. Remove the ones that shouldn't be.
+3. `/product add label:July Sub link:https://seventhmonth.com/sub/` and
+   `/product add label:CWL packs link:https://seventhmonth.com/cwl-pack/`.
 
-The billing model is set per Payment Link and the bot cannot see it, so the buyer-facing copy
-is hardcoded to match. **If these are ever switched back to recurring, the copy in
-`modules/subscriptions/tiers.py` and `build_subscribe_embed` must change with them** — a test
-pins the current wording and will fail if only the Dashboard changes.
+**In the Underground server**, right away (the first server to add a Stripe link owns it):
 
-Two things to expect while running this:
+1. Invite the bot, then `/setup status`.
+2. `/product add label:UG Sub link:https://seventhmonth.com/ug-sub/`.
 
-- **`init_db.py` drops the `subscriptions` table.** That is intended. It was built for the
-  deleted FastAPI webhook, never held a real row, and is replaced by `subscribers`. The
-  destructive `DROP TABLE` in the output is not an error.
-- **`init_db.py` also clears a stale `payment_method = 'PayPal'`** off agreements written by
-  `/subscribe`. The column carried a `DEFAULT 'PayPal'` from when PayPal was the only payment
-  option, so Stripe purchases were printing "Payment Method: PayPal" on their receipts. Rows
-  from the retired moderator flow keep their value — that one is real. Nothing to do; it just
-  explains the `UPDATE` in the log.
-- **`STRIPE_SECRET_KEY` is deliberately optional and *not* in `REQUIRED_VARS`.** Leaving it
-  blank still starts the bot — Confirm Payment just reports that Stripe isn't configured, and
-  the subscriber-status refresh job doesn't register. This is on purpose: a Stripe
-  misconfiguration must never take the whole Discord bot down.
+Each `/product add` reply says how many Stripe checkouts it found on the page and whether any
+belong to another server. Confirm Payment only lists payments made through the server's own
+links, so July buyers never appear in Underground's list and vice versa.
 
-**What changed for users:** `/subscribe` is now **admin-only** and takes a member argument
-(`/subscribe @buyer`), posting a public status message in the ticket instead of an ephemeral
-one. `/agreement send` and the in-Discord "I Agree" step are both gone — buyers accept the
-Terms inside Stripe Checkout now, so the payment buttons appear immediately. `/agreement
-lookup` and `/agreement receipt` still work and still render the older rows in full.
-
-**Note on dispute evidence:** for purchases made from here on, the record of the buyer
-accepting the Terms lives in **Stripe**, not in this database. Answer a chargeback from the
-Stripe Dashboard. Receipts for older purchases still carry the full signed agreement text.
-
-**Verifying it took**, after the restart:
-
-```bash
-tail -n 40 logs/julybot.stderr.log     # should show a clean login, no settings error
-```
-
-Then in Discord: `/subscribe @someone` → payment link buttons appear straight away → the
-buyer pays (accepting the Terms during Stripe's checkout) → an admin clicks Confirm Payment
-and picks the buyer's subscription from the Stripe dropdown. If the dropdown is empty, the
-key and the Payment Links are in different modes (one live, one test).
+`STRIPE_SECRET_KEY` stays optional and is *not* in `REQUIRED_VARS`: without it the bot runs,
+`/product add` still adds the button, and Confirm Payment says Stripe isn't configured.
+`SUBSCRIBE_URL` and `STRIPE_PAYMENT_LINK_*` are no longer read; leftover values in `.env` are
+harmless.
 
 ## Run the bot
 

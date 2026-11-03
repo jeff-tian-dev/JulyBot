@@ -1,4 +1,4 @@
-"""Unit tests for one-time products: storage, and their path through the purchase flow."""
+"""Unit tests for products (the /subscribe buttons): storage, rendering and /product."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -8,14 +8,13 @@ import asyncpg
 import disnake
 import pytest
 
-from discord_bot.commands import product_commands, purchase_commands, subscribe_commands
+from discord_bot.commands import product_commands, purchase_commands
 from modules.agreements.validation import receipt_text, status_embed
-from modules.subscriptions import products
+from modules.subscriptions import payment_links, products
 from modules.subscriptions import storage as subscriber_storage
-from modules.subscriptions.stripe_api import KIND_PAYMENT, SubscriptionSummary
 
 NOW = datetime(2026, 9, 26, 12, 0, 0, tzinfo=timezone.utc)
-LINK = "https://buy.stripe.com/basepack"
+LINK = "https://seventhmonth.com/sub/"
 
 
 class _FakePoolAcquireCtx:
@@ -39,9 +38,9 @@ def _product(**overrides):
     row = {
         "id": 3,
         "guild_id": 1,
-        "name": "Base Pack",
+        "name": "July Sub",
         "payment_link": LINK,
-        "description": "Ten war bases.",
+        "description": None,
         "created_by": 555,
         "removed_at": None,
     }
@@ -70,94 +69,101 @@ def _agreement(**overrides):
         "voided_by": None,
         "void_reason": None,
         "product_id": 3,
-        "product_name": "Base Pack",
+        "product_name": "July Sub",
     }
     row.update(overrides)
     return row
-
-
-def _summary(subscription_id: str, *, kind: str = KIND_PAYMENT) -> SubscriptionSummary:
-    return SubscriptionSummary(
-        subscription_id=subscription_id,
-        customer_id="cus_1",
-        name="Jane Doe",
-        email="jane@example.com",
-        status="succeeded" if kind == KIND_PAYMENT else "active",
-        amount_cents=1500,
-        currency="usd",
-        created=NOW,
-        current_period_end=None,
-        kind=kind,
-    )
 
 
 # --- validation ---------------------------------------------------------------
 
 
 def test_validate_name_collapses_whitespace_and_rejects_blank() -> None:
-    assert products.validate_name("  Base   Pack ") == "Base Pack"
+    assert products.validate_name("  July   Sub ") == "July Sub"
     with pytest.raises(products.ProductError):
         products.validate_name("   ")
 
 
+def test_name_fits_a_discord_button_label() -> None:
+    """The name is the /subscribe button's label, which Discord caps at 80."""
+    products.validate_name("x" * 80)
+    with pytest.raises(products.ProductError):
+        products.validate_name("x" * 81)
+
+
 @pytest.mark.parametrize(
     "link",
-    ["http://buy.stripe.com/x", "javascript:alert(1)", "buy.stripe.com/x", ""],
+    ["http://seventhmonth.com/sub/", "javascript:alert(1)", "seventhmonth.com/sub/", ""],
 )
-def test_validate_payment_link_requires_full_https_url(link) -> None:
+def test_validate_link_requires_full_https_url(link) -> None:
     with pytest.raises(products.ProductError):
         products.validate_payment_link(link)
 
 
-def test_validate_payment_link_accepts_custom_domain() -> None:
-    """Stripe Payment Links can run on a custom domain, so the host isn't pinned."""
-    assert products.validate_payment_link(" https://pay.example.com/abc ") == "https://pay.example.com/abc"
-
-
-def test_blank_description_is_stored_as_null() -> None:
-    assert products.validate_description("   ") is None
+def test_validate_link_accepts_a_website_page() -> None:
+    assert products.validate_payment_link(" https://seventhmonth.com/ug-sub/ ") == "https://seventhmonth.com/ug-sub/"
 
 
 # --- storage ------------------------------------------------------------------
 
 
+def _add_conn(*, existing: int = 0, row=None, error=None) -> MagicMock:
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=existing)
+    conn.fetchrow = AsyncMock(side_effect=error) if error else AsyncMock(return_value=row or _product())
+    return conn
+
+
 @pytest.mark.asyncio
 async def test_add_product_inserts_cleaned_values() -> None:
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(return_value=_product())
+    conn = _add_conn()
 
     await products.add_product(
-        _fake_pool(conn), guild_id=1, name=" Base Pack ", payment_link=LINK,
+        _fake_pool(conn), guild_id=1, name=" July Sub ", payment_link=LINK,
         description="", created_by=555,
     )
 
     sql, *args = conn.fetchrow.await_args.args
     assert "INSERT INTO products" in sql
-    assert args == [1, "Base Pack", LINK, None, 555]
+    assert args == [1, "July Sub", LINK, None, 555]
+    # The cap is counted per server.
+    assert conn.fetchval.await_args.args[1] == 1
 
 
 @pytest.mark.asyncio
 async def test_add_product_duplicate_name_is_a_friendly_error() -> None:
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(side_effect=asyncpg.UniqueViolationError("dup"))
+    conn = _add_conn(error=asyncpg.UniqueViolationError("dup"))
 
     with pytest.raises(products.DuplicateProductError, match="already exists"):
         await products.add_product(
-            _fake_pool(conn), guild_id=1, name="Base Pack", payment_link=LINK,
+            _fake_pool(conn), guild_id=1, name="July Sub", payment_link=LINK,
             description=None, created_by=555,
         )
 
 
 @pytest.mark.asyncio
+async def test_add_product_refuses_past_the_per_server_cap() -> None:
+    """Every product is a button on one message, and Discord caps buttons."""
+    conn = _add_conn(existing=products.MAX_PRODUCTS_PER_GUILD)
+
+    with pytest.raises(products.ProductError, match="Remove one first"):
+        await products.add_product(
+            _fake_pool(conn), guild_id=1, name="One more", payment_link=LINK,
+            description=None, created_by=555,
+        )
+    conn.fetchrow.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_bad_input_never_reaches_the_database() -> None:
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock()
+    conn = _add_conn()
 
     with pytest.raises(products.ProductError):
         await products.add_product(
-            _fake_pool(conn), guild_id=1, name="Base Pack", payment_link="http://x.com",
+            _fake_pool(conn), guild_id=1, name="July Sub", payment_link="http://x.com",
             description=None, created_by=555,
         )
+    conn.fetchval.assert_not_awaited()
     conn.fetchrow.assert_not_awaited()
 
 
@@ -167,7 +173,7 @@ async def test_remove_product_is_a_soft_delete() -> None:
     conn = MagicMock()
     conn.fetchrow = AsyncMock(return_value=_product(removed_at=NOW))
 
-    await products.remove_product(_fake_pool(conn), 1, "base pack", removed_by=555)
+    await products.remove_product(_fake_pool(conn), 1, "july sub", removed_by=555)
 
     sql = conn.fetchrow.await_args.args[0]
     assert "UPDATE products" in sql
@@ -177,45 +183,40 @@ async def test_remove_product_is_a_soft_delete() -> None:
 
 
 @pytest.mark.asyncio
-async def test_lookups_only_see_live_products() -> None:
+async def test_lookups_only_see_live_products_of_one_server() -> None:
     conn = MagicMock()
     conn.fetchrow = AsyncMock(return_value=None)
     conn.fetch = AsyncMock(return_value=[])
     pool = _fake_pool(conn)
 
-    await products.get_product_by_name(pool, 1, "Base Pack")
+    await products.get_product_by_name(pool, 1, "July Sub")
     await products.list_products(pool, 1)
 
-    assert "removed_at IS NULL" in conn.fetchrow.await_args.args[0]
-    assert "removed_at IS NULL" in conn.fetch.await_args.args[0]
+    for sql in (conn.fetchrow.await_args.args[0], conn.fetch.await_args.args[0]):
+        assert "removed_at IS NULL" in sql
+        assert "guild_id = $1" in sql
 
 
 def test_matching_names_filters_case_insensitively() -> None:
-    rows = [_product(name="Base Pack"), _product(name="War Pack"), _product(name="Other")]
-    assert products.matching_names(rows, "pack") == ["Base Pack", "War Pack"]
+    rows = [_product(name="July Sub"), _product(name="UG Sub"), _product(name="CWL packs")]
+    assert products.matching_names(rows, "sub") == ["July Sub", "UG Sub"]
 
 
-# --- products are not subscription access --------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_products_never_count_as_active_access() -> None:
-    conn = MagicMock()
-    conn.fetch = AsyncMock(return_value=[])
-
-    await subscriber_storage.list_active_subscribers(_fake_pool(conn), 1)
-
-    assert "product_id IS NULL" in conn.fetch.await_args.args[0]
+# --- every purchase counts ---------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_products_are_never_archived() -> None:
+async def test_every_purchase_counts_as_active_and_is_archived() -> None:
+    """All purchases are products now, so none may be filtered out by product."""
     conn = MagicMock()
     conn.fetch = AsyncMock(return_value=[])
+    pool = _fake_pool(conn)
 
-    await subscriber_storage.archive_subscribers(_fake_pool(conn), 1, before=NOW, archived_by=555)
+    await subscriber_storage.list_active_subscribers(pool, 1)
+    assert "product_id" not in conn.fetch.await_args.args[0]
 
-    assert "product_id IS NULL" in conn.fetch.await_args.args[0]
+    await subscriber_storage.archive_subscribers(pool, 1, before=NOW, archived_by=555)
+    assert "product_id" not in conn.fetch.await_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -233,8 +234,9 @@ async def test_purchase_log_joins_the_product_name() -> None:
 # --- rendering ------------------------------------------------------------------
 
 
-def test_pending_product_embed_names_it_and_never_says_one_month() -> None:
-    embed = status_embed(_agreement())
+def test_pending_historical_product_embed_names_it_and_never_says_one_month() -> None:
+    """A row from the retired /product sell still shows its product."""
+    embed = status_embed(_agreement(product_name="Base Pack"))
 
     assert "Base Pack" in embed.title
     assert "one-time" in embed.description
@@ -244,9 +246,8 @@ def test_pending_product_embed_names_it_and_never_says_one_month() -> None:
 def test_confirmed_product_embed_does_not_claim_a_subscription() -> None:
     embed = status_embed(_agreement(confirmed_at=NOW, confirmed_by=555, payer_name="Jane Doe"))
 
-    assert "Base Pack" in embed.title
+    assert "July Sub" in embed.title
     assert "subscription" not in embed.description
-    assert "Access" not in embed.description
 
 
 def test_receipt_names_the_product_and_the_stripe_payment() -> None:
@@ -255,7 +256,7 @@ def test_receipt_names_the_product_and_the_stripe_payment() -> None:
         buyer_label="buyer",
     )
 
-    assert "Product: Base Pack (one-time purchase)" in text
+    assert "July Sub" in text
     assert "successful Stripe payment" in text
     assert "Stripe subscription" not in text
 
@@ -265,126 +266,140 @@ def test_purchase_list_line_shows_the_product() -> None:
         "id": 12, "discord_id": 4242, "stripe_subscription_id": "pi_1",
         "payment_method": None, "status": "succeeded", "amount_cents": 1500,
         "payer_name": "Jane Doe", "created_at": NOW, "relinked_at": None,
-        "product_name": "Base Pack",
+        "product_name": "July Sub",
     }
-    assert "Base Pack" in purchase_commands.purchase_line(record)
+    assert "July Sub" in purchase_commands.purchase_line(record)
 
 
-def test_product_list_embed_shows_each_product() -> None:
-    embed = product_commands.build_product_list_embed([_product()])
-    assert [f.name for f in embed.fields] == ["Base Pack"]
-    assert LINK in embed.fields[0].value
+def test_product_list_embed_shows_each_product_and_its_checkouts() -> None:
+    rows = [_product(), _product(id=4, name="CWL packs", payment_link="https://seventhmonth.com/cwl-pack/")]
+    embed = product_commands.build_product_list_embed(rows, {3: 2})
+
+    assert [f.name for f in embed.fields] == ["July Sub", "CWL packs"]
+    assert LINK in embed.fields[0].value and "2 Stripe checkouts" in embed.fields[0].value
+    assert "no Stripe checkouts" in embed.fields[1].value
 
 
 def test_empty_product_list_says_how_to_add_one() -> None:
-    embed = product_commands.build_product_list_embed([])
+    embed = product_commands.build_product_list_embed([], {})
     assert "/product add" in embed.description
 
 
-# --- the purchase flow ------------------------------------------------------------
+# --- describing a page scan ----------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_product_view_shows_only_that_products_link() -> None:
-    view = subscribe_commands.PurchaseView(_agreement(), product_link=LINK)
-
-    links = [c for c in view.children if c.style == disnake.ButtonStyle.link]
-    assert [b.url for b in links] == [LINK]
-    labels = [c.label for c in view.children]
-    assert "Confirm Payment" in labels and "Cancel" in labels
+def test_scan_description_reports_claimed_links() -> None:
+    text = product_commands.describe_scan(
+        payment_links.ScanResult(found=2, claimed=["a", "b"])
+    )
+    assert "Found 2 Stripe checkouts" in text
 
 
-@pytest.mark.asyncio
-async def test_restored_product_view_keeps_its_callback_buttons() -> None:
-    """After a restart the link is unknown; only custom_id buttons matter for dispatch."""
-    view = subscribe_commands.PurchaseView(_agreement())
-
-    assert not [c for c in view.children if c.style == disnake.ButtonStyle.link]
-    assert {c.custom_id for c in view.children} == {"purchase:confirm:7", "purchase:cancel:7"}
+def test_scan_description_warns_about_links_owned_by_another_server() -> None:
+    text = product_commands.describe_scan(
+        payment_links.ScanResult(found=1, owned_elsewhere=["a"])
+    )
+    assert "another server" in text and "won't be listed" in text
 
 
-@pytest.mark.asyncio
-async def test_confirming_a_product_offers_only_one_time_payments() -> None:
-    inter = MagicMock()
-    inter.author.id = 555
-    inter.author.guild_permissions = disnake.Permissions(administrator=True)
-    inter.data.custom_id = "purchase:confirm:7"
-    inter.bot.pool = MagicMock()
-    inter.response.send_message = AsyncMock()
-    lookup = AsyncMock(return_value=[
-        _summary("sub_1", kind="subscription"),
-        _summary("pi_1"),
-    ])
-
-    with patch.object(subscribe_commands.storage, "get_agreement", new=AsyncMock(return_value=_agreement())), \
-         patch.object(subscribe_commands.stripe_api, "list_recent_subscriptions", new=lookup):
-        view = subscribe_commands.PurchaseView(_agreement())
-        button = next(c for c in view.children if c.label == "Confirm Payment")
-        await button.callback(inter)
-
-    picker = inter.response.send_message.call_args.kwargs["view"]
-    assert isinstance(picker, subscribe_commands.StripePickerView)
-    assert list(picker._by_id) == ["pi_1"]
+def test_scan_description_warns_when_nothing_was_found() -> None:
+    assert "No Stripe checkout links" in product_commands.describe_scan(payment_links.ScanResult())
 
 
-@pytest.mark.asyncio
-async def test_confirming_a_product_records_it_in_the_purchase_log() -> None:
-    inter = MagicMock()
-    inter.author.id = 555
-    inter.bot.pool = MagicMock()
-    inter.response.send_message = AsyncMock()
-    confirmed = _agreement(confirmed_at=NOW, confirmed_by=555)
-    message = MagicMock()
-    message.edit = AsyncMock()
-
-    with patch.object(subscribe_commands.storage, "confirm_agreement", new=AsyncMock(return_value=confirmed)), \
-         patch.object(subscribe_commands.agreement_storage, "set_payer_name", new=AsyncMock()), \
-         patch.object(subscribe_commands.storage, "get_agreement", new=AsyncMock(return_value=confirmed)), \
-         patch.object(subscribe_commands.subscriber_storage, "create_subscriber", new=AsyncMock()) as create:
-        await subscribe_commands.finalize_confirmation(
-            inter, agreement_id=7, subscription=_summary("pi_1"),
-            payer_name="Jane Doe", message=message,
-        )
-
-    kwargs = create.await_args.kwargs
-    assert kwargs["product_id"] == 3
-    assert kwargs["amount_cents"] == 1500
-    assert kwargs["stripe_subscription_id"] == "pi_1"
+def test_scan_description_reports_errors_and_foreign_accounts() -> None:
+    assert "Couldn't load" in product_commands.describe_scan(
+        payment_links.ScanResult(error="Couldn't load the page.")
+    )
+    assert "Stripe account" in product_commands.describe_scan(
+        payment_links.ScanResult(found=1, not_on_our_account=1)
+    )
 
 
-@pytest.mark.asyncio
-async def test_start_purchase_snapshots_the_product_onto_the_agreement() -> None:
+# --- /product -----------------------------------------------------------------------
+
+
+def _inter() -> MagicMock:
     inter = MagicMock()
     inter.guild.id = 1
-    inter.channel.id = 99
     inter.author.id = 555
-    inter.bot.pool = MagicMock()
-    sent = MagicMock(id=100, jump_url="https://discord.com/x")
-    inter.channel.send = AsyncMock(return_value=sent)
+    inter.response.defer = AsyncMock()
     inter.edit_original_response = AsyncMock()
-    member = MagicMock(id=4242, mention="<@4242>")
+    return inter
 
-    with patch.object(subscribe_commands.storage, "create_pending_agreement",
-                      new=AsyncMock(return_value=_agreement())) as create, \
-         patch.object(subscribe_commands.storage, "attach_message", new=AsyncMock()):
-        await subscribe_commands.start_purchase(inter, member, product=_product())
 
-    assert create.await_args.kwargs["product_id"] == 3
-    assert create.await_args.kwargs["product_name"] == "Base Pack"
-    view = inter.channel.send.await_args.kwargs["view"]
-    assert [c.url for c in view.children if c.style == disnake.ButtonStyle.link] == [LINK]
+def _cog() -> product_commands.ProductCommands:
+    cog = product_commands.ProductCommands(MagicMock())
+    cog.bot.pool = MagicMock()
+    return cog
 
 
 @pytest.mark.asyncio
-async def test_start_purchase_rolls_back_when_the_message_cant_be_posted() -> None:
-    inter = MagicMock()
-    inter.bot.pool = MagicMock()
-    inter.channel.send = AsyncMock(side_effect=disnake.HTTPException(MagicMock(status=403), "no"))
-    inter.edit_original_response = AsyncMock()
+async def test_add_command_scans_the_page_for_this_server() -> None:
+    inter, cog = _inter(), _cog()
+    scan = AsyncMock(return_value=payment_links.ScanResult(found=2, claimed=["a", "b"]))
 
-    with patch.object(subscribe_commands.storage, "create_pending_agreement",
-                      new=AsyncMock(return_value=_agreement())), \
-         patch.object(subscribe_commands.storage, "delete_agreement", new=AsyncMock()) as delete:
-        await subscribe_commands.start_purchase(inter, MagicMock(id=4242), product=_product())
+    with patch.object(product_commands.products, "add_product", new=AsyncMock(return_value=_product())) as add, \
+         patch.object(product_commands.payment_links, "scan_product", new=scan):
+        await cog.add.callback(cog, inter, label="July Sub", link=LINK)
 
-    delete.assert_awaited_once_with(inter.bot.pool, 7)
+    assert add.await_args.kwargs["guild_id"] == 1
+    assert add.await_args.kwargs["name"] == "July Sub"
+    assert scan.await_args.args[1] == 1
+    reply = inter.edit_original_response.await_args.args[0]
+    assert "July Sub" in reply and "/subscribe" in reply and "Found 2" in reply
+
+
+@pytest.mark.asyncio
+async def test_add_command_reports_bad_input_without_scanning() -> None:
+    inter, cog = _inter(), _cog()
+
+    with patch.object(
+        product_commands.products, "add_product",
+        new=AsyncMock(side_effect=products.ProductError("The link can't be empty.")),
+    ), patch.object(product_commands.payment_links, "scan_product", new=AsyncMock()) as scan:
+        await cog.add.callback(cog, inter, label="July Sub", link="")
+
+    scan.assert_not_awaited()
+    assert "can't be empty" in inter.edit_original_response.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_remove_command_releases_the_products_stripe_links() -> None:
+    inter, cog = _inter(), _cog()
+
+    with patch.object(product_commands.products, "remove_product", new=AsyncMock(return_value=_product())), \
+         patch.object(product_commands.payment_links, "release_product_links", new=AsyncMock()) as release, \
+         patch.object(product_commands.payment_links, "refresh_guild_links", new=AsyncMock()) as refresh:
+        await cog.remove.callback(cog, inter, label="July Sub")
+
+    release.assert_awaited_once_with(cog.bot.pool, 3)
+    # Another product of this server may share the page, so its links are re-claimed.
+    refresh.assert_awaited_once_with(cog.bot.pool, 1)
+
+
+@pytest.mark.asyncio
+async def test_remove_command_with_unknown_label_changes_nothing() -> None:
+    inter, cog = _inter(), _cog()
+
+    with patch.object(product_commands.products, "remove_product", new=AsyncMock(return_value=None)), \
+         patch.object(product_commands.payment_links, "release_product_links", new=AsyncMock()) as release:
+        await cog.remove.callback(cog, inter, label="Nope")
+
+    release.assert_not_awaited()
+    assert "No product named" in inter.edit_original_response.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_list_command_counts_owned_checkouts_per_product() -> None:
+    inter, cog = _inter(), _cog()
+
+    with patch.object(product_commands.payment_links, "refresh_guild_links", new=AsyncMock()), \
+         patch.object(product_commands.products, "list_products", new=AsyncMock(return_value=[_product()])), \
+         patch.object(
+             product_commands.payment_links, "owned_links",
+             new=AsyncMock(return_value={"plink_a": 3, "plink_b": 3, "plink_c": None}),
+         ):
+        await cog.list_products.callback(cog, inter)
+
+    embed = inter.edit_original_response.await_args.kwargs["embed"]
+    assert "2 Stripe checkouts" in embed.fields[0].value

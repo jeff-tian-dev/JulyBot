@@ -103,18 +103,33 @@ def test_validate_member_target_allows_valid_target() -> None:
     validate_member_target(guild, target, moderator)
 
 
+def _log_guild(channel, *, guild_id: int = 77) -> MagicMock:
+    """A guild whose get_channel returns `channel`, for send_mod_log."""
+    guild = MagicMock()
+    guild.id = guild_id
+    guild.get_channel.return_value = channel
+    return guild
+
+
+def _patch_config(mod_log_channel_id):
+    return patch.object(
+        logging.guild_config,
+        "get_guild_config",
+        AsyncMock(return_value={"mod_log_channel_id": mod_log_channel_id}),
+    )
+
+
 @pytest.mark.asyncio
 async def test_send_mod_log_posts_embed_with_reason() -> None:
     channel = AsyncMock()
-    bot = MagicMock()
-    bot.get_channel.return_value = channel
+    guild = _log_guild(channel)
     moderator = _member(42)
     moderator.__str__ = MagicMock(return_value="ModUser#0001")
 
-    with patch("modules.moderation.logging.settings") as mock_settings:
-        mock_settings.MOD_LOG_CHANNEL_ID = 1514111681222148219
+    with _patch_config(1514111681222148219) as get_config:
         await logging.send_mod_log(
-            bot,
+            MagicMock(),
+            guild,
             action="ban",
             target_label="BadActor#1234",
             target_id=1234,
@@ -122,7 +137,9 @@ async def test_send_mod_log_posts_embed_with_reason() -> None:
             reason="spam",
         )
 
-    bot.get_channel.assert_called_once_with(1514111681222148219)
+    get_config.assert_awaited_once()
+    assert get_config.await_args.args[1] == 77
+    guild.get_channel.assert_called_once_with(1514111681222148219)
     channel.send.assert_awaited_once()
     embed = channel.send.await_args.kwargs["embed"]
     assert embed.title == "Member Banned"
@@ -136,14 +153,12 @@ async def test_send_mod_log_posts_embed_with_reason() -> None:
 @pytest.mark.asyncio
 async def test_send_mod_log_uses_dash_when_no_reason() -> None:
     channel = AsyncMock()
-    bot = MagicMock()
-    bot.get_channel.return_value = channel
     moderator = _member(42)
 
-    with patch("modules.moderation.logging.settings") as mock_settings:
-        mock_settings.MOD_LOG_CHANNEL_ID = 1514111681222148219
+    with _patch_config(1514111681222148219):
         await logging.send_mod_log(
-            bot,
+            MagicMock(),
+            _log_guild(channel),
             action="kick",
             target_label="User#0001",
             target_id=99,
@@ -154,6 +169,36 @@ async def test_send_mod_log_uses_dash_when_no_reason() -> None:
     embed = channel.send.await_args.kwargs["embed"]
     fields = {field.name: field.value for field in embed.fields}
     assert fields["Reason"] == "—"
+
+
+@pytest.mark.asyncio
+async def test_send_mod_log_skips_server_with_no_channel_set() -> None:
+    channel = AsyncMock()
+    guild = _log_guild(channel)
+
+    with _patch_config(None):
+        await logging.send_mod_log(
+            MagicMock(), guild, action="kick", target_label="U", target_id=1,
+            moderator=_member(42), reason=None,
+        )
+
+    guild.get_channel.assert_not_called()
+    channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_mod_log_never_posts_outside_its_own_server() -> None:
+    # The channel id resolves only through the acting server; a channel that
+    # isn't in it (e.g. another server's log channel) is never posted to.
+    guild = _log_guild(None)
+
+    with _patch_config(1514111681222148219):
+        await logging.send_mod_log(
+            MagicMock(), guild, action="kick", target_label="U", target_id=1,
+            moderator=_member(42), reason=None,
+        )
+
+    guild.get_channel.assert_called_once_with(1514111681222148219)
 
 
 # ---------------------------------------------------------------------------
@@ -431,14 +476,12 @@ async def test_purge_unmanageable_named_channel_raises() -> None:
 async def test_mod_log_without_target_id_omits_id() -> None:
     channel = MagicMock()
     channel.send = AsyncMock()
-    bot = MagicMock()
-    bot.get_channel = MagicMock(return_value=channel)
     moderator = SimpleNamespace(id=42)
 
-    with patch.object(logging, "settings", SimpleNamespace(MOD_LOG_CHANNEL_ID=123)):
+    with _patch_config(123):
         await logging.send_mod_log(
-            bot, action="purge", target_label="Everyone", target_id=None,
-            moderator=moderator, reason="r",
+            MagicMock(), _log_guild(channel), action="purge", target_label="Everyone",
+            target_id=None, moderator=moderator, reason="r",
         )
 
     embed = channel.send.await_args.kwargs["embed"]

@@ -194,24 +194,27 @@ async def warm_player_cache(pool: asyncpg.Pool, entries) -> None:
         )
 
 
-async def add_daily_absent(pool: asyncpg.Pool, tags: list[str], seconds: int) -> None:
-    """Add `seconds` of out-of-family time to each tag's running daily total."""
+async def add_daily_absent(pool: asyncpg.Pool, guild_id: int, tags: list[str], seconds: int) -> None:
+    """Add `seconds` of out-of-family time to each tag's running daily total in a server."""
     tags = list(tags)
     if not tags:
         return
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE clan_membership SET daily_absent_seconds = daily_absent_seconds + $2 "
-            "WHERE coc_tag = ANY($1::text[]);",
+            "UPDATE clan_membership SET daily_absent_seconds = daily_absent_seconds + $3 "
+            "WHERE guild_id = $1 AND coc_tag = ANY($2::text[]);",
+            guild_id,
             tags,
             seconds,
         )
 
 
-async def reset_daily_absent(pool: asyncpg.Pool) -> None:
-    """Zero every tag's daily out-of-family counter (run right after the 1am board)."""
+async def reset_daily_absent(pool: asyncpg.Pool, guild_id: int) -> None:
+    """Zero a server's daily out-of-family counters (run right after its daily board)."""
     async with pool.acquire() as conn:
-        await conn.execute("UPDATE clan_membership SET daily_absent_seconds = 0;")
+        await conn.execute(
+            "UPDATE clan_membership SET daily_absent_seconds = 0 WHERE guild_id = $1;", guild_id
+        )
 
 
 async def get_roster_tags(pool: asyncpg.Pool, roster_id: int) -> list[str]:
@@ -236,15 +239,16 @@ async def get_roster_tags(pool: asyncpg.Pool, roster_id: int) -> list[str]:
     return tags
 
 
-async def get_daily_board_state(pool: asyncpg.Pool, tags: list[str]) -> dict[str, dict]:
-    """Per-tag {coc_name, in_clan, daily_absent_seconds} for the daily board."""
+async def get_daily_board_state(pool: asyncpg.Pool, guild_id: int, tags: list[str]) -> dict[str, dict]:
+    """Per-tag {coc_name, in_clan, daily_absent_seconds} for a server's daily board."""
     unique = list(dict.fromkeys(tags))
     if not unique:
         return {}
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT coc_tag, coc_name, in_clan, daily_absent_seconds "
-            "FROM clan_membership WHERE coc_tag = ANY($1::text[]);",
+            "FROM clan_membership WHERE guild_id = $1 AND coc_tag = ANY($2::text[]);",
+            guild_id,
             unique,
         )
     return {r["coc_tag"]: dict(r) for r in rows}
@@ -392,7 +396,7 @@ async def build_roster_view(pool: asyncpg.Pool, guild_id: int, name: str) -> dic
     players = await _resolve_players(pool, tags)
     # Absence data only exists for watched rosters (the poller maintains it).
     watched = bool(roster.get("watched"))
-    membership = await _membership_for_view(pool, tags) if watched else {}
+    membership = await _membership_for_view(pool, guild_id, tags) if watched else {}
 
     out: list[dict] = []
     for r in resolved:
@@ -415,7 +419,7 @@ async def build_roster_view(pool: asyncpg.Pool, guild_id: int, name: str) -> dic
     return {"name": roster["name"], "watched": watched, "members": out}
 
 
-async def _membership_for_view(pool: asyncpg.Pool, tags: list[str]) -> dict[str, dict]:
+async def _membership_for_view(pool: asyncpg.Pool, guild_id: int, tags: list[str]) -> dict[str, dict]:
     """Per-tag clan status for /roster view: in_clan, current out stint, lifetime total."""
     unique = list(dict.fromkeys(tags))
     if not unique:
@@ -431,8 +435,9 @@ async def _membership_for_view(pool: asyncpg.Pool, tags: list[str]) -> dict[str,
                                         THEN EXTRACT(EPOCH FROM (NOW() - left_at)) ELSE 0 END, 0))::bigint
                         AS total_seconds
             FROM clan_membership
-            WHERE coc_tag = ANY($1::text[]);
+            WHERE guild_id = $1 AND coc_tag = ANY($2::text[]);
             """,
+            guild_id,
             unique,
         )
     return {r["coc_tag"]: dict(r) for r in rows}
@@ -463,31 +468,38 @@ async def get_watched_tags(pool: asyncpg.Pool) -> list[dict]:
     return [dict(r) for r in rows if r["coc_tag"]]
 
 
-async def get_membership_map(pool: asyncpg.Pool, tags: list[str]) -> dict[str, dict]:
-    """Current stored membership rows keyed by tag (for transition detection)."""
+async def get_membership_map(pool: asyncpg.Pool, guild_id: int, tags: list[str]) -> dict[str, dict]:
+    """A server's stored membership rows keyed by tag (for transition detection)."""
     unique = list(dict.fromkeys(tags))
     if not unique:
         return {}
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT coc_tag, coc_name, in_clan, left_at, total_absent_seconds, clan_name "
-            "FROM clan_membership WHERE coc_tag = ANY($1::text[]);",
+            "FROM clan_membership WHERE guild_id = $1 AND coc_tag = ANY($2::text[]);",
+            guild_id,
             unique,
         )
     return {r["coc_tag"]: dict(r) for r in rows}
 
 
 async def seed_membership(
-    pool: asyncpg.Pool, coc_tag: str, coc_name: str | None, in_clan: bool, clan_name: str | None = None
+    pool: asyncpg.Pool,
+    guild_id: int,
+    coc_tag: str,
+    coc_name: str | None,
+    in_clan: bool,
+    clan_name: str | None = None,
 ) -> None:
     """Record a tag's current state on first sight (silent — no alert). Out => left_at NULL."""
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO clan_membership (coc_tag, coc_name, in_clan, left_at, clan_name)
-            VALUES ($1, $2, $3, NULL, $4)
-            ON CONFLICT (coc_tag) DO NOTHING;
+            INSERT INTO clan_membership (guild_id, coc_tag, coc_name, in_clan, left_at, clan_name)
+            VALUES ($1, $2, $3, $4, NULL, $5)
+            ON CONFLICT (guild_id, coc_tag) DO NOTHING;
             """,
+            guild_id,
             coc_tag,
             coc_name,
             in_clan,
@@ -496,7 +508,7 @@ async def seed_membership(
 
 
 async def mark_left(
-    pool: asyncpg.Pool, coc_tag: str, coc_name: str | None, clan_name: str | None = None
+    pool: asyncpg.Pool, guild_id: int, coc_tag: str, coc_name: str | None, clan_name: str | None = None
 ) -> None:
     """Record that a tag left the clan; starts the absence clock at NOW().
 
@@ -508,9 +520,10 @@ async def mark_left(
             """
             UPDATE clan_membership
             SET in_clan = FALSE, left_at = NOW(),
-                coc_name = COALESCE($2, coc_name), clan_name = $3, updated_at = NOW()
-            WHERE coc_tag = $1;
+                coc_name = COALESCE($3, coc_name), clan_name = $4, updated_at = NOW()
+            WHERE guild_id = $1 AND coc_tag = $2;
             """,
+            guild_id,
             coc_tag,
             coc_name,
             clan_name,
@@ -518,7 +531,7 @@ async def mark_left(
 
 
 async def mark_joined(
-    pool: asyncpg.Pool, coc_tag: str, coc_name: str | None, clan_name: str | None = None
+    pool: asyncpg.Pool, guild_id: int, coc_tag: str, coc_name: str | None, clan_name: str | None = None
 ) -> int | None:
     """Record that a tag rejoined; adds the finished stint to the total.
 
@@ -529,19 +542,22 @@ async def mark_joined(
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            WITH prev AS (SELECT left_at FROM clan_membership WHERE coc_tag = $1)
+            WITH prev AS (
+                SELECT left_at FROM clan_membership WHERE guild_id = $1 AND coc_tag = $2
+            )
             UPDATE clan_membership c
             SET in_clan = TRUE,
                 total_absent_seconds = c.total_absent_seconds
                     + COALESCE(EXTRACT(EPOCH FROM (NOW() - prev.left_at)), 0)::bigint,
                 left_at = NULL,
-                coc_name = COALESCE($2, c.coc_name),
-                clan_name = COALESCE($3, c.clan_name),
+                coc_name = COALESCE($3, c.coc_name),
+                clan_name = COALESCE($4, c.clan_name),
                 updated_at = NOW()
             FROM prev
-            WHERE c.coc_tag = $1
+            WHERE c.guild_id = $1 AND c.coc_tag = $2
             RETURNING EXTRACT(EPOCH FROM (NOW() - prev.left_at))::bigint AS absent_seconds;
             """,
+            guild_id,
             coc_tag,
             coc_name,
             clan_name,
@@ -550,18 +566,19 @@ async def mark_joined(
 
 
 async def touch_name(
-    pool: asyncpg.Pool, coc_tag: str, coc_name: str | None, clan_name: str | None = None
+    pool: asyncpg.Pool, guild_id: int, coc_tag: str, coc_name: str | None, clan_name: str | None = None
 ) -> None:
     """Refresh a tag's cached name (and current family clan) without a state change."""
     async with pool.acquire() as conn:
         await conn.execute(
             """
             UPDATE clan_membership
-            SET coc_name = COALESCE($2, coc_name),
-                clan_name = COALESCE($3, clan_name),
+            SET coc_name = COALESCE($3, coc_name),
+                clan_name = COALESCE($4, clan_name),
                 updated_at = NOW()
-            WHERE coc_tag = $1;
+            WHERE guild_id = $1 AND coc_tag = $2;
             """,
+            guild_id,
             coc_tag,
             coc_name,
             clan_name,

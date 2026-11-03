@@ -9,10 +9,11 @@ A Discord bot for Clash of Clans clans, built around nine independent modules:
 - **X monitor** — polls watched X accounts via `tweety-ns` (cookie auth) and posts new posts as Discord embeds.
 - **YouTube feed tracker** — polls YouTube RSS feeds via `feedparser` and posts when a watched channel uploads a new video.
 - **Moderation** — admin-only `/kick`, `/ban`, `/unban` slash commands with pre-flight validation, public taunt messages, and an audit log embed to a mod-log channel.
-- **Roster** — admin-managed named groups of players (by Discord user or raw CoC tag). Optionally *watch* a roster to get alerts when a member leaves or rejoins the clan family (`COC_FAMILY_CLAN_TAGS`) and to track how long each member has been out.
+- **Roster** — admin-managed named groups of players (by Discord user or raw CoC tag). Optionally *watch* a roster to get alerts when a member leaves or rejoins the server's clan family (set per server) and to track how long each member has been out.
 - **Ranked tracker** — looks up a player's current Ranked Battles weekly tournament group (`/group`) and renders a refreshable dashboard of defenses received this week, with no stored history — everything is fetched live from the CoC API on each refresh.
-- **Subscriptions** — `/subscribe <member>` runs a purchase through a ticket: one message links the buyer to the website (`SUBSCRIBE_URL`), where they pick a tier and pay through Stripe, then advances to confirmed once an admin picks the buyer's subscription out of Stripe. Terms are accepted inside Stripe Checkout, so there is no separate agreement step. The dropdown lists both active recurring subscriptions and successful one-time payments, since either Payment Link type works. Confirmed purchases are recorded in `subscribers`; recurring ones are re-checked against Stripe on a schedule so cancellations and failed renewals show up on their own (a one-time payment has no status that can change, so it is not re-polled). Granting Discord access is still manual.
-- **Products** — admins define their own list of one-time products — any name, any Stripe Payment Link — with `/product add|remove|list`, each just a name and a Stripe Payment Link, and start a sale with `/product sell <member> <name>`. A sale runs the exact same ticket flow as `/subscribe` — status message, admin confirmation against Stripe, receipt, and a row in `/purchases list` — but only offers one-time payments at confirmation, and never counts as subscription access or gets archived.
+- **Subscriptions** — `/subscribe <member>` runs a purchase through a ticket: one message carries a link button per product the server set up (e.g. "July Sub" → the website), where the buyer pays through Stripe, then advances to confirmed once an admin picks the buyer's payment out of Stripe. Terms are accepted at checkout, so there is no separate agreement step. The dropdown lists only payments made through **this server's own** Stripe Payment Links, so servers sharing one Stripe account never see each other's buyers. Confirmed purchases are recorded in `subscribers`; recurring ones are re-checked against Stripe on a schedule so cancellations and failed renewals show up on their own (a one-time payment has no status that can change, so it is not re-polled). Granting Discord access is still manual.
+- **Products** — each server's `/subscribe` buttons, managed with `/product add <label> <link>|remove|list`. Adding one scans its page for Stripe Payment Links and claims them for the server (the first server to add a link owns it); that's what scopes Confirm's list and records which product a confirmed payment was for.
+- **Setup and help** — `/setup status|modlog|clanwatch|clan add|clan remove|pingrole` configures a server (everything is per server); `/help` lists the commands the viewer can use. The bot posts a welcome pointing at both when it joins a server.
 
 The Discord layer (`disnake` Cogs) is a thin shim. Each module is a plain Python package, callable and testable without a running bot.
 
@@ -68,6 +69,9 @@ JulyBot/
 |   |   |-- storage.py        # watch list + last_seen_video_id
 |   |   |-- poller.py         # poll channels, post embeds
 |   |   `-- embeds.py         # Discord embed builder
+|   |-- guild_config/
+|   |   |-- storage.py        # per-server channels, ping roles, clan family (/setup)
+|   |   `-- setup.py          # clan validation against the CoC API
 |   |-- ping_automator/
 |   |   `-- scheduler.py      # APScheduler jobs + ping hook
 |   |-- moderation/
@@ -84,17 +88,18 @@ JulyBot/
 |   |   |-- extrapolate.py    # per-member 30-attack pace extrapolation (/groupextrapolate)
 |   |   `-- tracking.py       # /trackingon|off|list -- DM alerts on status change
 |   |-- subscriptions/
-|   |   |-- tiers.py         # tier display copy + Stripe Payment Links from settings
+|   |   |-- products.py      # per-server /subscribe buttons (label + page)
+|   |   |-- payment_links.py # which server owns which Stripe Payment Link; Confirm's list
 |   |   |-- stripe_api.py    # the only module importing `stripe`; read-only lookups
 |   |   |-- refresh.py       # scheduled re-check of stored subscriptions
 |   |   `-- storage.py       # subscribers CRUD
 |   `-- agreements/
-|       |-- document.py      # the terms text + the T&C PDF path
+|       |-- document.py      # the website's terms text, stored with manual purchases
 |       |-- storage.py       # agreements CRUD: pending -> confirmed / voided
 |       `-- validation.py    # status embed, lookup embed, receipt document
 |-- discord_bot/
 |   |-- bot.py                # create_bot() — InteractionBot factory
-|   `-- commands/             # one Cog per module (account, x, youtube, moderation, roster, post, base_post, agreement, ranked, subscribe, + stub legend/base_finder/ping)
+|   `-- commands/             # one Cog per module (account, x, youtube, moderation, roster, post, base_post, agreement, ranked, subscribe, purchase, product, setup, help, + stub legend/base_finder/ping)
 |-- tests/
 |   |-- conftest.py           # stubs env vars before project imports
 |   |-- test_account_linker.py
@@ -154,7 +159,7 @@ cp .env.example .env   # only if setup.sh didn't already create it
 | Variable                        | Required | Default                                | Notes                                              |
 | ------------------------------- | -------- | -------------------------------------- | -------------------------------------------------- |
 | `DISCORD_TOKEN`                 | yes      | —                                      | Bot token from the Discord developer portal        |
-| `DISCORD_GUILD_ID`              | no       | `0`                                    | Test guild for instant slash-command sync          |
+| `DISCORD_GUILD_ID`              | no       | `0`                                    | The home server: legacy values below are copied into its `/setup` settings once. Commands are global regardless |
 | `COC_API_TOKEN`                 | yes      | —                                      | From developer.clashofclans.com (IP-locked)        |
 | `COC_API_BASE_URL`              | no       | `https://api.clashofclans.com/v1`      | Set to `https://cocproxy.royaleapi.dev/v1` to route via RoyaleAPI's proxy (whitelist their static IP `45.79.218.79` instead of your changing IP) |
 | `DATABASE_URL`                  | yes      | —                                      | Supabase **Session pooler** string + `?sslmode=require` (see `.env.example`) |
@@ -166,23 +171,20 @@ cp .env.example .env   # only if setup.sh didn't already create it
 | `X_COOKIES`                     | no       | empty                                  | Semicolon-delimited browser cookies; empty disables X monitor (`TWITTER_COOKIES` still accepted) |
 | `X_SESSION_NAME`                | no       | `julybot_x`                            | tweety session file basename under `data/x/` (`TWITTER_SESSION_NAME` still accepted) |
 | `X_POLL_INTERVAL_MINUTES`       | no       | `10`                                   | X account poll cadence (`TWITTER_POLL_INTERVAL_MINUTES` still accepted) |
-| `X_PING_ROLE_ID`                | no       | `0`                                    | Role mention on new posts (0 = no ping; `TWITTER_PING_ROLE_ID` still accepted) |
+| `X_PING_ROLE_ID`                | no       | `0`                                    | **Legacy** — per server via `/setup pingrole`; copied into the home server once (`TWITTER_PING_ROLE_ID` still accepted) |
 | `X_PING_COOLDOWN_HOURS`         | no       | `3`                                    | After a ping, new X posts within this window post silently |
 | `X_MAX_CONSECUTIVE_FAILURES`    | no       | `3`                                    | Consecutive connection failures before the poller alerts once and pauses (resumes on restart) |
 | `X_ALERT_CHANNEL_ID`            | no       | `0`                                    | Channel for the "X monitoring stopped" alert (0 = fall back to `MOD_LOG_CHANNEL_ID`) |
 | `YOUTUBE_FEED_POLL_INTERVAL_MINUTES` | no  | `10`                                   | YouTube RSS poll cadence                           |
-| `YOUTUBE_PING_ROLE_ID`          | no       | `1508359179440750602`                  | Role mention on new YouTube videos (0 = no ping)   |
+| `YOUTUBE_PING_ROLE_ID`          | no       | `0`                                    | **Legacy** — per server via `/setup pingrole`; copied into the home server once |
 | `YOUTUBE_PING_COOLDOWN_HOURS`   | no       | `3`                                    | After a ping, new YouTube videos within this window post silently |
-| `MOD_LOG_CHANNEL_ID`              | no       | `1514111681222148219`                  | Channel for kick/ban/unban mod logs                |
-| `COC_FAMILY_CLAN_TAGS`           | no       | empty                                  | Comma-separated family clan tags **without `#`** (it's a comment char in `.env`). A roster member is "in" if in ANY of these clans. Empty disables the clan-watch job |
-| `COC_CLAN_TAG`                   | no       | empty                                  | Optional single main-clan tag, merged into the family above (back-compat) |
-| `CLAN_WATCH_CHANNEL_ID`          | no       | `1528897151625592993`                  | Channel that clan-watch leave/rejoin alerts post to |
+| `MOD_LOG_CHANNEL_ID`              | no       | `0`                                    | **Legacy** — per server via `/setup modlog`; copied into the home server once. Still the fallback for `X_ALERT_CHANNEL_ID` |
+| `COC_FAMILY_CLAN_TAGS`           | no       | empty                                  | **Legacy** — clan families are per server via `/setup clan add`. Comma-separated, **without `#`**; copied into the home server once |
+| `COC_CLAN_TAG`                   | no       | empty                                  | **Legacy** — merged into the family above for the one-time copy |
+| `CLAN_WATCH_CHANNEL_ID`          | no       | `0`                                    | **Legacy** — per server via `/setup clanwatch`; copied into the home server once |
 | `CLAN_WATCH_POLL_INTERVAL_MINUTES` | no     | `10`                                   | How often watched rosters are checked against the clan family |
 | `RANKED_TRACKING_POLL_INTERVAL_MINUTES` | no | `20`                              | How often tracked players' likely-to-be-hit status is checked for `/trackingon` DM alerts |
-| `SUBSCRIBE_URL`                  | no       | `https://seventhmonth.com/sub/`         | Website `/subscribe` links buyers to (lists the tiers, runs Stripe checkout); empty makes `/subscribe` reply that it isn't set up |
-| `STRIPE_PAYMENT_LINK_L2_L3`      | no       | empty                                   | No longer used by `/subscribe` (it links to `SUBSCRIBE_URL`). Stripe Payment Link for the L2/L3 tier |
-| `STRIPE_PAYMENT_LINK_L1`         | no       | empty                                   | Stripe Payment Link for the L1 tier ($35 per month of access, highest)    |
-| `STRIPE_SECRET_KEY`              | no       | empty                                   | Secret key used read-only to look up subscriptions when confirming a payment and to refresh subscriber status. Empty disables both; the bot still runs |
+| `STRIPE_SECRET_KEY`              | no       | empty                                   | Secret key used read-only to match product pages' Payment Links, list a server's checkouts when confirming a payment, and refresh subscriber status. Empty disables all three; the bot still runs |
 | `SUBSCRIBER_REFRESH_INTERVAL_MINUTES` | no  | `60`                                    | How often stored subscriptions are re-checked against Stripe |
 
 Missing any required variable raises a clear `ValueError` at startup.
@@ -305,9 +307,11 @@ The Cogs listed in `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py) are
 | `/purchases list [member]`       | subscriptions (admin) | live      |
 | `/purchases relink <id>`         | subscriptions (admin) | live      |
 | `/purchases archive`             | subscriptions (admin) | live      |
-| `/product add <name> <payment_link> [description]` | subscriptions (admin) | live |
-| `/product remove <name>` / `/product list` | subscriptions (admin) | live |
-| `/product sell <member> <name>`  | subscriptions (admin) | live      |
+| `/product add <label> <link>`    | subscriptions (admin) | live      |
+| `/product remove <label>` / `/product list` | subscriptions (admin) | live |
+| `/setup status\|modlog\|clanwatch\|pingrole` | guild_config (admin) | live |
+| `/setup clan add\|remove <tag>`  | guild_config (admin) | live      |
+| `/help`                          | help               | live         |
 | `/agreement record <member> <method> <payer_name> <amount>` | agreements (admin) | live |
 | `/agreement lookup <member>`     | agreements (admin) | live         |
 | `/agreement receipt <id>`        | agreements (admin) | live         |
@@ -329,7 +333,7 @@ Module logic is implemented end-to-end across all packages. The wiring gap is on
 - **Wired and live:** account linker, X monitor, YouTube feed tracker, moderation, roster, announce (`/post`, `/postbase`), agreement, and ranked tracker (`/group`) Cogs delegate to their module functions.
 - **Subscriptions:** `/subscribe <member>` posts a purchase status message in the ticket — Stripe Payment Link buttons, then admin confirmation — recording each step in `agreements`. Buyers accept the Terms during Stripe Checkout, so that consent record lives in Stripe rather than in this database. Confirming requires the admin to pick the buyer's subscription from Stripe, which is then tracked in `subscribers` and refreshed on a schedule. The bot reads Stripe over its API rather than receiving webhooks, so status is as fresh as the last poll and which subscription belongs to which Discord user remains a human match (recorded in `subscribers.linked_by`). Granting Discord roles off an active subscription is **not** built yet. See the 2026-08-30 CLAUDE.md entries.
 - **Stubs, not loaded:** the legend, base_finder, and ping Cogs still return placeholder text and are commented out of `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py). Their underlying module functions and scheduler jobs are implemented — only the Cog replies are stubbed.
-- The legend, base-finder, and YouTube scheduler jobs run unconditionally; the X poll job is registered only when `X_COOKIES` is set, and the clan-watch job only when a clan tag (`COC_FAMILY_CLAN_TAGS` or `COC_CLAN_TAG`) is set.
+- The legend, base-finder, and YouTube scheduler jobs run unconditionally; the X poll job is registered only when `X_COOKIES` is set. The clan-watch jobs always run and skip any server with no clans set up.
 - `modules/base_finder/detector.py` — CV thresholds are placeholders, marked `NOTE FOR CV ENGINEER`. Tune against real VOD frames.
 - `modules/base_finder/normalizer.py` — UI crop fractions are approximate. Verify against 1080p / 1440p captures.
 

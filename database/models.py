@@ -93,6 +93,34 @@ ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS youtube_enabled BOOLEAN DEFA
 ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS youtube_last_ping_at TIMESTAMP;
 """
 
+# Per-server settings that used to be single-server .env values (see the 2026-11-02
+# entry in CLAUDE.md). NULL means "not set up on this server" — the feature stays
+# quiet there rather than falling back to another server's channel or role.
+# `legacy_config_imported` makes the one-time copy of the old .env values into the
+# home server's row run exactly once, so clearing a value with /setup isn't undone
+# by the next restart.
+ALTER_GUILD_SETTINGS_MULTI_SERVER = """
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS mod_log_channel_id BIGINT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS clan_watch_channel_id BIGINT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS twitter_ping_role_id BIGINT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS youtube_ping_role_id BIGINT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS legacy_config_imported BOOLEAN NOT NULL DEFAULT FALSE;
+"""
+
+# A server's clan "family" for clan watch: a watched member is "in" when they're
+# in ANY of their server's clans. Replaces the global COC_CLAN_TAG /
+# COC_FAMILY_CLAN_TAGS settings. clan_name is cached for display only.
+CREATE_GUILD_CLANS = """
+CREATE TABLE IF NOT EXISTS guild_clans (
+    guild_id BIGINT NOT NULL,
+    clan_tag VARCHAR(20) NOT NULL,
+    clan_name VARCHAR(100),
+    added_by BIGINT,
+    added_at TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (guild_id, clan_tag)
+);
+"""
+
 CREATE_YOUTUBE_WATCHED_CHANNELS = """
 CREATE TABLE IF NOT EXISTS youtube_watched_channels (
     id SERIAL PRIMARY KEY,
@@ -122,11 +150,28 @@ CREATE TABLE IF NOT EXISTS twitter_watched_accounts (
 
 CREATE_SEEN_TWEETS = """
 CREATE TABLE IF NOT EXISTS seen_tweets (
-    tweet_id BIGINT PRIMARY KEY,
+    tweet_id BIGINT NOT NULL,
     guild_id BIGINT NOT NULL,
     username VARCHAR(50) NOT NULL,
-    posted_at TIMESTAMP DEFAULT NOW()
+    posted_at TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (guild_id, tweet_id)
 );
+"""
+
+# seen_tweets was keyed by tweet_id alone, so when two servers watched the same X
+# account the first to claim a tweet stopped the second ever posting it. Dedup is
+# per server now. Only fires while the old one-column key is still in place.
+MIGRATE_SEEN_TWEETS_PER_GUILD = """
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indrelid
+        WHERE c.relname = 'seen_tweets' AND i.indisprimary AND i.indnatts = 1
+    ) THEN
+        ALTER TABLE seen_tweets DROP CONSTRAINT seen_tweets_pkey;
+        ALTER TABLE seen_tweets ADD PRIMARY KEY (guild_id, tweet_id);
+    END IF;
+END $$;
 """
 
 CREATE_ROSTERS = """
@@ -171,15 +216,45 @@ ALTER TABLE rosters ADD COLUMN IF NOT EXISTS watch_message_id BIGINT;
 # `left_at` is when the current absence began (NULL when in clan, or unknown if
 # the tag was already out when first seen). `total_absent_seconds` accumulates
 # completed absences; the current open stint is added on the fly when displayed.
+#
+# Keyed per server: each server has its own clan family, so the same player can be
+# "in" for one server and "out" for another, with separate absence totals.
 CREATE_CLAN_MEMBERSHIP = """
 CREATE TABLE IF NOT EXISTS clan_membership (
-    coc_tag VARCHAR(20) PRIMARY KEY,
+    guild_id BIGINT NOT NULL,
+    coc_tag VARCHAR(20) NOT NULL,
     coc_name VARCHAR(100),
     in_clan BOOLEAN NOT NULL,
     left_at TIMESTAMP,
     total_absent_seconds BIGINT NOT NULL DEFAULT 0,
-    updated_at TIMESTAMP DEFAULT NOW()
+    updated_at TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (guild_id, coc_tag)
 );
+"""
+
+# Older tables are keyed by coc_tag alone. Every existing row belongs to the home
+# server (the only server before multi-server support), so the backfill uses its
+# id — passed in as $1 by create_tables, since models.py doesn't read settings.
+MIGRATE_CLAN_MEMBERSHIP_ADD_GUILD = """
+ALTER TABLE clan_membership ADD COLUMN IF NOT EXISTS guild_id BIGINT;
+"""
+
+BACKFILL_CLAN_MEMBERSHIP_GUILD = """
+UPDATE clan_membership SET guild_id = $1 WHERE guild_id IS NULL;
+"""
+
+MIGRATE_CLAN_MEMBERSHIP_GUILD_KEY = """
+ALTER TABLE clan_membership ALTER COLUMN guild_id SET NOT NULL;
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indrelid
+        WHERE c.relname = 'clan_membership' AND i.indisprimary AND i.indnatts = 1
+    ) THEN
+        ALTER TABLE clan_membership DROP CONSTRAINT clan_membership_pkey;
+        ALTER TABLE clan_membership ADD PRIMARY KEY (guild_id, coc_tag);
+    END IF;
+END $$;
 """
 
 # The clan the tag is currently in: a family clan's name while in_clan, or the
@@ -537,7 +612,29 @@ ALTER TABLE agreements ADD COLUMN IF NOT EXISTS product_name VARCHAR(100);
 ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS product_id INTEGER REFERENCES products(id) ON DELETE SET NULL;
 """
 
+# Which server owns each Stripe Payment Link. Products are website pages (the
+# buttons under /subscribe); the buy.stripe.com links found on a product's page are
+# claimed here by the first server to add it, and Confirm only ever lists payments
+# made through a server's own links — so one server's admins never see another
+# server's buyers, even though every server shares one Stripe account.
+#
+# plink_id is the PRIMARY KEY on purpose: that is what makes ownership first-come,
+# one server per link. Releasing happens only through /product remove. product_id
+# is the product whose page the link was found on, which is how a confirmed
+# payment learns what was bought.
+CREATE_STRIPE_PAYMENT_LINKS = """
+CREATE TABLE IF NOT EXISTS stripe_payment_links (
+    plink_id VARCHAR(64) PRIMARY KEY,
+    url TEXT NOT NULL,
+    guild_id BIGINT NOT NULL,
+    product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+    claimed_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_stripe_payment_links_guild ON stripe_payment_links (guild_id);
+"""
+
 ALL_TABLES = (
+    "stripe_payment_links",
     "subscribers",
     "ranked_tracking",
     "agreements",
@@ -551,6 +648,7 @@ ALL_TABLES = (
     "clan_membership",
     "roster_members",
     "rosters",
+    "guild_clans",
     "users",
     "legend_snapshots",
     "base_cache",
@@ -559,8 +657,12 @@ ALL_TABLES = (
 )
 
 
-async def create_tables(pool: asyncpg.Pool) -> None:
-    """Create tables if they do not exist."""
+async def create_tables(pool: asyncpg.Pool, home_guild_id: int = 0) -> None:
+    """Create tables if they do not exist.
+
+    `home_guild_id` is the server that owned all data before multi-server
+    support; pre-existing clan_membership rows are assigned to it.
+    """
     async with pool.acquire() as conn:
         logger.info("Ensuring pgvector extension is installed")
         await conn.execute(CREATE_VECTOR_EXTENSION)
@@ -589,6 +691,8 @@ async def create_tables(pool: asyncpg.Pool) -> None:
         for ddl, name in x_ddls:
             logger.info("Creating table %s if not exists", name)
             await conn.execute(ddl)
+        logger.info("Applying seen_tweets per-server key migration if needed")
+        await conn.execute(MIGRATE_SEEN_TWEETS_PER_GUILD)
 
         logger.info("Applying guild_settings youtube column migrations if needed")
         await conn.execute(ALTER_GUILD_SETTINGS_YOUTUBE)
@@ -614,6 +718,15 @@ async def create_tables(pool: asyncpg.Pool) -> None:
         await conn.execute(ALTER_CLAN_MEMBERSHIP_CLAN_NAME)
         logger.info("Applying clan_membership daily_absent_seconds column migration if needed")
         await conn.execute(ALTER_CLAN_MEMBERSHIP_DAILY)
+        logger.info("Applying clan_membership per-server migration if needed")
+        await conn.execute(MIGRATE_CLAN_MEMBERSHIP_ADD_GUILD)
+        await conn.execute(BACKFILL_CLAN_MEMBERSHIP_GUILD, home_guild_id)
+        await conn.execute(MIGRATE_CLAN_MEMBERSHIP_GUILD_KEY)
+
+        logger.info("Applying guild_settings multi-server columns if needed")
+        await conn.execute(ALTER_GUILD_SETTINGS_MULTI_SERVER)
+        logger.info("Creating table guild_clans if not exists")
+        await conn.execute(CREATE_GUILD_CLANS)
 
         logger.info("Creating table base_posts if not exists")
         await conn.execute(CREATE_BASE_POSTS)
@@ -656,6 +769,9 @@ async def create_tables(pool: asyncpg.Pool) -> None:
         await conn.execute(CREATE_PRODUCTS)
         logger.info("Applying purchase product migration if needed")
         await conn.execute(MIGRATE_PURCHASE_PRODUCTS)
+        # After products: it references them.
+        logger.info("Creating table stripe_payment_links if not exists")
+        await conn.execute(CREATE_STRIPE_PAYMENT_LINKS)
 
 
 async def drop_tables(pool: asyncpg.Pool) -> None:

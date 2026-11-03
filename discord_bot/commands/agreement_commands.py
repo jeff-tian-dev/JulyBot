@@ -282,7 +282,7 @@ class AgreementCommands(commands.Cog):
         inter: disnake.ApplicationCommandInteraction,
         member: disnake.User = commands.Param(description="The buyer."),
     ) -> None:
-        rows = await storage.list_agreements_for_buyer(self.bot.pool, member.id)
+        rows = await storage.list_agreements_for_buyer(self.bot.pool, inter.guild.id, member.id)
         await inter.response.send_message(
             embed=lookup_embed(member.id, rows), ephemeral=True, allowed_mentions=NO_PINGS
         )
@@ -297,7 +297,8 @@ class AgreementCommands(commands.Cog):
         agreement_id: int = commands.Param(description="The agreement's #id (see /agreement lookup)."),
     ) -> None:
         record = await storage.get_agreement(self.bot.pool, agreement_id)
-        if record is None:
+        # Ids are global; another server's agreement reads as not found here.
+        if record is None or record["guild_id"] != inter.guild.id:
             await inter.response.send_message(
                 f"No agreement found with id {agreement_id}.", ephemeral=True
             )

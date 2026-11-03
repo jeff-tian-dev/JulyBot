@@ -15,6 +15,11 @@ from modules.ranked_tracker.tracking import list_tracked, start_tracking, stop_t
 
 logger = logging.getLogger(__name__)
 
+# These look up public CoC data or the invoker's own tracking, so they also work
+# in a DM with the bot. Everything else is server-only by default (bot-wide
+# default_contexts in discord_bot/bot.py).
+PERSONAL_CONTEXTS = disnake.InteractionContextTypes(guild=True, bot_dm=True)
+
 
 class RankedGroupView(disnake.ui.View):
     """A single refresh button scoped to one /group message.
@@ -62,7 +67,9 @@ class RankedCommands(commands.Cog):
         self.bot = bot
 
     @commands.slash_command(
-        name="group", description="Look up a player's Ranked Battles tournament group."
+        name="group",
+        description="Look up a player's Ranked Battles tournament group.",
+        contexts=PERSONAL_CONTEXTS,
     )
     async def group(
         self,
@@ -84,6 +91,7 @@ class RankedCommands(commands.Cog):
     @commands.slash_command(
         name="groupextrapolate",
         description="Extrapolate every eligible group member's pace to a full 30 attacks.",
+        contexts=PERSONAL_CONTEXTS,
     )
     async def groupextrapolate(
         self,
@@ -111,6 +119,7 @@ class RankedCommands(commands.Cog):
     @commands.slash_command(
         name="trackingon",
         description="Get DMed when a player's likely-to-be-hit status changes.",
+        contexts=PERSONAL_CONTEXTS,
     )
     async def trackingon(
         self,
@@ -132,6 +141,7 @@ class RankedCommands(commands.Cog):
     @commands.slash_command(
         name="trackingoff",
         description="Stop DM alerts for a player's likely-to-be-hit status.",
+        contexts=PERSONAL_CONTEXTS,
     )
     async def trackingoff(
         self,
@@ -151,6 +161,7 @@ class RankedCommands(commands.Cog):
     @commands.slash_command(
         name="trackinglist",
         description="List the player tags you're currently tracking.",
+        contexts=PERSONAL_CONTEXTS,
     )
     async def trackinglist(self, inter: disnake.ApplicationCommandInteraction) -> None:
         tags = await list_tracked(self.bot.pool, inter.author.id)

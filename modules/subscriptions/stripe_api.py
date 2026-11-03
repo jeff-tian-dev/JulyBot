@@ -1,8 +1,15 @@
 """Read-only Stripe lookups — the only module that imports `stripe`.
 
-Used for two things: listing recent purchases so an admin can pick the one
-matching a buyer when confirming a payment, and re-checking stored recurring
-subscriptions on a schedule so cancellations surface on their own.
+Used for three things: mapping Payment Link URLs to their ids (so a server can
+own the links on its product pages), listing the completed checkouts of a
+server's own links so an admin can pick the one matching a buyer when
+confirming a payment, and re-checking stored recurring subscriptions on a
+schedule so cancellations surface on their own.
+
+**Confirm only ever lists checkouts from the asking server's Payment Links**
+(`list_checkouts`), never the whole Stripe account: several servers share one
+account, and one server's admins must not see another's buyers. See
+modules/subscriptions/payment_links.py.
 
 **Both Payment Link types are supported**, because which one is in use is a
 Stripe Dashboard setting the bot can't see and has already been switched once:
@@ -44,9 +51,9 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 # How many purchases to offer when an admin is picking one. Discord caps a
-# select menu at 25 options, so this stays under it. Both sources are fetched
-# at this limit and then merged, so the combined list is trimmed back down.
-RECENT_SUBSCRIPTION_LIMIT = 20
+# select menu at 25 options, so this stays under it. Each Payment Link is
+# fetched at this limit and the merged list is trimmed back down.
+RECENT_PURCHASE_LIMIT = 20
 
 # Statuses a subscription can never leave, so there's no point re-checking them.
 TERMINAL_STATUSES = ("canceled", "incomplete_expired")
@@ -89,6 +96,9 @@ class SubscriptionSummary:
     created: datetime | None
     current_period_end: datetime | None
     kind: str = KIND_SUBSCRIPTION
+    # The Payment Link (plink_…) the purchase came through, when known — what
+    # ties a payment to the product, and the product to a server.
+    payment_link_id: str | None = None
 
     @property
     def is_one_time(self) -> bool:
@@ -106,6 +116,11 @@ class SubscriptionSummary:
         # for how long access lasts, so the admin needs to see which is which.
         parts.append("one-time" if self.is_one_time else "monthly")
         return " — ".join(parts)
+
+
+def is_configured() -> bool:
+    """Whether Stripe lookups are available at all (STRIPE_SECRET_KEY is set)."""
+    return bool(settings.STRIPE_SECRET_KEY)
 
 
 def _require_key() -> None:
@@ -219,73 +234,115 @@ def _summarize_payment(raw) -> SubscriptionSummary:
     )
 
 
-async def _list_active_subscriptions(limit: int) -> list[SubscriptionSummary]:
-    """Recurring subscriptions that are currently active."""
-    result = await asyncio.to_thread(
-        stripe.Subscription.list,
-        status="active",
-        limit=limit,
-        expand=["data.customer"],
-    )
-    return [_summarize(item) for item in _as_dict(result).get("data", [])]
+def _summarize_checkout(raw) -> SubscriptionSummary | None:
+    """A completed Checkout Session, flattened. None when it isn't confirmable.
 
-
-async def _list_successful_payments(limit: int) -> list[SubscriptionSummary]:
-    """One-time payments that went through.
-
-    PaymentIntent.list has no status filter, so unsuccessful attempts are
-    filtered out here — an abandoned or failed checkout must never be offered
-    as something to confirm.
+    Only a `paid` session counts: an unpaid or zero-amount checkout has nothing
+    for an admin to confirm. The stored id is the Subscription a recurring link
+    created, else the PaymentIntent a one-time link created, so the refresh job
+    and the duplicate-link index work exactly as before. `customer_details`
+    sits on the session itself, so a guest checkout still names the buyer.
     """
-    result = await asyncio.to_thread(
-        stripe.PaymentIntent.list,
-        limit=limit,
-        # latest_charge carries billing_details, the only identifying info on a
-        # guest checkout with no customer object.
-        expand=["data.customer", "data.latest_charge"],
+    data = _as_dict(raw)
+    if data.get("payment_status") != "paid":
+        return None
+
+    recurring = data.get("mode") == "subscription"
+    stripe_id = data.get("subscription") if recurring else data.get("payment_intent")
+    if isinstance(stripe_id, dict):
+        stripe_id = stripe_id.get("id")
+    if not stripe_id:
+        return None
+
+    customer = data.get("customer")
+    customer_id = customer if isinstance(customer, str) else _as_dict(customer or {}).get("id", "")
+    details = _as_dict(data.get("customer_details") or {})
+    link = data.get("payment_link")
+    if isinstance(link, dict):
+        link = link.get("id")
+
+    return SubscriptionSummary(
+        subscription_id=stripe_id,
+        customer_id=customer_id or "",
+        name=details.get("name"),
+        email=details.get("email"),
+        # A new subscription is live at checkout; the refresh job then tracks
+        # its real status. A paid one-time payment is succeeded for good.
+        status="active" if recurring else PAYMENT_SUCCEEDED,
+        amount_cents=data.get("amount_total"),
+        currency=data.get("currency") or "usd",
+        created=_epoch(data.get("created")),
+        current_period_end=None,
+        kind=KIND_SUBSCRIPTION if recurring else KIND_PAYMENT,
+        payment_link_id=link,
     )
-    payments = [_summarize_payment(item) for item in _as_dict(result).get("data", [])]
-    return [p for p in payments if p.status == PAYMENT_SUCCEEDED]
 
 
-async def list_recent_subscriptions(
-    limit: int = RECENT_SUBSCRIPTION_LIMIT,
-) -> list[SubscriptionSummary]:
-    """Recent purchases an admin can link to a buyer, newest first.
+async def list_payment_links() -> dict[str, str]:
+    """{url: plink_id} for every Payment Link on the account.
 
-    Merges both Payment Link types — active recurring subscriptions and
-    successful one-time payments — because which kind is in use is a Dashboard
-    setting the bot can't see, and it has already changed once. Listing only
-    subscriptions is what made a real one-time purchase look like "Stripe has
-    no active subscriptions to link".
-
-    **One source failing does not empty the dropdown.** If subscriptions load
-    but payments error (or vice versa), the successful half is still offered
-    and the failure is logged; an admin with a real purchase in front of them
-    can still confirm it. Only both failing raises.
+    How a buy.stripe.com URL found on a product page is matched to the id that
+    Checkout Sessions are filtered by. A URL that isn't in here belongs to some
+    other Stripe account, and nothing of its can be looked up.
     """
     _require_key()
 
+    def _collect() -> dict[str, str]:
+        links: dict[str, str] = {}
+        for item in stripe.PaymentLink.list(limit=100).auto_paging_iter():
+            data = _as_dict(item)
+            if data.get("url") and data.get("id"):
+                links[data["url"]] = data["id"]
+        return links
+
+    try:
+        return await asyncio.to_thread(_collect)
+    except stripe.error.StripeError as exc:
+        raise StripeApiError(str(exc)) from exc
+
+
+async def _list_link_checkouts(payment_link_id: str, limit: int) -> list[SubscriptionSummary]:
+    result = await asyncio.to_thread(
+        stripe.checkout.Session.list,
+        payment_link=payment_link_id,
+        status="complete",
+        limit=limit,
+    )
+    summaries = (_summarize_checkout(item) for item in _as_dict(result).get("data", []))
+    return [s for s in summaries if s is not None]
+
+
+async def list_checkouts(
+    payment_link_ids, limit: int = RECENT_PURCHASE_LIMIT
+) -> list[SubscriptionSummary]:
+    """Recent paid checkouts made through the given Payment Links, newest first.
+
+    **One link failing does not empty the dropdown.** The links that loaded are
+    still offered and the failure is logged; only every link failing raises.
+    """
+    _require_key()
+    ids = list(dict.fromkeys(payment_link_ids))
+    if not ids:
+        return []
+
     results = await asyncio.gather(
-        _list_active_subscriptions(limit),
-        _list_successful_payments(limit),
+        *(_list_link_checkouts(link_id, limit) for link_id in ids),
         return_exceptions=True,
     )
 
     merged: list[SubscriptionSummary] = []
     failures: list[BaseException] = []
-    for source, outcome in zip(("subscriptions", "payments"), results):
+    for link_id, outcome in zip(ids, results):
         if isinstance(outcome, BaseException):
             failures.append(outcome)
-            logger.warning("Couldn't list Stripe %s: %s", source, outcome)
+            logger.warning("Couldn't list Stripe checkouts for %s: %s", link_id, outcome)
         else:
             merged.extend(outcome)
 
     if failures and not merged:
         raise StripeApiError(str(failures[0])) from failures[0]
 
-    # Newest first across both kinds; a summary with no timestamp sorts last
-    # rather than crashing the comparison.
+    # A summary with no timestamp sorts last rather than crashing the comparison.
     merged.sort(key=lambda s: s.created or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     return merged[:limit]
 
@@ -321,12 +378,14 @@ __all__ = [
     "KIND_PAYMENT",
     "KIND_SUBSCRIPTION",
     "PAYMENT_SUCCEEDED",
-    "RECENT_SUBSCRIPTION_LIMIT",
+    "RECENT_PURCHASE_LIMIT",
     "TERMINAL_STATUSES",
     "StripeApiError",
     "StripeNotConfiguredError",
     "SubscriptionSummary",
     "get_subscription",
+    "is_configured",
     "is_one_time_id",
-    "list_recent_subscriptions",
+    "list_checkouts",
+    "list_payment_links",
 ]

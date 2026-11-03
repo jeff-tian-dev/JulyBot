@@ -35,7 +35,7 @@ import asyncpg
 import disnake
 from disnake.ext import commands
 
-from modules.subscriptions import stripe_api
+from modules.subscriptions import payment_links, stripe_api
 from modules.subscriptions import storage as subscriber_storage
 
 logger = logging.getLogger(__name__)
@@ -230,6 +230,9 @@ class RelinkPickerView(disnake.ui.View):
             )
             return
 
+        product = await payment_links.product_for_link(
+            inter.bot.pool, inter.guild.id, purchase.payment_link_id
+        )
         try:
             updated = await subscriber_storage.relink_subscriber(
                 inter.bot.pool,
@@ -241,6 +244,7 @@ class RelinkPickerView(disnake.ui.View):
                 status=purchase.status,
                 current_period_end=purchase.current_period_end,
                 relinked_by=inter.author.id,
+                product_id=product["id"] if product is not None else None,
             )
         except asyncpg.UniqueViolationError:
             # Name who holds it rather than just refusing — the admin needs to
@@ -371,7 +375,7 @@ class PurchaseCommands(commands.Cog):
         try:
             if member is not None:
                 records = await subscriber_storage.list_subscribers_for_discord_id(
-                    self.bot.pool, member.id
+                    self.bot.pool, inter.guild.id, member.id
                 )
             else:
                 records = await subscriber_storage.list_recent_subscribers(
@@ -409,14 +413,15 @@ class PurchaseCommands(commands.Cog):
         await inter.response.defer(ephemeral=True)
 
         record = await subscriber_storage.get_subscriber(self.bot.pool, purchase_id)
-        if record is None:
+        # Ids are global; another server's purchase reads as not found here.
+        if record is None or record["guild_id"] != inter.guild.id:
             await inter.edit_original_response(
                 f"No purchase #{purchase_id}. Check `/purchases list`."
             )
             return
 
         try:
-            purchases = await stripe_api.list_recent_subscriptions()
+            purchases = await payment_links.list_guild_checkouts(self.bot.pool, inter.guild.id)
         except stripe_api.StripeNotConfiguredError:
             await inter.edit_original_response(
                 "Stripe isn't configured (`STRIPE_SECRET_KEY` is unset), so payments "
@@ -430,8 +435,8 @@ class PurchaseCommands(commands.Cog):
 
         if not purchases:
             await inter.edit_original_response(
-                "Stripe has no recent purchases to link — no active subscriptions and "
-                "no successful one-time payments."
+                "No paid Stripe checkouts were found for this server's products. "
+                "See `/product list`."
             )
             return
 

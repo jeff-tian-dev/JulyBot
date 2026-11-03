@@ -8,10 +8,10 @@ One row per subscription period: a resub creates a NEW row rather than
 overwriting, so this table is a history. "Is this user subscribed?" means "do
 they have a live, unarchived row?", not "is there a row for them".
 
-Product sales (`/product sell`) are logged here too, with `product_id` set.
-They are one-time purchases, not a month of access, so they are left out of
-`list_active_subscribers` and never archived — but they appear everywhere the
-purchase LOG is read (listing, relink), so there is one purchase history.
+`product_id` says what was bought — set from the Stripe Payment Link the payment
+came through (see modules/subscriptions/payment_links.py), NULL on older rows
+and manual (/agreement record) purchases. Every purchase counts towards the
+active list and the monthly archive, whatever was bought.
 
 **Nothing here deletes a row.** These are the purchase log and the evidence for
 a payment dispute. Ending a month archives (`archived_at`), which drops a row
@@ -101,7 +101,7 @@ async def create_subscriber(
 
 
 # Every purchase-log read joins the product for its name, so a listing can say
-# the product by name rather than just a number. LEFT JOIN: tier purchases have none.
+# the product by name rather than just a number. LEFT JOIN: older rows have none.
 _LOG_SELECT = """
     SELECT s.*, p.name AS product_name
       FROM subscribers s
@@ -121,12 +121,14 @@ async def get_subscriber_by_stripe_id(
 
 
 async def list_subscribers_for_discord_id(
-    pool: asyncpg.Pool, discord_id: int
+    pool: asyncpg.Pool, guild_id: int, discord_id: int
 ) -> list[asyncpg.Record]:
-    """Every subscription period for one Discord user, newest first."""
+    """Every purchase one Discord user made in one server, newest first."""
     async with pool.acquire() as conn:
         return await conn.fetch(
-            _LOG_SELECT + " WHERE s.discord_id = $1 ORDER BY s.created_at DESC;",
+            _LOG_SELECT
+            + " WHERE s.guild_id = $1 AND s.discord_id = $2 ORDER BY s.created_at DESC;",
+            guild_id,
             discord_id,
         )
 
@@ -138,8 +140,6 @@ async def list_active_subscribers(pool: asyncpg.Pool, guild_id: int) -> list[asy
     subscription that Stripe has since cancelled; the archive check is what
     bounds a ONE-TIME purchase, whose status stays `succeeded` forever and so
     would otherwise grant access permanently.
-
-    Product sales are excluded: a one-time product is not access to anything.
     """
     async with pool.acquire() as conn:
         return await conn.fetch(
@@ -148,7 +148,6 @@ async def list_active_subscribers(pool: asyncpg.Pool, guild_id: int) -> list[asy
             WHERE guild_id = $1
               AND status = ANY($2::text[])
               AND archived_at IS NULL
-              AND product_id IS NULL
             ORDER BY created_at DESC;
             """,
             guild_id,
@@ -169,9 +168,6 @@ async def archive_subscribers(
     Only touches rows not already archived, so re-running it is a no-op rather
     than restamping the timestamp and losing when the close-out actually
     happened. Returning the rows lets the caller report what changed.
-
-    Product sales are never archived — they were never access, so there is
-    no month to close out.
     """
     async with pool.acquire() as conn:
         return await conn.fetch(
@@ -181,7 +177,6 @@ async def archive_subscribers(
             WHERE guild_id = $1
               AND created_at < $2
               AND archived_at IS NULL
-              AND product_id IS NULL
             RETURNING *;
             """,
             guild_id,
@@ -283,6 +278,7 @@ async def relink_subscriber(
     status: str,
     current_period_end: datetime | None,
     relinked_by: int,
+    product_id: int | None = None,
 ) -> asyncpg.Record | None:
     """Repoint a row at a different Stripe payment. None if the row is gone.
 
@@ -291,7 +287,7 @@ async def relink_subscriber(
     names them up front, so the buyer is the part that was already right.
 
     Everything Stripe-derived is overwritten together (customer, payer name,
-    email, status, period end), because a half-updated row would carry one
+    email, status, period end, and the product the payment's link belongs to), because a half-updated row would carry one
     payment's id alongside another's payer name — worse than the mislink.
 
     `relinked_by` and `relinked_at` are kept rather than just overwriting
@@ -310,6 +306,7 @@ async def relink_subscriber(
                 status = $6,
                 current_period_end = $7,
                 relinked_by = $8,
+                product_id = $9,
                 relinked_at = NOW(),
                 updated_at = NOW()
             WHERE id = $1
@@ -323,6 +320,7 @@ async def relink_subscriber(
             status,
             current_period_end,
             relinked_by,
+            product_id,
         )
 
 

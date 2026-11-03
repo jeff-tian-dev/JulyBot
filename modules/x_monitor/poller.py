@@ -19,20 +19,18 @@ ACCOUNT_POLL_DELAY_SECONDS = 2
 DEFAULT_RATE_LIMIT_SLEEP_SECONDS = 900
 
 
-def _role_ping_content(role_id: int | None = None) -> str | None:
-    """Discord mention string for the configured ping role, or None."""
-    rid = settings.X_PING_ROLE_ID if role_id is None else role_id
-    if rid:
-        return f"<@&{rid}>"
+def _role_ping_content(role_id: int | None) -> str | None:
+    """Mention string for the server's ping role (guild_settings.twitter_ping_role_id), or None."""
+    if role_id:
+        return f"<@&{role_id}>"
     return None
 
 
-def _role_ping_allowed_mentions(role_id: int | None = None) -> disnake.AllowedMentions | None:
-    """Allow only the configured role to be pinged."""
-    rid = settings.X_PING_ROLE_ID if role_id is None else role_id
-    if not rid:
+def _role_ping_allowed_mentions(role_id: int | None) -> disnake.AllowedMentions | None:
+    """Allow only the server's ping role to be pinged."""
+    if not role_id:
         return None
-    return disnake.AllowedMentions(roles=[disnake.Object(id=rid)])
+    return disnake.AllowedMentions(roles=[disnake.Object(id=role_id)])
 
 
 def _tweet_id(tweet) -> int | None:
@@ -166,7 +164,8 @@ async def poll_x_accounts(pool: asyncpg.Pool, bot: disnake.Client) -> dict:
             # Only ping the role if one is configured AND we haven't pinged this
             # guild's X feed within the cooldown window. The post is still sent
             # either way — just without the mention when muted.
-            mention = _role_ping_content()
+            ping_role_id = account.get("x_ping_role_id")
+            mention = _role_ping_content(ping_role_id)
             ping = bool(mention) and await storage.claim_ping_slot(
                 pool, guild_id, settings.X_PING_COOLDOWN_HOURS
             )
@@ -177,7 +176,7 @@ async def poll_x_accounts(pool: asyncpg.Pool, bot: disnake.Client) -> dict:
                     content=mention if ping else None,
                     embeds=tweet_embeds,
                     components=components,
-                    allowed_mentions=_role_ping_allowed_mentions() if ping else None,
+                    allowed_mentions=_role_ping_allowed_mentions(ping_role_id) if ping else None,
                 )
             except Exception:
                 logger.exception(
@@ -189,7 +188,7 @@ async def poll_x_accounts(pool: asyncpg.Pool, bot: disnake.Client) -> dict:
                 summary["errors"] += 1
                 # Release the dedup claim and stop so the high-water mark stays
                 # below this tweet; both are retried on the next poll.
-                await storage.unmark_tweet_seen(pool, dedup_id)
+                await storage.unmark_tweet_seen(pool, guild_id, dedup_id)
                 break
 
             summary["tweets_posted"] += 1

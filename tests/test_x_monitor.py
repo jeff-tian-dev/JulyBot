@@ -175,6 +175,31 @@ async def test_mark_tweets_seen_returns_only_new_ids() -> None:
     assert conn.fetchrow.await_count == 3
 
 
+
+@pytest.mark.asyncio
+async def test_tweet_dedup_is_per_server() -> None:
+    """Two servers watching one account must each get the tweet: the seen
+    claim conflicts on (guild_id, tweet_id), not tweet_id alone."""
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={"tweet_id": 100})
+    conn.execute = AsyncMock()
+    pool = _fake_pool(conn)
+
+    await storage.mark_tweets_seen(pool, guild_id=1, username="u", tweet_ids=[100])
+    assert "ON CONFLICT (guild_id, tweet_id)" in conn.fetchrow.await_args.args[0]
+
+    await storage.unmark_tweet_seen(pool, 1, 100)
+    sql, *args = conn.execute.await_args.args
+    assert "guild_id = $1" in sql and args == [1, 100]
+
+
+def test_role_ping_uses_the_given_server_role_only() -> None:
+    allowed = poller._role_ping_allowed_mentions(222)
+    assert [r.id for r in allowed.roles] == [222]
+    assert poller._role_ping_allowed_mentions(None) is None
+    assert poller._role_ping_content(None) is None
+
+
 @pytest.mark.asyncio
 async def test_add_watched_account_invalid_username() -> None:
     pool = _fake_pool(MagicMock())

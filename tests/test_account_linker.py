@@ -120,3 +120,26 @@ async def test_unlink_scopes_to_caller() -> None:
     # tag normalized and discord_id passed for scoping
     args = conn.execute.await_args.args
     assert args[1] == 1 and args[2] == "#AAA"
+
+
+@pytest.mark.asyncio
+async def test_get_all_accounts_only_returns_the_given_members() -> None:
+    """Links are global, but /dumpaccounts passes one server's member ids so an
+    admin only ever sees their own server's members."""
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    await linker.get_all_accounts(_fake_pool(conn), [11, 22])
+
+    sql, *args = conn.fetch.await_args.args
+    assert "discord_id = ANY($1::bigint[])" in sql
+    assert args == [[11, 22]]
+
+
+@pytest.mark.asyncio
+async def test_get_all_accounts_with_no_members_skips_the_query() -> None:
+    conn = MagicMock()
+    conn.fetch = AsyncMock()
+
+    assert await linker.get_all_accounts(_fake_pool(conn), []) == []
+    conn.fetch.assert_not_awaited()
