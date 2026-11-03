@@ -412,8 +412,40 @@ async def test_create_pending_agreement_inserts_unsigned() -> None:
     assert "INSERT INTO agreements" in sql
     assert "signed_at" not in sql
     # No product yet: the buyer picks on the website; set_product fills it in.
-    assert "product_id" not in sql
-    assert args == [1, 99, 4242, 555, "TERMS"]
+    assert args == [1, 99, 4242, 555, "TERMS", None, None, None]
+
+
+@pytest.mark.asyncio
+async def test_pending_agreement_limited_to_one_product_names_it() -> None:
+    """With one product the purchase is already known, so it's set up front."""
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_self_serve_row(signed_at=None))
+
+    await storage.create_pending_agreement(
+        _fake_pool(conn), guild_id=1, channel_id=99, buyer_id=4242, sent_by=555,
+        offered_products=[{"id": 3, "name": "July Sub"}],
+    )
+
+    assert conn.fetchrow.await_args.args[-3:] == ([3], 3, "July Sub")
+
+
+@pytest.mark.asyncio
+async def test_pending_agreement_limited_to_several_products_leaves_product_open() -> None:
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_self_serve_row(signed_at=None))
+
+    await storage.create_pending_agreement(
+        _fake_pool(conn), guild_id=1, channel_id=99, buyer_id=4242, sent_by=555,
+        offered_products=[{"id": 3, "name": "July Sub"}, {"id": 4, "name": "CWL packs"}],
+    )
+
+    assert conn.fetchrow.await_args.args[-3:] == ([3, 4], None, None)
+
+
+def test_offered_products_migration_is_present() -> None:
+    from database import models
+
+    assert "offered_product_ids INTEGER[]" in models.MIGRATE_AGREEMENTS_OFFERED_PRODUCTS
 
 
 @pytest.mark.asyncio

@@ -32,6 +32,7 @@ MAX_LINK_LENGTH = 500
 ALLOWED_LINK_SCHEMES = ("https",)
 # Autocomplete can return at most 25 choices (Discord's limit).
 MAX_AUTOCOMPLETE_CHOICES = 25
+MAX_AUTOCOMPLETE_CHOICE_LENGTH = 100
 # The /subscribe message carries one link button per product plus Confirm and
 # Cancel; Discord allows 25 buttons on a message.
 MAX_PRODUCTS_PER_GUILD = 20
@@ -186,15 +187,62 @@ def matching_names(products, typed: str) -> list[str]:
     ]
 
 
+def select_products(products, typed: str) -> tuple[list, list[str]]:
+    """(chosen product rows, names that matched nothing) from a comma-separated list.
+
+    Matching is case-insensitive. The whole text is tried as one name first, so
+    a product whose label contains a comma can still be picked.
+    """
+    by_name = {p["name"].lower(): p for p in products}
+    whole = " ".join(typed.split()).lower()
+    if whole in by_name:
+        return [by_name[whole]], []
+    chosen, unknown = [], []
+    for part in typed.split(","):
+        name = " ".join(part.split())
+        if not name:
+            continue
+        product = by_name.get(name.lower())
+        if product is None:
+            unknown.append(name)
+        elif product not in chosen:
+            chosen.append(product)
+    return chosen, unknown
+
+
+def complete_name_list(products, typed: str) -> list[str]:
+    """Autocomplete for a comma-separated list of product names.
+
+    Completes the last item and keeps what's before it, so an admin can pick
+    several products one after another. Names already in the list aren't
+    offered again.
+    """
+    head, sep, last = typed.rpartition(",")
+    if not sep:
+        return matching_names(products, typed.strip())
+    picked = [" ".join(p.split()) for p in head.split(",") if p.strip()]
+    already = {name.lower() for name in picked}
+    prefix = ", ".join(picked)
+    choices = [
+        f"{prefix}, {name}" if prefix else name
+        for name in matching_names(products, last.strip())
+        if name.lower() not in already
+    ]
+    # Discord caps an autocomplete choice at 100 characters.
+    return [c for c in choices if len(c) <= MAX_AUTOCOMPLETE_CHOICE_LENGTH]
+
+
 __all__ = [
     "MAX_PRODUCTS_PER_GUILD",
     "DuplicateProductError",
     "ProductError",
     "add_product",
+    "complete_name_list",
     "get_product_by_name",
     "list_products",
     "matching_names",
     "remove_product",
+    "select_products",
     "validate_description",
     "validate_name",
     "validate_payment_link",

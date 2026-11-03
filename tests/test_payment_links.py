@@ -274,6 +274,33 @@ async def test_guild_checkouts_list_only_that_servers_links() -> None:
     assert result == ["a payment"]
 
 
+
+@pytest.mark.asyncio
+async def test_guild_checkouts_can_be_limited_to_some_products() -> None:
+    """A purchase started with `/subscribe product:` only lists those products' buyers."""
+    owned = {"plink_sub": 3, "plink_cwl": 4, "plink_other": 5, "plink_orphan": None}
+    checkouts = AsyncMock(return_value=["a payment"])
+    with patch.object(payment_links.stripe_api, "is_configured", return_value=True), \
+         patch.object(payment_links, "refresh_guild_links", new=AsyncMock()), \
+         patch.object(payment_links, "owned_links", new=AsyncMock(return_value=owned)), \
+         patch.object(payment_links.stripe_api, "list_checkouts", new=checkouts):
+        await payment_links.list_guild_checkouts(MagicMock(), 1, product_ids=[3, 4])
+
+    assert sorted(checkouts.await_args.args[0]) == ["plink_cwl", "plink_sub"]
+
+
+@pytest.mark.asyncio
+async def test_a_limit_matching_no_links_never_queries_stripe() -> None:
+    """e.g. the product was removed after the purchase started: its links are released."""
+    checkouts = AsyncMock()
+    with patch.object(payment_links.stripe_api, "is_configured", return_value=True), \
+         patch.object(payment_links, "refresh_guild_links", new=AsyncMock()), \
+         patch.object(payment_links, "owned_links", new=AsyncMock(return_value={"plink_a": 3})), \
+         patch.object(payment_links.stripe_api, "list_checkouts", new=checkouts):
+        assert await payment_links.list_guild_checkouts(MagicMock(), 1, product_ids=[9]) == []
+    checkouts.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_a_server_owning_no_links_never_queries_stripe() -> None:
     checkouts = AsyncMock()

@@ -291,9 +291,12 @@ async def refresh_guild_links(pool: asyncpg.Pool, guild_id: int) -> None:
 
 
 async def list_guild_checkouts(
-    pool: asyncpg.Pool, guild_id: int
+    pool: asyncpg.Pool, guild_id: int, product_ids=None
 ) -> list[stripe_api.SubscriptionSummary]:
     """Paid checkouts made through this server's own Payment Links, newest first.
+
+    `product_ids` limits it to links found on those products' pages (a purchase
+    started with `/subscribe product:`); None means every product.
 
     Raises StripeNotConfiguredError / StripeApiError like the stripe_api calls.
     """
@@ -303,6 +306,9 @@ async def list_guild_checkouts(
         raise stripe_api.StripeNotConfiguredError("STRIPE_SECRET_KEY isn't set.")
     await refresh_guild_links(pool, guild_id)
     owned = await owned_links(pool, guild_id)
+    if product_ids is not None:
+        wanted = set(product_ids)
+        owned = {plink: pid for plink, pid in owned.items() if pid in wanted}
     if not owned:
         return []
     return await stripe_api.list_checkouts(owned.keys())

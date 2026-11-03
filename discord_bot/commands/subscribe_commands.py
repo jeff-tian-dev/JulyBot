@@ -40,6 +40,12 @@ Payment Link was found on that product's page. Each option is labelled
 product the server set up with `/product add` (e.g. "July Sub" →
 seventhmonth.com/sub/), and the buyer pays through Stripe there.
 
+`/subscribe <member> product:<names>` limits a purchase to some products
+(comma-separated): only their buttons are shown, their ids are stored in
+`agreements.offered_product_ids`, and Confirm lists only payments made through
+their Payment Links. Confirm reads that from the row, not the view, since the
+view may have been restored after a restart without it.
+
 Link buttons carry a URL instead of a custom_id: Discord opens them client-side,
 so there is no callback to dispatch for those. Confirm/Cancel are ordinary
 callbacks on a persistent view, restored on startup by register_persistent_views().
@@ -85,6 +91,14 @@ PICKER_TIMEOUT_SECONDS = 300
 def product_links(rows) -> list[tuple[str, str]]:
     """(button label, url) for each of a server's products."""
     return [(row["name"], row["payment_link"]) for row in rows]
+
+
+async def _product_list_autocomplete(
+    inter: disnake.ApplicationCommandInteraction, string: str
+) -> list[str]:
+    """Suggest this server's product labels, completing the last of a comma list."""
+    rows = await products.list_products(inter.bot.pool, inter.guild.id)
+    return products.complete_name_list(rows, string)
 
 
 class CancelReasonModal(disnake.ui.Modal):
@@ -384,9 +398,14 @@ class PurchaseView(disnake.ui.View):
         # Scanning product pages and listing Stripe can outrun the 3s deadline.
         await inter.response.defer(ephemeral=True)
 
+        # A purchase started with `/subscribe product:` only lists payments for
+        # those products. Read from the row: the view may predate a restart.
+        record = await storage.get_agreement(inter.bot.pool, agreement_id)
+        offered = record.get("offered_product_ids") if record is not None else None
+
         try:
             subscriptions = await payment_links.list_guild_checkouts(
-                inter.bot.pool, inter.guild.id
+                inter.bot.pool, inter.guild.id, product_ids=offered
             )
         except stripe_api.StripeNotConfiguredError:
             await inter.edit_original_response(
@@ -397,6 +416,15 @@ class PurchaseView(disnake.ui.View):
         except stripe_api.StripeApiError as exc:
             logger.warning("Stripe lookup failed while confirming id=%s: %s", agreement_id, exc)
             await inter.edit_original_response(f"Couldn't reach Stripe: {exc}")
+            return
+
+        if not subscriptions and offered is not None:
+            await inter.edit_original_response(
+                "No paid Stripe checkouts were found for the product(s) this purchase "
+                "was started for. If the payment just went through, give it a moment "
+                "and try again. If the buyer bought something else, cancel this and "
+                "start a new `/subscribe` without `product`, or with the right one."
+            )
             return
 
         if not subscriptions:
@@ -438,6 +466,12 @@ class SubscribeCommands(commands.Cog):
         self,
         inter: disnake.ApplicationCommandInteraction,
         member: disnake.User = commands.Param(description="The buyer."),
+        product: str = commands.Param(
+            default=None,
+            autocomplete=_product_list_autocomplete,
+            description="Only show these products (comma-separated). Confirm then "
+            "lists only their buyers.",
+        ),
     ) -> None:
         await inter.response.defer(ephemeral=True)
 
@@ -451,18 +485,32 @@ class SubscribeCommands(commands.Cog):
             )
             return
 
-        await start_purchase(inter, member, product_links(rows))
+        offered = None
+        if product and product.strip():
+            offered, unknown = products.select_products(rows, product)
+            if unknown or not offered:
+                missing = ", ".join(f"**{name}**" for name in unknown) or f"**{product}**"
+                await inter.edit_original_response(
+                    f"No product named {missing}. `/product list` shows this server's products."
+                )
+                return
+            rows = offered
+
+        await start_purchase(inter, member, product_links(rows), offered_products=offered)
 
 
 async def start_purchase(
     inter: disnake.ApplicationCommandInteraction,
     member: disnake.User,
     links: list[tuple[str, str]],
+    *,
+    offered_products=None,
 ) -> None:
     """Create the purchase row and post its status message in this channel.
 
-    `links` are the (label, url) product buttons. Expects the interaction to be
-    deferred already.
+    `links` are the (label, url) product buttons. `offered_products` are the
+    product rows the purchase is limited to, or None for every product.
+    Expects the interaction to be deferred already.
     """
     pool = inter.bot.pool
     record = await storage.create_pending_agreement(
@@ -471,6 +519,7 @@ async def start_purchase(
         channel_id=inter.channel.id,
         buyer_id=member.id,
         sent_by=inter.author.id,
+        offered_products=offered_products,
     )
 
     try:

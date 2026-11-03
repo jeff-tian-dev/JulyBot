@@ -202,6 +202,44 @@ def test_matching_names_filters_case_insensitively() -> None:
     assert products.matching_names(rows, "sub") == ["July Sub", "UG Sub"]
 
 
+def _named(*names):
+    return [{"id": i, "name": n} for i, n in enumerate(names, start=1)]
+
+
+def test_select_products_reads_a_comma_list_case_insensitively() -> None:
+    rows = _named("July Sub", "UG Sub", "CWL packs")
+    chosen, unknown = products.select_products(rows, " july sub ,CWL  packs, july sub,")
+    assert [p["name"] for p in chosen] == ["July Sub", "CWL packs"]
+    assert unknown == []
+
+
+def test_select_products_reports_names_that_match_nothing() -> None:
+    chosen, unknown = products.select_products(_named("July Sub"), "July Sub, Nope")
+    assert [p["name"] for p in chosen] == ["July Sub"]
+    assert unknown == ["Nope"]
+
+
+def test_select_products_matches_a_label_containing_a_comma() -> None:
+    chosen, unknown = products.select_products(_named("Sub, monthly", "Sub"), "sub, monthly")
+    assert [p["name"] for p in chosen] == ["Sub, monthly"]
+    assert unknown == []
+
+
+def test_complete_name_list_completes_the_last_item_only() -> None:
+    rows = _named("July Sub", "UG Sub", "CWL packs")
+    assert products.complete_name_list(rows, "sub") == ["July Sub", "UG Sub"]
+    # Keeps what's already picked, and doesn't offer it again.
+    assert products.complete_name_list(rows, "July Sub, s") == [
+        "July Sub, UG Sub",
+        "July Sub, CWL packs",
+    ]
+
+
+def test_complete_name_list_drops_choices_over_discords_limit() -> None:
+    rows = _named("A" * 60, "B" * 60)
+    assert products.complete_name_list(rows, "A" * 60 + ", B") == []
+
+
 # --- every purchase counts ---------------------------------------------------------
 
 

@@ -180,7 +180,8 @@ async def _click_confirm(inter, *, subscriptions=None, side_effect=None, row=Non
     lookup = AsyncMock(side_effect=side_effect) if side_effect else AsyncMock(
         return_value=subscriptions if subscriptions is not None else [_summary()]
     )
-    with patch.object(subscribe_commands.payment_links, "list_guild_checkouts", new=lookup):
+    with patch.object(subscribe_commands.payment_links, "list_guild_checkouts", new=lookup), \
+         patch.object(subscribe_commands.storage, "get_agreement", new=AsyncMock(return_value=row)):
         view = subscribe_commands.PurchaseView(row)
         button = next(i for i in view.children if i.label == "Confirm Payment")
         await button.callback(inter)
@@ -198,6 +199,7 @@ async def test_confirm_opens_a_picker_of_this_servers_checkouts() -> None:
 
     confirm.assert_not_awaited()
     assert lookup.await_args.args[1] == 1  # the guild the button was clicked in
+    assert lookup.await_args.kwargs["product_ids"] is None  # every product
     inter.response.defer.assert_awaited_once_with(ephemeral=True)
     assert isinstance(
         inter.edit_original_response.call_args.kwargs["view"], subscribe_commands.StripePickerView
@@ -236,6 +238,25 @@ async def test_confirm_explains_an_empty_list() -> None:
     confirm.assert_not_awaited()
     message = inter.edit_original_response.call_args.args[0]
     assert "this server's products" in message and "/product list" in message
+
+
+@pytest.mark.asyncio
+async def test_confirm_lists_only_the_products_the_purchase_was_started_for() -> None:
+    inter = _button_interaction(custom_id="purchase:confirm:7", author_id=555, admin=True)
+
+    lookup = await _click_confirm(inter, row=_row(offered_product_ids=[3, 4]))
+
+    assert lookup.await_args.kwargs["product_ids"] == [3, 4]
+
+
+@pytest.mark.asyncio
+async def test_confirm_explains_an_empty_list_for_a_limited_purchase() -> None:
+    inter = _button_interaction(custom_id="purchase:confirm:7", author_id=555, admin=True)
+
+    await _click_confirm(inter, subscriptions=[], row=_row(offered_product_ids=[3]))
+
+    message = inter.edit_original_response.call_args.args[0]
+    assert "product(s) this purchase was started for" in message
 
 
 def _confirm_patches(confirmed, *, product=None):
@@ -424,12 +445,70 @@ async def test_subscribe_posts_this_servers_products_as_buttons() -> None:
              new=AsyncMock(return_value=_row()),
          ), \
          patch.object(subscribe_commands.storage, "attach_message", new=AsyncMock()):
-        await cog.subscribe.callback(cog, inter, member)
+        await cog.subscribe.callback(cog, inter, member, None)
 
     assert listing.await_args.args[1] == 1  # this server's products only
     view = inter.channel.send.await_args.kwargs["view"]
     links = [(i.label, i.url) for i in view.children if getattr(i, "url", None)]
     assert links == LINKS
+
+
+@pytest.mark.asyncio
+async def test_subscribe_with_product_shows_only_those_and_records_them() -> None:
+    cog = subscribe_commands.SubscribeCommands(MagicMock())
+    inter = _subscribe_interaction()
+    member = MagicMock(id=4242, mention="<@4242>")
+
+    with patch.object(
+             subscribe_commands.products, "list_products", new=AsyncMock(return_value=PRODUCT_ROWS)
+         ), \
+         patch.object(
+             subscribe_commands.storage, "create_pending_agreement",
+             new=AsyncMock(return_value=_row()),
+         ) as create, \
+         patch.object(subscribe_commands.storage, "attach_message", new=AsyncMock()):
+        await cog.subscribe.callback(cog, inter, member, "cwl packs")
+
+    assert create.await_args.kwargs["offered_products"] == [PRODUCT_ROWS[1]]
+    view = inter.channel.send.await_args.kwargs["view"]
+    links = [(i.label, i.url) for i in view.children if getattr(i, "url", None)]
+    assert links == [LINKS[1]]
+
+
+@pytest.mark.asyncio
+async def test_subscribe_without_product_offers_everything_unlimited() -> None:
+    cog = subscribe_commands.SubscribeCommands(MagicMock())
+    inter = _subscribe_interaction()
+
+    with patch.object(
+             subscribe_commands.products, "list_products", new=AsyncMock(return_value=PRODUCT_ROWS)
+         ), \
+         patch.object(
+             subscribe_commands.storage, "create_pending_agreement",
+             new=AsyncMock(return_value=_row()),
+         ) as create, \
+         patch.object(subscribe_commands.storage, "attach_message", new=AsyncMock()):
+        await cog.subscribe.callback(cog, inter, MagicMock(id=4242, mention="<@4242>"), None)
+
+    assert create.await_args.kwargs["offered_products"] is None
+
+
+@pytest.mark.asyncio
+async def test_subscribe_refuses_an_unknown_product() -> None:
+    cog = subscribe_commands.SubscribeCommands(MagicMock())
+    inter = _subscribe_interaction()
+
+    with patch.object(
+             subscribe_commands.products, "list_products", new=AsyncMock(return_value=PRODUCT_ROWS)
+         ), \
+         patch.object(
+             subscribe_commands.storage, "create_pending_agreement", new=AsyncMock()
+         ) as create:
+        await cog.subscribe.callback(cog, inter, MagicMock(id=4242), "July Sub, Nope")
+
+    create.assert_not_awaited()
+    inter.channel.send.assert_not_awaited()
+    assert "**Nope**" in inter.edit_original_response.await_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -450,7 +529,7 @@ async def test_subscribe_rolls_back_when_the_send_fails() -> None:
          ), \
          patch.object(subscribe_commands.storage, "delete_agreement", new=AsyncMock()) as delete, \
          patch.object(subscribe_commands.storage, "attach_message", new=AsyncMock()) as attach:
-        await cog.subscribe.callback(cog, inter, member)
+        await cog.subscribe.callback(cog, inter, member, None)
 
     delete.assert_awaited_once()
     attach.assert_not_awaited()
@@ -468,7 +547,7 @@ async def test_subscribe_refuses_when_the_server_has_no_products() -> None:
          patch.object(
              subscribe_commands.storage, "create_pending_agreement", new=AsyncMock()
          ) as create:
-        await cog.subscribe.callback(cog, inter, MagicMock(id=4242))
+        await cog.subscribe.callback(cog, inter, MagicMock(id=4242), None)
 
     create.assert_not_awaited()
     inter.channel.send.assert_not_awaited()

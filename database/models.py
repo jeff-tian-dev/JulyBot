@@ -612,6 +612,14 @@ ALTER TABLE agreements ADD COLUMN IF NOT EXISTS product_name VARCHAR(100);
 ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS product_id INTEGER REFERENCES products(id) ON DELETE SET NULL;
 """
 
+# The products a /subscribe purchase was limited to (`/subscribe <member> product:`).
+# NULL means every product of the server. Confirm lists only payments made through
+# these products' Payment Links. No FK: it's an array, and a product removed later
+# simply has no links left to list.
+MIGRATE_AGREEMENTS_OFFERED_PRODUCTS = """
+ALTER TABLE agreements ADD COLUMN IF NOT EXISTS offered_product_ids INTEGER[];
+"""
+
 # Which server owns each Stripe Payment Link. Products are website pages (the
 # buttons under /subscribe); the buy.stripe.com links found on a product's page are
 # claimed here by the first server to add it, and Confirm only ever lists payments
@@ -769,6 +777,8 @@ async def create_tables(pool: asyncpg.Pool, home_guild_id: int = 0) -> None:
         await conn.execute(CREATE_PRODUCTS)
         logger.info("Applying purchase product migration if needed")
         await conn.execute(MIGRATE_PURCHASE_PRODUCTS)
+        logger.info("Applying agreements offered-products migration if needed")
+        await conn.execute(MIGRATE_AGREEMENTS_OFFERED_PRODUCTS)
         # After products: it references them.
         logger.info("Creating table stripe_payment_links if not exists")
         await conn.execute(CREATE_STRIPE_PAYMENT_LINKS)

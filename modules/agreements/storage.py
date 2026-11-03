@@ -20,6 +20,7 @@ async def create_pending_agreement(
     buyer_id: int,
     sent_by: int,
     agreement_text: str = "",
+    offered_products: list | None = None,
 ) -> asyncpg.Record:
     """Insert a pending purchase, before the status message is posted.
 
@@ -36,14 +37,20 @@ async def create_pending_agreement(
     NULL — Stripe knows who paid. See the agreements table comment in
     database/models.py.
 
-    `product_id` / `product_name` start NULL — the buyer picks on the website —
-    and are filled in at confirmation by `set_product`.
+    `offered_products` are the product rows the purchase is limited to (None =
+    every product); their ids go in `offered_product_ids`, which Confirm filters
+    on. With exactly one, `product_id` / `product_name` are set now, since what's
+    being bought is already known. Otherwise they start NULL — the buyer picks on
+    the website — and are filled in at confirmation by `set_product`.
     """
+    offered_ids = [p["id"] for p in offered_products] if offered_products else None
+    only = offered_products[0] if offered_products and len(offered_products) == 1 else None
     async with pool.acquire() as conn:
         return await conn.fetchrow(
             """
-            INSERT INTO agreements (guild_id, channel_id, buyer_id, sent_by, agreement_text)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO agreements (guild_id, channel_id, buyer_id, sent_by, agreement_text,
+                                    offered_product_ids, product_id, product_name)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING *;
             """,
             guild_id,
@@ -51,6 +58,9 @@ async def create_pending_agreement(
             buyer_id,
             sent_by,
             agreement_text,
+            offered_ids,
+            only["id"] if only else None,
+            only["name"] if only else None,
         )
 
 
