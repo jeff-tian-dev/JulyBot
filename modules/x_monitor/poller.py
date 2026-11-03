@@ -59,13 +59,33 @@ def _content_dedup_id(tweet) -> int | None:
     return _tweet_id(tweet)
 
 
-def _own_posts(tweets) -> list:
-    """An account's own posts on a timeline page: no reposts or replies, self-threads opened up."""
+def _author_handle(tweet) -> str:
+    return str(getattr(getattr(tweet, "author", None), "username", "") or "").lower()
+
+
+def _reply_to_handle(tweet) -> str | None:
+    """The handle a reply answers (lowercased), or None if the post isn't a reply."""
+    if not getattr(tweet, "is_reply", False):
+        return None
+    # tweety keeps who a reply answers only in the raw post
+    legacy = getattr(tweet, "_original_tweet", None) or {}
+    return str(legacy.get("in_reply_to_screen_name") or "").lower()
+
+
+def _own_posts(tweets, username: str) -> list:
+    """An account's own posts on a timeline page, its replies to other accounts included.
+
+    Reposts are left out, and so are its replies to itself: the rest of a thread, which
+    counts as its opening post.
+    """
     posts = []
     for entry in tweets:
-        # A self-thread has no ID of its own; its opening post is the one that isn't a reply
+        # A conversation or self-thread is one entry with no ID of its own, holding its posts
+        # (for a reply: the answered post, often someone else's, then the reply)
         for tweet in getattr(entry, "tweets", None) or [entry]:
-            if _tweet_id(tweet) is None or _is_retweet(tweet) or getattr(tweet, "is_reply", False):
+            if _tweet_id(tweet) is None or _is_retweet(tweet) or _author_handle(tweet) != username:
+                continue
+            if _reply_to_handle(tweet) == username:
                 continue
             posts.append(tweet)
     return posts
@@ -74,8 +94,9 @@ def _own_posts(tweets) -> list:
 async def poll_website_accounts(pool: asyncpg.Pool) -> int:
     """Save new posts from X_WEBSITE_ACCOUNTS for seventhmonth.com. Never posts to Discord.
 
-    The newest saved post is the high-water mark, so the first poll saves the account's
-    recent posts and later polls only what's newer. Returns how many posts were saved.
+    Reads the posts-and-replies timeline, since replies to other accounts count as posts
+    here. The newest saved post is the high-water mark, so the first poll saves the
+    account's recent posts and later polls only what's newer. Returns how many were saved.
     """
     if not settings.X_WEBSITE_ACCOUNTS or not x_client.is_configured():
         return 0
@@ -91,8 +112,8 @@ async def poll_website_accounts(pool: asyncpg.Pool) -> int:
         try:
             username = storage.normalize_username(raw_username)
             latest = await storage.latest_website_post_id(pool, username)
-            tweets_page = await app.get_tweets(username, pages=1, replies=False)
-            ids = {_tweet_id(tweet) for tweet in _own_posts(tweets_page)}
+            tweets_page = await app.get_tweets(username, pages=1, replies=True)
+            ids = {_tweet_id(tweet) for tweet in _own_posts(tweets_page, username)}
             saved = await storage.save_website_posts(
                 pool, username, sorted(i for i in ids if i > latest)
             )

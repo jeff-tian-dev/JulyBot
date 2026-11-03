@@ -510,17 +510,27 @@ async def test_poll_skips_repost_when_content_already_seen() -> None:
     mock_update.assert_awaited_once_with(pool, 1, "testuser", 101)
 
 
-def test_own_posts_skips_reposts_and_replies_and_opens_self_threads() -> None:
-    own = SimpleNamespace(id=300, is_retweet=False, is_reply=False)
-    repost = SimpleNamespace(id=301, is_retweet=True, is_reply=False)
-    reply = SimpleNamespace(id=302, is_retweet=False, is_reply=True)
-    thread = SimpleNamespace(
-        tweets=[
-            SimpleNamespace(id=303, is_retweet=False, is_reply=False),
-            SimpleNamespace(id=304, is_retweet=False, is_reply=True),
-        ]
+def _post(tweet_id, author="Yun2k411", is_retweet=False, reply_to=None):
+    return SimpleNamespace(
+        id=tweet_id,
+        author=SimpleNamespace(username=author),
+        is_retweet=is_retweet,
+        is_reply=reply_to is not None,
+        _original_tweet={"in_reply_to_screen_name": reply_to} if reply_to else {},
     )
-    assert [t.id for t in poller._own_posts([own, repost, reply, thread])] == [300, 303]
+
+
+def test_own_posts_keeps_posts_and_replies_to_others() -> None:
+    own = _post(300)
+    repost = _post(301, is_retweet=True)
+    reply_to_other = _post(302, reply_to="Dima_CoC")
+    # A conversation: the answered post (someone else's), then the reply
+    conversation = SimpleNamespace(tweets=[_post(290, author="Dima_CoC"), _post(303, reply_to="Dima_CoC")])
+    # A self-thread counts as its opening post
+    thread = SimpleNamespace(tweets=[_post(304), _post(305, reply_to="Yun2k411")])
+
+    posts = poller._own_posts([own, repost, reply_to_other, conversation, thread], "yun2k411")
+    assert [t.id for t in posts] == [300, 302, 303, 304]
 
 
 @pytest.mark.asyncio
@@ -537,9 +547,10 @@ async def test_save_website_posts_returns_only_new_ids() -> None:
 @pytest.mark.asyncio
 async def test_poll_website_accounts_saves_new_posts_only_for_the_site() -> None:
     tweets_page = [
-        SimpleNamespace(id=303, is_retweet=False, is_reply=False),
-        SimpleNamespace(id=302, is_retweet=True, is_reply=False),
-        SimpleNamespace(id=150, is_retweet=False, is_reply=False),
+        _post(304, reply_to="GAKU_coc"),
+        _post(303),
+        _post(302, is_retweet=True),
+        _post(150),
     ]
     mock_app = MagicMock()
     mock_app.get_tweets = AsyncMock(return_value=tweets_page)
@@ -550,16 +561,16 @@ async def test_poll_website_accounts_saves_new_posts_only_for_the_site() -> None
         patch.object(client, "is_configured", return_value=True),
         patch.object(client, "get_client", AsyncMock(return_value=mock_app)),
         patch.object(storage, "latest_website_post_id", AsyncMock(return_value=200)),
-        patch.object(storage, "save_website_posts", AsyncMock(return_value=[303])) as mock_save,
+        patch.object(storage, "save_website_posts", AsyncMock(return_value=[303, 304])) as mock_save,
         patch.object(storage, "mark_tweets_seen", AsyncMock()) as mock_seen,
         patch("modules.x_monitor.poller.asyncio.sleep", AsyncMock()),
     ):
         saved = await poller.poll_website_accounts(pool)
 
-    assert saved == 1
-    mock_app.get_tweets.assert_awaited_once_with("yun2k411", pages=1, replies=False)
-    # The repost and the already-saved post (150 <= 200) are left out
-    mock_save.assert_awaited_once_with(pool, "yun2k411", [303])
+    assert saved == 2
+    mock_app.get_tweets.assert_awaited_once_with("yun2k411", pages=1, replies=True)
+    # The repost and the already-saved post (150 <= 200) are left out; the reply is kept
+    mock_save.assert_awaited_once_with(pool, "yun2k411", [303, 304])
     # Website posts never claim seen_tweets, so they can't block a server's X channel
     mock_seen.assert_not_awaited()
 
