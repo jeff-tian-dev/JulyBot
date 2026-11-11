@@ -1,6 +1,8 @@
 """Unit tests for modules.moderation."""
 from __future__ import annotations
 
+import asyncio
+
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -922,3 +924,55 @@ async def test_mod_log_without_target_id_omits_id() -> None:
     embed = channel.send.await_args.kwargs["embed"]
     fields = {field.name: field.value for field in embed.fields}
     assert fields["Target"] == "Everyone"
+
+
+@pytest.mark.asyncio
+async def test_member_search_deletes_matches_before_the_search_finishes(monkeypatch) -> None:
+    """A match on page 1 is deleted while later pages are still being fetched."""
+    channel = _purge_channel([])
+    page1 = [_hit(author_id=55, content="chicken", channel=channel, age_days=1)]
+    page2 = [_hit(author_id=55, content="other", channel=channel, age_days=2)]
+    deleted_before_page2: list[int] = []
+
+    class _Watch(_FakeSearch):
+        async def __call__(self, guild, params):
+            if len(self.calls) == 1:
+                await asyncio.sleep(0)  # let the delete workers run
+                await asyncio.sleep(0)
+                deleted_before_page2.append(len(channel.delete_messages.await_args_list) + sum(
+                    r.delete.await_count for r in channel.refs.values()
+                ))
+            return await super().__call__(guild, params)
+
+    monkeypatch.setattr(purge, "_search_page", _Watch(page1, page2))
+
+    result = await purge.purge_messages(
+        _search_guild([channel]), "chicken", SimpleNamespace(id=42), target=SimpleNamespace(id=55)
+    )
+
+    assert result.deleted == 1
+    assert deleted_before_page2 == [1]
+
+
+@pytest.mark.asyncio
+async def test_member_search_falls_back_if_paging_does_not_advance(monkeypatch) -> None:
+    """If Discord ignored max_id, the same page would repeat forever."""
+    channel = _purge_channel([_message(author_id=55, content="dog", age_days=30)])
+    same = [_hit(author_id=55, content="cat", channel=channel, age_days=5)]
+    monkeypatch.setattr(purge, "_search_page", AsyncMock(
+        return_value={"messages": [same], "total_results": 1}
+    ))
+
+    result = await purge.purge_messages(
+        _search_guild([channel]), "dog", SimpleNamespace(id=42), target=SimpleNamespace(id=55)
+    )
+
+    assert purge._search_page.await_count == 2
+    assert result.used_search is False
+    assert result.deleted == 1
+
+
+def test_progress_shows_failed_deletions() -> None:
+    result = purge.PurgeResult(used_search=True, deleted=1, failed=3)
+    assert "**3** failed" in purge.format_progress(result, "dog")
+    assert "failed" not in purge.format_progress(purge.PurgeResult(), "dog")

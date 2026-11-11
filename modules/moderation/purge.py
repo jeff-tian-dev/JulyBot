@@ -228,6 +228,18 @@ class _ChannelDeleter:
         else:
             await self._old_q.put(message)
 
+    async def flush(self) -> None:
+        """Send queued recent matches now, without waiting for a full batch of 100.
+
+        The full scan doesn't need this (each channel closes when its read
+        ends), but a member purge keeps every channel's deleter open for the
+        whole search -- without flushing, nothing recent is deleted until the
+        search finishes.
+        """
+        if self._recent:
+            await self._recent_q.put(self._recent)
+            self._recent = []
+
     async def close(self) -> None:
         """Flush what's queued, wait for every delete, re-archive if we unarchived."""
         if self._recent:
@@ -429,10 +441,15 @@ class _Purge:
                     # Text withheld from results: nothing could ever match, and
                     # the purge would "succeed" having deleted nothing.
                     raise _SearchUnavailable("search results came back without message text")
-                first_page = False
+                page_min = min(int(m["id"]) for m in hits)
+                if max_id is not None and page_min >= max_id:
+                    # Paging didn't move past the last page: looping would
+                    # re-read the same results forever.
+                    raise _SearchUnavailable("search ignored max_id; paging made no progress")
+                max_id = page_min
                 self.result.messages_scanned += len(hits)
-                max_id = min(int(m["id"]) for m in hits)
                 cutoff = _bulk_cutoff()
+                matched = 0
                 for payload in hits:
                     message_id = int(payload["id"])
                     if message_id in queued:
@@ -444,9 +461,24 @@ class _Purge:
                     deleter = await self._deleter_for(
                         guild, me, int(payload["channel_id"]), deleters, unreachable
                     )
+                    matched += 1
                     if deleter is not None:
                         queued.add(message_id)
                         await deleter.add(deleter.channel.get_partial_message(message_id), cutoff)
+                if first_page:
+                    logger.info(
+                        "Purge search first page: hits=%d with_text=%d by_target=%d matched=%d "
+                        "total_results=%s deep_indexing=%s",
+                        len(hits),
+                        sum(1 for m in hits if m.get("content")),
+                        sum(1 for m in hits if int(m["author"]["id"]) == self.target_id),
+                        matched,
+                        data.get("total_results"),
+                        data.get("doing_deep_historical_index"),
+                    )
+                    first_page = False
+                for deleter in list(deleters.values()):
+                    await deleter.flush()
         finally:
             try:
                 await recent_task
@@ -504,6 +536,8 @@ class _Purge:
                         self.result.channels_found += 1
                     queued.add(message.id)
                     await deleter.add(message, cutoff)
+                if ch.id in deleters:
+                    await deleters[ch.id].flush()
 
         await asyncio.gather(*(scan(c) for c in channels))
 
@@ -719,18 +753,23 @@ def _duration(seconds: float) -> str:
     return f"{secs}s"
 
 
+def _failed_part(result: PurgeResult) -> str:
+    return f" · **{result.failed:,}** failed" if result.failed else ""
+
+
 def format_progress(result: PurgeResult, word: str) -> str:
     if result.used_search:
         return (
             f"🔎 Purging messages containing `{word}`…\n"
             f"Checked **{result.messages_scanned:,}** of their message(s) · "
-            f"deleted **{result.deleted:,}** · {_duration(result.elapsed)} so far"
+            f"deleted **{result.deleted:,}**{_failed_part(result)} · "
+            f"{_duration(result.elapsed)} so far"
         )
     return (
         f"🧹 Purging messages containing `{word}`…\n"
         f"Read **{result.messages_scanned:,}** message(s) · "
         f"finished {result.channels_scanned:,}/{result.channels_found:,} channel(s) · "
-        f"deleted **{result.deleted:,}** · {_duration(result.elapsed)} so far"
+        f"deleted **{result.deleted:,}**{_failed_part(result)} · {_duration(result.elapsed)} so far"
     )
 
 
