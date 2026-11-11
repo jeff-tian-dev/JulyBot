@@ -1,7 +1,9 @@
 """/kick, /ban, /unban, /purgeword — admin-only moderation commands."""
 from __future__ import annotations
 
+import asyncio
 import logging as _logging
+import time
 from typing import Union
 
 import disnake
@@ -13,6 +15,32 @@ from modules.moderation.validation import ModerationError
 logger = _logging.getLogger(__name__)
 
 ADMIN_PERMS = disnake.Permissions(administrator=True)
+# How often the /purgeword progress message is refreshed.
+PROGRESS_INTERVAL_SECONDS = 5
+# Interaction tokens last 15 minutes; stop editing the reply a little before.
+INTERACTION_EDIT_BUDGET_SECONDS = 14 * 60
+
+
+class PurgeCancelView(disnake.ui.View):
+    """Cancel button on the (ephemeral, invoker-only) /purgeword progress reply.
+
+    Not persistent: a restart ends the purge itself, so there is nothing to
+    cancel afterwards. A click is its own interaction, so it still works after
+    the original reply's 15-minute token has expired.
+    """
+
+    def __init__(self, job: purge.PurgeJob) -> None:
+        super().__init__(timeout=None)
+        self.job = job
+
+    @disnake.ui.button(label="Cancel purge", style=disnake.ButtonStyle.danger)
+    async def cancel_button(
+        self, button: disnake.ui.Button, inter: disnake.MessageInteraction
+    ) -> None:
+        self.job.cancel()
+        button.disabled = True
+        button.label = "Cancelling…"
+        await inter.response.edit_message(view=self)
 
 
 class ModerationCommands(commands.Cog):
@@ -127,12 +155,26 @@ class ModerationCommands(commands.Cog):
         await inter.response.defer(ephemeral=True)
 
         try:
-            result = await purge.purge_messages(
-                inter.guild, word, inter.author, target=member, channel=channel
-            )
+            job = purge.start_purge(inter.guild, word, inter.author, target=member, channel=channel)
         except ModerationError as exc:
             await self._respond(inter, str(exc))
             return
+
+        # The purge runs in the background with no time limit. The ephemeral
+        # reply can only be edited while the interaction token is valid
+        # (15 min), so progress stops updating after that and the final
+        # summary goes to the moderator's DMs instead.
+        view = PurgeCancelView(job)
+        edit_deadline = time.monotonic() + INTERACTION_EDIT_BUDGET_SECONDS
+        await self._edit(inter, purge.format_progress(job.result, word), view)
+        while not job.task.done():
+            await asyncio.wait({job.task}, timeout=PROGRESS_INTERVAL_SECONDS)
+            if not job.task.done() and time.monotonic() < edit_deadline:
+                await self._edit(inter, purge.format_progress(job.result, word), view)
+        view.stop()
+
+        try:
+            result = job.task.result()
         except Exception as exc:  # noqa: BLE001 — surface any failure to the invoker + log
             logger.exception(
                 "purgeword failed for target=%s channel=%s word=%r",
@@ -140,30 +182,25 @@ class ModerationCommands(commands.Cog):
                 getattr(channel, "id", None),
                 word,
             )
-            await self._respond(inter, f"Purge failed: {type(exc).__name__}: {exc}")
-            return
-
-        author_part = f" from **{member}**" if member is not None else ""
-        scope_part = (
-            f"in {channel.mention}"
-            if channel is not None
-            else f"across {result.channels_scanned} channel(s)"
-        )
-        summary = (
-            f"Deleted **{result.deleted}** message(s){author_part} containing "
-            f"`{word}` {scope_part}."
-        )
-        if result.channels_skipped:
-            summary += f" Skipped {result.channels_skipped} channel(s) I can't manage."
-        if result.failed:
-            summary += f" {result.failed} deletion(s) failed."
-        if result.capped:
-            summary += (
-                f"\n⚠️ Hit the {purge.MAX_DELETIONS_PER_RUN}-per-run limit — "
-                "run the command again to keep going."
+            summary = f"Purge failed: {type(exc).__name__}: {exc}"
+            result = job.result
+        else:
+            summary = purge.format_summary(
+                result,
+                word,
+                member_label=str(member) if member is not None else None,
+                channel_mention=channel.mention if channel is not None else None,
             )
-        await self._respond(inter, summary)
 
+        if time.monotonic() < edit_deadline:
+            await self._edit(inter, summary, None)
+        else:
+            await self._dm(inter.author, summary)
+
+        scope = f"in #{channel.name}" if channel is not None else "server-wide"
+        reason = f"Purged {result.deleted} message(s) containing {word!r} {scope}"
+        if result.cancelled:
+            reason += " (cancelled)"
         await logging.send_mod_log(
             self.bot.pool,
             inter.guild,
@@ -171,11 +208,27 @@ class ModerationCommands(commands.Cog):
             target_label=str(member) if member is not None else "Everyone",
             target_id=member.id if member is not None else None,
             moderator=inter.author,
-            reason=(
-                f"Purged {result.deleted} message(s) containing {word!r} "
-                + (f"in #{channel.name}" if channel is not None else "server-wide")
-            ),
+            reason=reason,
         )
+
+    @staticmethod
+    async def _edit(
+        inter: disnake.ApplicationCommandInteraction,
+        content: str,
+        view: disnake.ui.View | None,
+    ) -> None:
+        """Edit the deferred reply; a failed progress edit must never stop the purge."""
+        try:
+            await inter.edit_original_response(content=content, view=view)
+        except disnake.HTTPException:
+            logger.warning("Couldn't edit purgeword reply", exc_info=True)
+
+    @staticmethod
+    async def _dm(user: disnake.abc.User, content: str) -> None:
+        try:
+            await user.send(content)
+        except disnake.HTTPException:
+            logger.warning("Couldn't DM purge summary to %s", user)
 
     @staticmethod
     async def _respond(inter: disnake.ApplicationCommandInteraction, content: str) -> None:
