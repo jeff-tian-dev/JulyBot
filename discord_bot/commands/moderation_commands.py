@@ -211,6 +211,22 @@ class ModerationCommands(commands.Cog):
             reason=reason,
         )
 
+    @commands.slash_command(
+        name="purgecancel",
+        description="Stop the /purgeword currently running in this server.",
+        default_member_permissions=ADMIN_PERMS,
+    )
+    async def purgecancel(self, inter: disnake.ApplicationCommandInteraction) -> None:
+        job = purge.cancel_running(inter.guild.id)
+        if job is None:
+            await inter.response.send_message("No purge is running in this server.", ephemeral=True)
+            return
+        await inter.response.send_message(
+            f"🛑 Stopping the running purge (deleted **{job.result.deleted:,}** so far). "
+            "Whoever started it gets the final summary.",
+            ephemeral=True,
+        )
+
     @staticmethod
     async def _edit(
         inter: disnake.ApplicationCommandInteraction,

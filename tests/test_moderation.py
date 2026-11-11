@@ -253,10 +253,17 @@ def _purge_channel(messages_list: list[MagicMock], *, archived_threads=()) -> Ma
         m.id = 10**9 - i
     channel.pages_read = 0
 
-    def history(*, limit=100, before=None):
-        channel.pages_read += 1
-        cursor = before.id if before is not None else float("inf")
-        page = [m for m in messages_list if m.id < cursor][:limit]
+    channel.recent_reads = 0
+
+    def history(*, limit=100, before=None, after=None):
+        if after is not None:
+            # Oldest-first, like disnake when ``after`` is given.
+            channel.recent_reads += 1
+            page = [m for m in messages_list if m.created_at > after][::-1][:limit]
+        else:
+            channel.pages_read += 1
+            cursor = before.id if before is not None else float("inf")
+            page = [m for m in messages_list if m.id < cursor][:limit]
 
         async def _gen():
             for m in page:
@@ -643,9 +650,8 @@ def _search_guild(channels: list[MagicMock], **kwargs) -> MagicMock:
 
 
 @pytest.mark.asyncio
-async def test_member_purge_uses_search_and_never_reads_history(monkeypatch) -> None:
+async def test_member_purge_uses_search_and_never_reads_full_history(monkeypatch) -> None:
     channel = _purge_channel([])
-    channel.history = MagicMock(side_effect=AssertionError("must not read history"))
     hits = [
         _hit(author_id=55, content="bad DOGS", channel=channel, age_days=1),
         _hit(author_id=55, content="cat", channel=channel, age_days=1),
@@ -667,6 +673,9 @@ async def test_member_purge_uses_search_and_never_reads_history(monkeypatch) -> 
     assert search.calls[0]["author_id"] == "55"
     assert "content" not in search.calls[0]
     assert search.calls[0]["include_nsfw"] == "true"
+    # Only the recent window was read directly, never the full history.
+    assert channel.pages_read == 0
+    assert channel.recent_reads == 1
 
 
 @pytest.mark.asyncio
@@ -835,6 +844,61 @@ async def test_member_search_warns_while_discord_is_still_indexing(monkeypatch) 
 
     assert result.search_incomplete is True
     assert "still indexing" in purge.format_summary(result, "dog", member_label="bob")
+
+
+@pytest.mark.asyncio
+async def test_member_purge_catches_a_message_too_new_to_be_searchable(monkeypatch) -> None:
+    """Search lags new messages; the recent-history read deletes them anyway."""
+    just_posted = _message(author_id=55, content="chicken", age_days=0.0001)
+    someone_else = _message(author_id=66, content="chicken", age_days=0.0001)
+    channel = _purge_channel([just_posted, someone_else])
+    monkeypatch.setattr(purge, "_search_page", _FakeSearch())  # index has nothing yet
+
+    result = await purge.purge_messages(
+        _search_guild([channel]), "chicken", SimpleNamespace(id=42), target=SimpleNamespace(id=55)
+    )
+
+    assert result.used_search is True
+    assert result.deleted == 1
+    just_posted.delete.assert_awaited_once()
+    someone_else.delete.assert_not_awaited()
+    assert channel.pages_read == 0
+
+
+@pytest.mark.asyncio
+async def test_message_found_by_search_and_recent_read_is_deleted_once(monkeypatch) -> None:
+    recent = _message(author_id=55, content="dog", age_days=0.0001)
+    channel = _purge_channel([recent])
+    payload = {
+        "id": str(recent.id),
+        "channel_id": str(channel.id),
+        "author": {"id": "55"},
+        "content": "dog",
+    }
+    monkeypatch.setattr(purge, "_search_page", _FakeSearch([payload]))
+
+    result = await purge.purge_messages(
+        _search_guild([channel]), "dog", SimpleNamespace(id=42), target=SimpleNamespace(id=55)
+    )
+
+    assert result.deleted == 1
+    assert recent.delete.await_count + len(channel.refs) == 1
+
+
+@pytest.mark.asyncio
+async def test_member_purge_falls_back_when_search_hides_message_text(monkeypatch) -> None:
+    """Blank content on every hit would mean nothing ever matches -- don't trust it."""
+    channel = _purge_channel([_message(author_id=55, content="dog", age_days=30)])
+    blank = [_hit(author_id=55, content="", channel=channel, age_days=30) for _ in range(10)]
+    monkeypatch.setattr(purge, "_search_page", _FakeSearch(blank))
+
+    result = await purge.purge_messages(
+        _search_guild([channel]), "dog", SimpleNamespace(id=42), target=SimpleNamespace(id=55)
+    )
+
+    assert result.used_search is False
+    assert result.deleted == 1
+    assert channel.pages_read == 1
 
 
 def test_search_progress_says_it_is_checking_their_messages() -> None:

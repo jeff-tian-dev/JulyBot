@@ -126,3 +126,44 @@ async def test_mod_log_notes_a_cancelled_purge(monkeypatch) -> None:
 
     assert mod_log.await_args.kwargs["reason"].endswith("(cancelled)")
     assert "cancelled" in inter.edit_original_response.await_args.kwargs["content"]
+
+
+@pytest.mark.asyncio
+async def test_purgecancel_stops_the_running_purge() -> None:
+    job = _job(purge.PurgeResult(deleted=9), delay=10)
+    purge._running[1] = job
+    inter = _inter()
+    inter.response.send_message = AsyncMock()
+    cog = ModerationCommands(MagicMock())
+
+    await cog.purgecancel.callback(cog, inter)
+
+    assert job.cancel_event.is_set()
+    assert "Stopping" in inter.response.send_message.await_args.args[0]
+    assert inter.response.send_message.await_args.kwargs["ephemeral"] is True
+    job.task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_purgecancel_with_nothing_running() -> None:
+    inter = _inter()
+    inter.response.send_message = AsyncMock()
+    cog = ModerationCommands(MagicMock())
+
+    await cog.purgecancel.callback(cog, inter)
+
+    assert "No purge is running" in inter.response.send_message.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_purgecancel_only_touches_its_own_server() -> None:
+    other = _job(purge.PurgeResult(), delay=10)
+    purge._running[2] = other  # a different server's purge
+    inter = _inter()  # guild id 1
+    inter.response.send_message = AsyncMock()
+    cog = ModerationCommands(MagicMock())
+
+    await cog.purgecancel.callback(cog, inter)
+
+    assert not other.cancel_event.is_set()
+    other.task.cancel()

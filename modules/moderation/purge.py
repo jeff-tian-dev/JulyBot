@@ -73,6 +73,12 @@ SEARCH_NOT_INDEXED_CODE = 110000
 SEARCH_INDEX_RETRIES = 10
 # Wait used when a "not indexed yet" reply says retry_after = 0.
 SEARCH_INDEX_DEFAULT_WAIT_SECONDS = 2.0
+# Search trails new messages, so this much recent history is also read
+# directly from every channel during a member purge.
+SEARCH_RECENT_WINDOW = timedelta(hours=1)
+# A first search page this size with no message text at all means Discord is
+# withholding content; fall back to the full scan rather than delete nothing.
+SEARCH_BLANK_CONTENT_MIN_HITS = 10
 
 
 @dataclass
@@ -122,6 +128,18 @@ _running: dict[int, PurgeJob] = {}
 
 def get_running(guild_id: int) -> PurgeJob | None:
     return _running.get(guild_id)
+
+
+def cancel_running(guild_id: int) -> PurgeJob | None:
+    """Ask this server's running purge to stop. Returns it, or None if none is running.
+
+    The purge stops at its next check, finishes the deletes already in
+    flight, and reports as cancelled to whoever started it.
+    """
+    job = _running.get(guild_id)
+    if job is not None:
+        job.cancel()
+    return job
 
 
 class _RateLimiter:
@@ -370,7 +388,14 @@ class _Purge:
         self.result.used_search = True
         deleters: dict[int, _ChannelDeleter] = {}
         unreachable: set[int] = set()
+        # Both the search and the recent-history read can find the same message.
+        queued: set[int] = set()
         max_id: int | None = None
+        first_page = True
+        # Search lags behind new messages, so read the last stretch directly.
+        recent_task = asyncio.create_task(
+            self._scan_recent(guild, me, channel, deleters, queued)
+        )
         try:
             while not self.cancel.is_set():
                 params = [
@@ -396,10 +421,22 @@ class _Purge:
                 ]
                 if not hits:
                     break
+                if (
+                    first_page
+                    and len(hits) >= SEARCH_BLANK_CONTENT_MIN_HITS
+                    and not any(m.get("content") for m in hits)
+                ):
+                    # Text withheld from results: nothing could ever match, and
+                    # the purge would "succeed" having deleted nothing.
+                    raise _SearchUnavailable("search results came back without message text")
+                first_page = False
                 self.result.messages_scanned += len(hits)
                 max_id = min(int(m["id"]) for m in hits)
                 cutoff = _bulk_cutoff()
                 for payload in hits:
+                    message_id = int(payload["id"])
+                    if message_id in queued:
+                        continue
                     if int(payload["author"]["id"]) != self.target_id:
                         continue
                     if not _content_matches(payload.get("content") or "", self.word_lower):
@@ -408,11 +445,67 @@ class _Purge:
                         guild, me, int(payload["channel_id"]), deleters, unreachable
                     )
                     if deleter is not None:
-                        message = deleter.channel.get_partial_message(int(payload["id"]))
-                        await deleter.add(message, cutoff)
+                        queued.add(message_id)
+                        await deleter.add(deleter.channel.get_partial_message(message_id), cutoff)
         finally:
-            await asyncio.gather(*(d.close() for d in deleters.values()))
-            self.result.channels_scanned += len(deleters)
+            try:
+                await recent_task
+            finally:
+                await asyncio.gather(*(d.close() for d in deleters.values()))
+                self.result.channels_scanned += len(deleters)
+
+    async def _scan_recent(
+        self,
+        guild: disnake.Guild,
+        me,
+        channel,
+        deleters: dict[int, _ChannelDeleter],
+        queued: set[int],
+    ) -> None:
+        """Read the last ``SEARCH_RECENT_WINDOW`` of history in every channel.
+
+        Discord's search index trails new messages, so a message posted just
+        before the purge isn't searchable yet. Reading recent history directly
+        covers that gap; for most channels it's one request.
+        """
+        if channel is not None:
+            channels = [channel]
+        else:
+            channels = [
+                c
+                for c in (
+                    *guild.text_channels,
+                    *guild.voice_channels,
+                    *guild.stage_channels,
+                    *guild.threads,
+                )
+                if _can_manage(c, me)
+            ]
+        after = disnake.utils.utcnow() - SEARCH_RECENT_WINDOW
+        semaphore = asyncio.Semaphore(SCAN_CONCURRENCY)
+
+        async def scan(ch) -> None:
+            async with semaphore:
+                if self.cancel.is_set():
+                    return
+                await self.limiter.wait()
+                try:
+                    recent = [m async for m in ch.history(limit=None, after=after)]
+                except disnake.HTTPException as exc:
+                    logger.warning("Couldn't read recent history in %s: %s", ch, exc)
+                    return
+                cutoff = _bulk_cutoff()
+                for message in recent:
+                    if message.id in queued or not self._matches(message):
+                        continue
+                    deleter = deleters.get(ch.id)
+                    if deleter is None:
+                        deleter = deleters[ch.id] = _ChannelDeleter(self, ch)
+                        self.result.channels_found += 1
+                    queued.add(message.id)
+                    await deleter.add(message, cutoff)
+
+        await asyncio.gather(*(scan(c) for c in channels))
 
     async def scan_channel_safe(self, channel) -> None:
         if self.cancel.is_set():
