@@ -208,8 +208,16 @@ async def test_send_mod_log_never_posts_outside_its_own_server() -> None:
 
 @pytest.fixture(autouse=True)
 def _fast_purge(monkeypatch):
-    """No request pacing in tests, and no purge left registered between tests."""
+    """No request pacing in tests, and no purge left registered between tests.
+
+    Message search is unavailable unless a test installs one, so tests that
+    name a member exercise the full-scan fallback by default.
+    """
     monkeypatch.setattr(purge, "MAX_REQUESTS_PER_SECOND", 0)
+    monkeypatch.setattr(
+        purge, "_search_page",
+        AsyncMock(side_effect=disnake.HTTPException(MagicMock(status=403), "no search")),
+    )
     purge._running.clear()
     yield
     purge._running.clear()
@@ -263,6 +271,16 @@ def _purge_channel(messages_list: list[MagicMock], *, archived_threads=()) -> Ma
 
         return _gen()
 
+    def partial(message_id):
+        ref = MagicMock()
+        ref.id = message_id
+        ref.created_at = disnake.utils.snowflake_time(message_id)
+        ref.delete = AsyncMock()
+        channel.refs[message_id] = ref
+        return ref
+
+    channel.refs = {}
+    channel.get_partial_message = partial
     channel.history = history
     channel.archived_threads = archived
     channel.delete_messages = AsyncMock()
@@ -580,6 +598,249 @@ def test_format_progress_and_summary() -> None:
 
     summary = purge.format_summary(result, "dog", member_label="bob", channel_mention="<#1>")
     assert "bob" in summary and "<#1>" in summary and "Purge finished" in summary
+
+
+# ---------------------------------------------------------------------------
+# purge with a member named: Discord message search
+# ---------------------------------------------------------------------------
+
+_hit_seq = iter(range(1, 10**6))
+
+
+def _hit(*, author_id: int, content: str, channel: MagicMock, age_days: float) -> dict:
+    """A search result payload, with a real snowflake id so its age is derivable."""
+    created = disnake.utils.utcnow() - timedelta(days=age_days)
+    return {
+        "id": str(disnake.utils.time_snowflake(created) + next(_hit_seq)),
+        "channel_id": str(channel.id),
+        "author": {"id": str(author_id)},
+        "content": content,
+    }
+
+
+class _FakeSearch:
+    """Serves search pages in order; then empty pages. Records every query."""
+
+    def __init__(self, *pages: list[dict], extra: dict | None = None, nested: bool = True) -> None:
+        self.pages = list(pages)
+        self.extra = extra or {}
+        self.nested = nested
+        self.calls: list[dict] = []
+
+    async def __call__(self, guild, params):
+        self.calls.append(dict(params))
+        page = self.pages.pop(0) if self.pages else []
+        messages = [[m] for m in page] if self.nested else page
+        return {"total_results": len(page), "messages": messages, **self.extra}
+
+
+def _search_guild(channels: list[MagicMock], **kwargs) -> MagicMock:
+    guild = _purge_guild(channels, **kwargs)
+    by_id = {c.id: c for c in channels}
+    guild.get_channel_or_thread = MagicMock(side_effect=lambda cid: by_id.get(cid))
+    guild.fetch_channel = AsyncMock(side_effect=disnake.NotFound(MagicMock(status=404), "gone"))
+    return guild
+
+
+@pytest.mark.asyncio
+async def test_member_purge_uses_search_and_never_reads_history(monkeypatch) -> None:
+    channel = _purge_channel([])
+    channel.history = MagicMock(side_effect=AssertionError("must not read history"))
+    hits = [
+        _hit(author_id=55, content="bad DOGS", channel=channel, age_days=1),
+        _hit(author_id=55, content="cat", channel=channel, age_days=1),
+    ]
+    search = _FakeSearch(hits)
+    monkeypatch.setattr(purge, "_search_page", search)
+
+    result = await purge.purge_messages(
+        _search_guild([channel]), "dog", SimpleNamespace(id=42), target=SimpleNamespace(id=55)
+    )
+
+    assert result.used_search is True
+    assert result.deleted == 1
+    assert result.messages_scanned == 2
+    # Substring match is checked locally: "dog" deletes "DOGS".
+    channel.refs[int(hits[0]["id"])].delete.assert_awaited_once()
+    assert int(hits[1]["id"]) not in channel.refs
+    # Searches by author only -- a content search would miss substring matches.
+    assert search.calls[0]["author_id"] == "55"
+    assert "content" not in search.calls[0]
+    assert search.calls[0]["include_nsfw"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_member_search_pages_by_max_id_until_empty(monkeypatch) -> None:
+    channel = _purge_channel([])
+    page1 = [_hit(author_id=55, content="dog", channel=channel, age_days=30) for _ in range(3)]
+    page2 = [_hit(author_id=55, content="dog", channel=channel, age_days=60) for _ in range(2)]
+    search = _FakeSearch(page1, page2)
+    monkeypatch.setattr(purge, "_search_page", search)
+
+    result = await purge.purge_messages(
+        _search_guild([channel]), "dog", SimpleNamespace(id=42), target=SimpleNamespace(id=55)
+    )
+
+    assert result.deleted == 5
+    assert len(search.calls) == 3  # two pages, then the empty one that ends it
+    assert "max_id" not in search.calls[0]
+    assert search.calls[1]["max_id"] == str(min(int(h["id"]) for h in page1))
+    assert "offset" not in search.calls[1]
+
+
+@pytest.mark.asyncio
+async def test_member_search_accepts_flat_message_list(monkeypatch) -> None:
+    channel = _purge_channel([])
+    monkeypatch.setattr(
+        purge, "_search_page",
+        _FakeSearch([_hit(author_id=55, content="dog", channel=channel, age_days=1)], nested=False),
+    )
+
+    result = await purge.purge_messages(
+        _search_guild([channel]), "dog", SimpleNamespace(id=42), target=SimpleNamespace(id=55)
+    )
+
+    assert result.deleted == 1
+
+
+@pytest.mark.asyncio
+async def test_member_search_bulk_deletes_recent_per_channel(monkeypatch) -> None:
+    a, b = _purge_channel([]), _purge_channel([])
+    hits = [_hit(author_id=55, content="dog", channel=a, age_days=1) for _ in range(3)]
+    hits += [_hit(author_id=55, content="dog", channel=b, age_days=1) for _ in range(2)]
+    monkeypatch.setattr(purge, "_search_page", _FakeSearch(hits))
+
+    result = await purge.purge_messages(
+        _search_guild([a, b]), "dog", SimpleNamespace(id=42), target=SimpleNamespace(id=55)
+    )
+
+    assert result.deleted == 5
+    assert result.channels_scanned == 2
+    assert len(a.delete_messages.await_args.args[0]) == 3
+    assert len(b.delete_messages.await_args.args[0]) == 2
+
+
+@pytest.mark.asyncio
+async def test_member_search_narrowed_to_a_channel(monkeypatch) -> None:
+    channel = _purge_channel([])
+    search = _FakeSearch([_hit(author_id=55, content="dog", channel=channel, age_days=1)])
+    monkeypatch.setattr(purge, "_search_page", search)
+
+    await purge.purge_messages(
+        _search_guild([channel]), "dog", SimpleNamespace(id=42),
+        target=SimpleNamespace(id=55), channel=channel,
+    )
+
+    assert search.calls[0]["channel_id"] == str(channel.id)
+
+
+@pytest.mark.asyncio
+async def test_member_search_skips_channels_it_cannot_manage(monkeypatch) -> None:
+    blocked = _purge_channel([])
+    blocked.permissions_for = MagicMock(return_value=_perms(manage=False))
+    hits = [_hit(author_id=55, content="dog", channel=blocked, age_days=1) for _ in range(2)]
+    monkeypatch.setattr(purge, "_search_page", _FakeSearch(hits))
+
+    result = await purge.purge_messages(
+        _search_guild([blocked]), "dog", SimpleNamespace(id=42), target=SimpleNamespace(id=55)
+    )
+
+    assert result.deleted == 0
+    assert result.channels_skipped == 1  # counted once, not per message
+    assert blocked.refs == {}
+
+
+@pytest.mark.asyncio
+async def test_member_search_fetches_and_unarchives_an_uncached_thread(monkeypatch) -> None:
+    thread = _archived_thread([])
+    guild = _search_guild([])
+    guild.fetch_channel = AsyncMock(return_value=thread)
+    monkeypatch.setattr(
+        purge, "_search_page",
+        _FakeSearch([_hit(author_id=55, content="dog", channel=thread, age_days=90)]),
+    )
+
+    result = await purge.purge_messages(guild, "dog", SimpleNamespace(id=42), target=SimpleNamespace(id=55))
+
+    assert result.deleted == 1
+    guild.fetch_channel.assert_awaited_once_with(thread.id)
+    assert [c.kwargs for c in thread.edit.await_args_list] == [{"archived": False}, {"archived": True}]
+
+
+@pytest.mark.asyncio
+async def test_member_search_waits_out_not_indexed_then_continues(monkeypatch) -> None:
+    channel = _purge_channel([])
+    hit = _hit(author_id=55, content="dog", channel=channel, age_days=1)
+    replies = [
+        {"message": "Index not yet available. Try again later", "code": 110000, "retry_after": 0},
+        {"messages": [[hit]], "total_results": 1},
+        {"messages": [], "total_results": 0},
+    ]
+    monkeypatch.setattr(purge, "_search_page", AsyncMock(side_effect=replies))
+    monkeypatch.setattr(purge, "SEARCH_INDEX_DEFAULT_WAIT_SECONDS", 0)
+
+    result = await purge.purge_messages(
+        _search_guild([channel]), "dog", SimpleNamespace(id=42), target=SimpleNamespace(id=55)
+    )
+
+    assert result.used_search is True
+    assert result.deleted == 1
+
+
+@pytest.mark.asyncio
+async def test_member_purge_falls_back_to_full_scan_when_never_indexed(monkeypatch) -> None:
+    channel = _purge_channel([_message(author_id=55, content="dog", age_days=1)])
+    not_indexed = {"code": 110000, "retry_after": 0}
+    monkeypatch.setattr(purge, "_search_page", AsyncMock(return_value=not_indexed))
+    monkeypatch.setattr(purge, "SEARCH_INDEX_DEFAULT_WAIT_SECONDS", 0)
+
+    result = await purge.purge_messages(
+        _search_guild([channel]), "dog", SimpleNamespace(id=42), target=SimpleNamespace(id=55)
+    )
+
+    assert result.used_search is False
+    assert result.deleted == 1
+    assert channel.pages_read == 1
+    assert purge._search_page.await_count == purge.SEARCH_INDEX_RETRIES
+
+
+@pytest.mark.asyncio
+async def test_member_purge_falls_back_when_search_errors() -> None:
+    """The default fixture makes search 403; the full scan still does the job."""
+    channel = _purge_channel([_message(author_id=55, content="dog", age_days=1)])
+
+    result = await purge.purge_messages(
+        _search_guild([channel]), "dog", SimpleNamespace(id=42), target=SimpleNamespace(id=55)
+    )
+
+    assert result.used_search is False
+    assert result.deleted == 1
+    assert result.channels_scanned == 1
+
+
+@pytest.mark.asyncio
+async def test_member_search_warns_while_discord_is_still_indexing(monkeypatch) -> None:
+    channel = _purge_channel([])
+    monkeypatch.setattr(
+        purge, "_search_page",
+        _FakeSearch(
+            [_hit(author_id=55, content="dog", channel=channel, age_days=1)],
+            extra={"doing_deep_historical_index": True},
+        ),
+    )
+
+    result = await purge.purge_messages(
+        _search_guild([channel]), "dog", SimpleNamespace(id=42), target=SimpleNamespace(id=55)
+    )
+
+    assert result.search_incomplete is True
+    assert "still indexing" in purge.format_summary(result, "dog", member_label="bob")
+
+
+def test_search_progress_says_it_is_checking_their_messages() -> None:
+    result = purge.PurgeResult(used_search=True, messages_scanned=1500, deleted=12)
+    progress = purge.format_progress(result, "dog")
+    assert "1,500" in progress and "their message" in progress
 
 
 @pytest.mark.asyncio

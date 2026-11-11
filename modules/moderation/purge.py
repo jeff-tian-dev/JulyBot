@@ -19,7 +19,12 @@ Where the time goes, and how each part is kept moving:
   (messages under 14 days, 100 per call) and a single-delete worker (older
   messages, one call each), fed by queues while the reader keeps paging.
   Those are different Discord routes, so they run alongside the read.
-* **Every request** (page read or delete) passes ``_RateLimiter`` so the whole
+* **With a member named**, history isn't read at all: Discord's message
+  search (``GET /guilds/{id}/messages/search``, ``author_id``) returns only
+  that member's messages, 25 per request, and the word is checked here. If
+  search can't be used it falls back to the full scan, so a search problem
+  never makes a purge fail.
+* **Every request** (page read, search, or delete) passes ``_RateLimiter`` so the whole
   purge stays under Discord's global 50 requests/second. disnake only reacts
   to a global 429 after the fact, and a flood of 429s counts toward
   Cloudflare's invalid-request ban.
@@ -32,7 +37,9 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+import aiohttp
 import disnake
+from disnake.http import Route
 
 from modules.moderation.validation import ModerationError
 
@@ -58,6 +65,14 @@ MAX_REQUESTS_PER_SECOND = 40.0
 # Old (single-delete) matches waiting per channel before the reader pauses.
 # Bounds memory when reading outruns the ~1-at-a-time old-message deletes.
 OLD_DELETE_QUEUE_SIZE = 1000
+# Discord's message search returns at most 25 messages per request.
+SEARCH_PAGE_SIZE = 25
+# Error code in a 202 reply meaning "this server isn't indexed for search yet".
+SEARCH_NOT_INDEXED_CODE = 110000
+# How many "not indexed yet" replies to wait out before falling back to a full scan.
+SEARCH_INDEX_RETRIES = 10
+# Wait used when a "not indexed yet" reply says retry_after = 0.
+SEARCH_INDEX_DEFAULT_WAIT_SECONDS = 2.0
 
 
 @dataclass
@@ -72,6 +87,11 @@ class PurgeResult:
     channels_skipped: int = 0
     # Channels whose archived threads couldn't be listed (bot lacks Manage Threads).
     archived_unreachable: int = 0
+    # A member was named, so only their messages were fetched (via search).
+    used_search: bool = False
+    # Discord said it is still indexing this server's history: older messages
+    # may be missing from search results.
+    search_incomplete: bool = False
     cancelled: bool = False
     finished: bool = False
     started_at: float = field(default_factory=time.monotonic)
@@ -142,6 +162,70 @@ def _bulk_cutoff() -> datetime:
     )
 
 
+class _SearchUnavailable(Exception):
+    """Discord's message search can't serve this purge; use the full scan."""
+
+
+async def _search_page(guild: disnake.Guild, params: list[tuple[str, str]]):
+    """GET /guilds/{id}/messages/search. disnake has no wrapper for it yet.
+
+    Goes through disnake's HTTP client, so it gets disnake's rate-limit handling.
+    A 202 ("not indexed yet") comes back as a normal dict carrying ``code``.
+    """
+    route = Route("GET", "/guilds/{guild_id}/messages/search", guild_id=guild.id)
+    return await guild._state.http.request(route, params=params)
+
+
+class _ChannelDeleter:
+    """Deletes queued matches in one channel without blocking whoever feeds it.
+
+    A bulk worker (under 14 days, up to 100 per call) and a single-delete
+    worker (older) run alongside the reader. They hit different Discord
+    routes, so they don't wait on each other or on history reads.
+    """
+
+    def __init__(self, run: _Purge, channel) -> None:
+        self.run = run
+        self.channel = channel
+        self._recent: list = []
+        self._recent_q: asyncio.Queue = asyncio.Queue()
+        self._old_q: asyncio.Queue = asyncio.Queue(maxsize=OLD_DELETE_QUEUE_SIZE)
+        self._archived = isinstance(channel, disnake.Thread) and bool(
+            getattr(channel, "archived", False)
+        )
+        self._unarchived = False
+        self._bulk_task = asyncio.create_task(run._bulk_worker(channel, self._recent_q, self._old_q))
+        self._old_task = asyncio.create_task(run._old_worker(self._old_q))
+
+    async def add(self, message, cutoff: datetime) -> None:
+        if self._archived and not self._unarchived:
+            # Discord refuses deletes in an archived thread.
+            await self.channel.edit(archived=False)
+            self._unarchived = True
+        if message.created_at > cutoff:
+            self._recent.append(message)
+            if len(self._recent) >= BULK_DELETE_BATCH_SIZE:
+                await self._recent_q.put(self._recent)
+                self._recent = []
+        else:
+            await self._old_q.put(message)
+
+    async def close(self) -> None:
+        """Flush what's queued, wait for every delete, re-archive if we unarchived."""
+        if self._recent:
+            await self._recent_q.put(self._recent)
+            self._recent = []
+        await self._recent_q.put(None)
+        await self._bulk_task  # may hand failed batches to the old queue, so it finishes first
+        await self._old_q.put(None)
+        await self._old_task
+        if self._unarchived:
+            try:
+                await self.channel.edit(archived=True)
+            except disnake.HTTPException as exc:
+                logger.warning("Couldn't re-archive %s: %s", self.channel, exc)
+
+
 class _Purge:
     """State shared by every channel of one purge run."""
 
@@ -204,14 +288,7 @@ class _Purge:
 
     async def scan_channel(self, channel) -> None:
         """Read one channel's whole history, queueing matches for deletion."""
-        recent_q: asyncio.Queue = asyncio.Queue()
-        old_q: asyncio.Queue = asyncio.Queue(maxsize=OLD_DELETE_QUEUE_SIZE)
-        bulk_task = asyncio.create_task(self._bulk_worker(channel, recent_q, old_q))
-        old_task = asyncio.create_task(self._old_worker(old_q))
-
-        archived = isinstance(channel, disnake.Thread) and bool(getattr(channel, "archived", False))
-        unarchived = False
-        recent: list[disnake.Message] = []
+        deleter = _ChannelDeleter(self, channel)
         before = None
         try:
             while not self.cancel.is_set():
@@ -220,34 +297,122 @@ class _Purge:
                 self.result.messages_scanned += len(page)
                 cutoff = _bulk_cutoff()
                 for message in page:
-                    if not self._matches(message):
-                        continue
-                    if archived and not unarchived:
-                        # Discord refuses deletes in an archived thread.
-                        await channel.edit(archived=False)
-                        unarchived = True
-                    if message.created_at > cutoff:
-                        recent.append(message)
-                        if len(recent) >= BULK_DELETE_BATCH_SIZE:
-                            await recent_q.put(recent)
-                            recent = []
-                    else:
-                        await old_q.put(message)
+                    if self._matches(message):
+                        await deleter.add(message, cutoff)
                 if len(page) < HISTORY_PAGE_SIZE:
                     break
                 before = page[-1]  # history is newest-first; continue past the oldest
         finally:
-            if recent:
-                await recent_q.put(recent)
-            await recent_q.put(None)
-            await bulk_task  # may hand failed batches to old_q, so it finishes first
-            await old_q.put(None)
-            await old_task
-            if unarchived:
-                try:
-                    await channel.edit(archived=True)
-                except disnake.HTTPException as exc:
-                    logger.warning("Couldn't re-archive %s: %s", channel, exc)
+            await deleter.close()
+
+    # -- one author, via Discord's message search ---------------------------------
+
+    async def _search(self, guild: disnake.Guild, params: list[tuple[str, str]]) -> dict:
+        """One search page, waiting out "not indexed yet" (202) replies."""
+        for _attempt in range(SEARCH_INDEX_RETRIES):
+            await self.limiter.wait()
+            try:
+                data = await _search_page(guild, params)
+            except (disnake.HTTPException, aiohttp.ClientError, ValueError) as exc:
+                raise _SearchUnavailable(f"search request failed: {exc}") from exc
+            if not isinstance(data, dict):
+                raise _SearchUnavailable(f"unexpected search response: {data!r:.200}")
+            if data.get("code") == SEARCH_NOT_INDEXED_CODE:
+                await asyncio.sleep(data.get("retry_after") or SEARCH_INDEX_DEFAULT_WAIT_SECONDS)
+                continue
+            return data
+        raise _SearchUnavailable("Discord hasn't indexed this server for search yet")
+
+    async def _deleter_for(
+        self,
+        guild: disnake.Guild,
+        me,
+        channel_id: int,
+        deleters: dict[int, _ChannelDeleter],
+        unreachable: set[int],
+    ) -> _ChannelDeleter | None:
+        if channel_id in deleters:
+            return deleters[channel_id]
+        if channel_id in unreachable:
+            return None
+        channel = guild.get_channel_or_thread(channel_id)
+        if channel is None:
+            # Archived threads aren't cached.
+            await self.limiter.wait()
+            try:
+                channel = await guild.fetch_channel(channel_id)
+            except disnake.HTTPException:
+                channel = None
+        archived = isinstance(channel, disnake.Thread) and bool(getattr(channel, "archived", False))
+        if (
+            channel is None
+            or not _can_manage(channel, me)
+            or (archived and not channel.permissions_for(me).manage_threads)
+        ):
+            unreachable.add(channel_id)
+            self.result.channels_skipped += 1
+            return None
+        deleters[channel_id] = _ChannelDeleter(self, channel)
+        self.result.channels_found += 1
+        return deleters[channel_id]
+
+    async def search_author(self, guild: disnake.Guild, me, channel) -> None:
+        """Delete one author's matching messages, fetching only *their* messages.
+
+        Searches by author only, never by content: Discord's search matches
+        whole words, while /purgeword matches substrings ("dog" in "dogs"), so
+        a content search would silently miss messages. The word is checked
+        here instead, the same way the full scan does it.
+
+        Raises ``_SearchUnavailable`` if search can't be used; the caller then
+        falls back to the full scan.
+        """
+        self.result.used_search = True
+        deleters: dict[int, _ChannelDeleter] = {}
+        unreachable: set[int] = set()
+        max_id: int | None = None
+        try:
+            while not self.cancel.is_set():
+                params = [
+                    ("author_id", str(self.target_id)),
+                    ("limit", str(SEARCH_PAGE_SIZE)),
+                    ("sort_by", "timestamp"),
+                    ("sort_order", "desc"),
+                    ("include_nsfw", "true"),
+                ]
+                if channel is not None:
+                    params.append(("channel_id", str(channel.id)))
+                if max_id is not None:
+                    # Page by id, not offset: offset stops at 9,975 and shifts as we delete.
+                    params.append(("max_id", str(max_id)))
+                data = await self._search(guild, params)
+                if data.get("doing_deep_historical_index"):
+                    self.result.search_incomplete = True
+                # Each entry was once a list of the hit plus context; now it's just the hit.
+                hits = [
+                    msg
+                    for entry in data.get("messages") or []
+                    for msg in (entry if isinstance(entry, list) else [entry])
+                ]
+                if not hits:
+                    break
+                self.result.messages_scanned += len(hits)
+                max_id = min(int(m["id"]) for m in hits)
+                cutoff = _bulk_cutoff()
+                for payload in hits:
+                    if int(payload["author"]["id"]) != self.target_id:
+                        continue
+                    if not _content_matches(payload.get("content") or "", self.word_lower):
+                        continue
+                    deleter = await self._deleter_for(
+                        guild, me, int(payload["channel_id"]), deleters, unreachable
+                    )
+                    if deleter is not None:
+                        message = deleter.channel.get_partial_message(int(payload["id"]))
+                        await deleter.add(message, cutoff)
+        finally:
+            await asyncio.gather(*(d.close() for d in deleters.values()))
+            self.result.channels_scanned += len(deleters)
 
     async def scan_channel_safe(self, channel) -> None:
         if self.cancel.is_set():
@@ -339,7 +504,20 @@ async def _run(
     run = _Purge(target_id, word.lower(), job)
     result = job.result
     try:
-        if channel is not None:
+        searched = False
+        if target_id is not None:
+            # Only this member's messages are fetched, not the whole server's.
+            try:
+                await run.search_author(guild, me, channel)
+                searched = True
+            except _SearchUnavailable as exc:
+                logger.warning("Message search unavailable (%s); falling back to a full scan", exc)
+                result.used_search = False
+                result.search_incomplete = False
+                result.channels_found = result.channels_scanned = result.channels_skipped = 0
+        if searched:
+            pass
+        elif channel is not None:
             result.channels_found = 1
             await run.scan_channel_safe(channel)
         else:
@@ -364,7 +542,7 @@ async def _run(
         logger.info(
             "Purge by %s: word=%r target=%s channel=%s deleted=%d failed=%d "
             "scanned=%d msgs (%.0f/s) channels=%d/%d skipped=%d archived_unreachable=%d "
-            "cancelled=%s elapsed=%.1fs",
+            "search=%s search_incomplete=%s cancelled=%s elapsed=%.1fs",
             moderator,
             word,
             target_id if target_id is not None else "anyone",
@@ -377,6 +555,8 @@ async def _run(
             result.channels_found,
             result.channels_skipped,
             result.archived_unreachable,
+            result.used_search,
+            result.search_incomplete,
             result.cancelled,
             result.elapsed,
         )
@@ -447,6 +627,12 @@ def _duration(seconds: float) -> str:
 
 
 def format_progress(result: PurgeResult, word: str) -> str:
+    if result.used_search:
+        return (
+            f"🔎 Purging messages containing `{word}`…\n"
+            f"Checked **{result.messages_scanned:,}** of their message(s) · "
+            f"deleted **{result.deleted:,}** · {_duration(result.elapsed)} so far"
+        )
     return (
         f"🧹 Purging messages containing `{word}`…\n"
         f"Read **{result.messages_scanned:,}** message(s) · "
@@ -463,11 +649,12 @@ def format_summary(
     channel_mention: str | None = None,
 ) -> str:
     author_part = f" from **{member_label}**" if member_label else ""
-    scope_part = (
-        f"in {channel_mention}"
-        if channel_mention
-        else f"across {result.channels_scanned:,} channel(s)"
-    )
+    if channel_mention:
+        scope_part = f"in {channel_mention}"
+    elif result.used_search:
+        scope_part = f"in {result.channels_scanned:,} channel(s)"
+    else:
+        scope_part = f"across {result.channels_scanned:,} channel(s)"
     head = "🛑 Purge cancelled." if result.cancelled else "✅ Purge finished."
     summary = (
         f"{head} Deleted **{result.deleted:,}** message(s){author_part} containing "
@@ -483,4 +670,9 @@ def format_summary(
         )
     if result.failed:
         summary += f"\n{result.failed:,} deletion(s) failed."
+    if result.search_incomplete:
+        summary += (
+            "\n⚠️ Discord is still indexing this server's history, so some older "
+            "messages may not have been found. Run it again later to catch them."
+        )
     return summary
