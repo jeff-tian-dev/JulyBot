@@ -58,6 +58,29 @@ that aren't on GitHub. It logs a `SKIP` line once, then picks the push up as soo
 are committed or stashed. New `.env` keys and changes to the bot's plist template are still
 manual steps (it logs a `NOTE` when it sees either).
 
+## Network evidence (netwatch)
+
+`./deploy/install-netwatch.sh` installs a launchd agent (`com.julybot.netwatch`) that records
+the Mac's TCP connections every 60 seconds, so if the Mac stops opening new connections again
+(`Can't assign requested address` in the bot's log, `ERR_ADDRESS_INVALID` in Chrome), there's a
+record of which program caused it. The record is on disk, so rebooting to fix the outage no
+longer loses it — read the logs afterwards.
+
+```bash
+./deploy/install-netwatch.sh       # turn on
+./deploy/uninstall-netwatch.sh     # turn off (logs are kept)
+tail logs/netwatch/netwatch-$(date +%F).log
+```
+
+Each minute adds one line: total connections, `ports` (local ports in use, out of 16384),
+`time_wait`/`close_wait`, the three programs and remote hosts holding the most connections, and
+whether a test connection to 1.1.1.1:443 worked. When `ports` reaches 5000 (normal is under 100)
+or the test connection fails, it also saves `snapshot-<time>.txt` with every connection and its
+program — at most one every 10 minutes. Files older than 7 days are deleted.
+
+After an outage, look for when `ports` started climbing and which program in `procs` grew with
+it. A `probe=FAIL(Can't assign requested address)` line is the port-exhaustion signature.
+
 ## Multi-server update (2026-11)
 
 The bot now works in any server it's added to, with each server's data kept apart. Nothing
