@@ -131,7 +131,9 @@ restart_and_wait() {
   while (( waited < READY_TIMEOUT_SECONDS )); do
     sleep 3
     waited=$((waited + 3))
-    if tail -c +"$((offset + 1))" "$BOT_LOG" 2>/dev/null | grep -q "$READY_PATTERN"; then
+    # Not `tail | grep -q`: grep -q exits on the first match, tail dies of
+    # SIGPIPE (141), and pipefail turns a found ready line into a failure.
+    if grep -qF "$READY_PATTERN" <(tail -c +"$((offset + 1))" "$BOT_LOG" 2>/dev/null); then
       return 0
     fi
   done
