@@ -19,6 +19,7 @@ from modules.roster.render import (
     VIEW_HIDDEN,
     VIEW_WATCHED_COLUMNS,
     render_embed,
+    render_pages,
     view_cells,
 )
 
@@ -52,6 +53,11 @@ class RosterView(disnake.ui.View):
     admin who ran the command (`owner_id`) may click. On timeout the buttons
     are removed rather than left on a public message where clicking them
     would just fail.
+
+    A roster too long for one embed (~75 rows) is paged: Prev/Next buttons
+    appear on a second row whenever the current columns need more than one
+    page. Showing or hiding columns changes row width and so the page count,
+    so the nav buttons are re-synced after every toggle.
     """
 
     def __init__(self, name: str, rows: list[dict], columns, hidden=(), *, owner_id: int) -> None:
@@ -63,34 +69,74 @@ class RosterView(disnake.ui.View):
         self.rows = rows
         self.columns = tuple(columns)
         self.show = {key: key not in hidden for key in self.columns}
+        self.page = 0
         for key in self.columns:
             self.add_item(self._make_button(key))
+        self.prev_button = self._make_nav_button("◀ Prev", "page_prev", -1)
+        self.next_button = self._make_nav_button("Next ▶", "page_next", 1)
+        self._sync_nav()
+
+    async def _reject_non_owner(self, inter: disnake.MessageInteraction) -> bool:
+        if inter.author.id == self.owner_id:
+            return False
+        await inter.response.send_message(
+            "Only the person who posted this roster can change it.", ephemeral=True
+        )
+        return True
 
     def _make_button(self, key: str) -> disnake.ui.Button:
         button = disnake.ui.Button(
             label=COLUMN_SPECS[key][0],
             custom_id=f"col_{key}",
             style=disnake.ButtonStyle.success if self.show[key] else disnake.ButtonStyle.secondary,
+            row=0,
         )
 
         async def callback(inter: disnake.MessageInteraction) -> None:
-            if inter.author.id != self.owner_id:
-                await inter.response.send_message(
-                    "Only the person who posted this roster can change its columns.",
-                    ephemeral=True,
-                )
+            if await self._reject_non_owner(inter):
                 return
             self.show[key] = not self.show[key]
             button.style = (
                 disnake.ButtonStyle.success if self.show[key] else disnake.ButtonStyle.secondary
             )
+            self._sync_nav()
             await inter.response.edit_message(embed=self.embed(), view=self)
 
         button.callback = callback
         return button
 
+    def _make_nav_button(self, label: str, custom_id: str, delta: int) -> disnake.ui.Button:
+        button = disnake.ui.Button(
+            label=label, custom_id=custom_id, style=disnake.ButtonStyle.primary, row=1
+        )
+
+        async def callback(inter: disnake.MessageInteraction) -> None:
+            if await self._reject_non_owner(inter):
+                return
+            self.page += delta
+            self._sync_nav()
+            await inter.response.edit_message(embed=self.embed(), view=self)
+
+        button.callback = callback
+        return button
+
+    def page_count(self) -> int:
+        return len(render_pages(self.name, self.rows, self.columns, self.show))
+
+    def _sync_nav(self) -> None:
+        """Clamp the page and show Prev/Next only while there is more than one page."""
+        pages = self.page_count()
+        self.page = max(0, min(self.page, pages - 1))
+        for button in (self.prev_button, self.next_button):
+            if pages > 1 and button not in self.children:
+                self.add_item(button)
+            elif pages <= 1 and button in self.children:
+                self.remove_item(button)
+        self.prev_button.disabled = self.page <= 0
+        self.next_button.disabled = self.page >= pages - 1
+
     def embed(self) -> disnake.Embed:
-        return render_embed(self.name, self.rows, self.columns, self.show)
+        return render_embed(self.name, self.rows, self.columns, self.show, page=self.page)
 
     async def on_timeout(self) -> None:
         if self.message is None:

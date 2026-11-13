@@ -109,19 +109,53 @@ def _bubble(index: int, row: dict, columns, show: dict) -> str:
     return "`" + f"{index}." + (gap + "  ".join(parts) if parts else "") + "`"
 
 
-def render_embed(name: str, rows: list[dict], columns, show: dict) -> disnake.Embed:
-    """Single embed listing every account as a numbered bubble (enabled columns only)."""
-    lines = [_bubble(i, row, columns, show) for i, row in enumerate(rows, start=1)]
-    desc = "\n".join(lines)
-    if len(desc) > DESC_LIMIT:
-        desc = desc[:DESC_LIMIT].rsplit("\n", 1)[0] + "\n… (list truncated)"
+def _pack_pages(lines: list[str], limit: int = DESC_LIMIT) -> list[list[str]]:
+    """Greedily split lines into pages whose joined text stays within `limit`.
 
-    embed = disnake.Embed(title=f"📋 {name}", description=desc or "_empty_", color=ROSTER_COLOR)
+    Always returns at least one (possibly empty) page so an empty roster renders.
+    """
+    pages: list[list[str]] = [[]]
+    size = 0
+    for line in lines:
+        added = len(line) + (1 if pages[-1] else 0)  # +1 for the joining newline
+        if pages[-1] and size + added > limit:
+            pages.append([])
+            size, added = 0, len(line)
+        pages[-1].append(line)
+        size += added
+    return pages
+
+
+def render_pages(name: str, rows: list[dict], columns, show: dict) -> list[disnake.Embed]:
+    """Every account as a numbered bubble, split across as many embeds as needed.
+
+    Numbering runs continuously across pages. A single-embed message caps the
+    description at 4096 chars (~75 rows), and a message caps *all* its embeds
+    at 6000 combined, so callers show one page per message (or page through).
+    """
+    lines = [_bubble(i, row, columns, show) for i, row in enumerate(rows, start=1)]
+    pages = _pack_pages(lines)
+
     legend = " · ".join(COLUMN_SPECS[key][0] for key in columns if show[key])
     total = len(rows)
     count = f"{total} account{'s' if total != 1 else ''}"
-    embed.set_footer(text=f"{legend}  •  {count}" if legend else count)
-    return embed
+    embeds = []
+    for number, page in enumerate(pages, start=1):
+        embed = disnake.Embed(
+            title=f"📋 {name}", description="\n".join(page) or "_empty_", color=ROSTER_COLOR
+        )
+        footer = f"{legend}  •  {count}" if legend else count
+        if len(pages) > 1:
+            footer += f"  •  Page {number}/{len(pages)}"
+        embed.set_footer(text=footer)
+        embeds.append(embed)
+    return embeds
+
+
+def render_embed(name: str, rows: list[dict], columns, show: dict, page: int = 0) -> disnake.Embed:
+    """One page of the roster (0-based, clamped so a stale page index still renders)."""
+    embeds = render_pages(name, rows, columns, show)
+    return embeds[max(0, min(page, len(embeds) - 1))]
 
 
 def _out_compact(seconds: int) -> str:
@@ -144,11 +178,11 @@ def leaderboard_cells(raw: dict) -> dict:
     }
 
 
-def leaderboard_embed(name: str, raw_rows: list[dict]) -> disnake.Embed:
-    """Static (no-buttons) leaderboard embed for the daily board."""
+def leaderboard_embeds(name: str, raw_rows: list[dict]) -> list[disnake.Embed]:
+    """Static (no-buttons) leaderboard pages for the daily board, one per message."""
     rows = [leaderboard_cells(r) for r in raw_rows]
     show = {key: True for key in LEADERBOARD_COLUMNS}
-    return render_embed(name, rows, LEADERBOARD_COLUMNS, show)
+    return render_pages(name, rows, LEADERBOARD_COLUMNS, show)
 
 
 def inout_cell(m: dict) -> str:

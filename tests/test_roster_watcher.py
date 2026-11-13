@@ -502,3 +502,36 @@ async def test_poll_retries_a_failed_clan_fetch(monkeypatch) -> None:
     result = await watcher.poll_clan_watch(MagicMock(), _fake_bot(_channel()))
     assert result["failed_guilds"] == 0
     assert get_clan.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_post_daily_board_spans_several_messages_for_a_big_roster(monkeypatch) -> None:
+    tags = [f"#T{i}" for i in range(150)]
+    monkeypatch.setattr(watcher.storage, "get_roster_tags", AsyncMock(return_value=tags))
+    monkeypatch.setattr(
+        watcher.storage,
+        "get_daily_board_state",
+        AsyncMock(return_value={t: {"coc_name": t, "in_clan": True, "daily_absent_seconds": 0} for t in tags}),
+    )
+    monkeypatch.setattr(
+        watcher,
+        "get_player",
+        AsyncMock(side_effect=lambda t: {"name": f"Player{t}", "trophies": 5000, "clan": {"tag": "#FAM"}}),
+    )
+    set_id = AsyncMock()
+    monkeypatch.setattr(watcher.storage, "set_watch_message_id", set_id)
+
+    sent = [MagicMock(id=100 + i) for i in range(10)]
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=sent)
+
+    await watcher._post_daily_board(MagicMock(), channel, 1, {"id": 5, "name": "July"}, {"#FAM"})
+
+    assert channel.send.await_count > 1
+    lines = [
+        line
+        for call in channel.send.await_args_list
+        for line in call.kwargs["embed"].description.splitlines()
+    ]
+    assert len(lines) == 150  # nobody cut off
+    assert set_id.await_args.args[2] == 100  # first page is the recorded board message

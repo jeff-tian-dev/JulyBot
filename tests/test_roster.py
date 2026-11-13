@@ -290,3 +290,48 @@ def test_tracked_view_puts_inout_between_trophies_and_name() -> None:
     bubble = _bubble(1, row, VIEW_WATCHED_COLUMNS, show)
     assert bubble.index("5000") < bubble.index("❌") < bubble.index("Bob")
     assert "#ABC" not in bubble
+
+
+# --- paging (long rosters used to be cut off at ~75 rows) -------------------
+
+def _big_rows(n: int) -> list[dict]:
+    from modules.roster.render import view_cells
+
+    members = [
+        {"coc_tag": f"#TAG{i:05d}", "coc_name": f"Player{i:05d}", "coc_api_ok": True, "trophies": 6000 - i}
+        for i in range(n)
+    ]
+    return [view_cells(m, f"discorduser{i:05d}") for i, m in enumerate(members)]
+
+
+def test_render_pages_keeps_every_row_and_numbers_continuously() -> None:
+    from modules.roster.render import DESC_LIMIT, VIEW_COLUMNS, render_pages
+
+    show = {key: True for key in VIEW_COLUMNS}
+    embeds = render_pages("Main", _big_rows(150), VIEW_COLUMNS, show)
+
+    assert len(embeds) > 1
+    assert all(len(e.description) <= DESC_LIMIT for e in embeds)
+    lines = [line for e in embeds for line in e.description.split("\n")]
+    assert len(lines) == 150
+    assert lines[0].startswith("`1.") and lines[-1].startswith("`150.")
+    assert "truncated" not in "".join(e.description for e in embeds)
+    assert embeds[-1].footer.text.endswith(f"Page {len(embeds)}/{len(embeds)}")
+
+
+def test_render_pages_single_page_has_no_page_footer() -> None:
+    from modules.roster.render import VIEW_COLUMNS, render_pages
+
+    show = {key: True for key in VIEW_COLUMNS}
+    embeds = render_pages("Main", _big_rows(5), VIEW_COLUMNS, show)
+    assert len(embeds) == 1
+    assert "Page" not in embeds[0].footer.text
+
+
+def test_render_embed_clamps_out_of_range_page() -> None:
+    from modules.roster.render import VIEW_COLUMNS, render_embed, render_pages
+
+    show = {key: True for key in VIEW_COLUMNS}
+    rows = _big_rows(150)
+    last = render_pages("Main", rows, VIEW_COLUMNS, show)[-1]
+    assert render_embed("Main", rows, VIEW_COLUMNS, show, page=99).description == last.description

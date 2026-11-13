@@ -180,10 +180,15 @@ async def _post_daily_board(
 ) -> None:
     """Post one roster's daily leaderboard (trophy-sorted)."""
     rows = await build_daily_rows(pool, guild_id, roster["id"], family)
-    embed = render.leaderboard_embed(f"{roster['name']} 👁", rows)
+    embeds = render.leaderboard_embeds(f"{roster['name']} 👁", rows)
     # Each day's report stays in the channel as a running history — no deletion.
-    message = await channel.send(embed=embed)
-    await storage.set_watch_message_id(pool, roster["id"], message.id)
+    # A big roster spans several messages (Discord caps a message's embeds at
+    # 6000 chars total); the first one is recorded as the board's message.
+    first = None
+    for embed in embeds:
+        message = await channel.send(embed=embed)
+        first = first or message
+    await storage.set_watch_message_id(pool, roster["id"], first.id)
 
 
 async def _post_guild_boards(
