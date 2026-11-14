@@ -1,4 +1,4 @@
-"""/link, /unlink, /whois, /accounts — Discord <-> CoC account linking.
+"""/link, /unlink, /accounts, /adminlink — Discord <-> CoC account linking.
 
 Thin Cog layer: parse args, call modules.account_linker, format the reply.
 A Discord user may link multiple CoC accounts (alts).
@@ -9,6 +9,7 @@ import disnake
 from disnake.ext import commands
 
 from modules.account_linker.linker import (
+    admin_link_account,
     get_all_accounts,
     get_linked_accounts,
     link_account,
@@ -100,41 +101,80 @@ class AccountCommands(commands.Cog):
 
     @commands.slash_command(
         name="accounts",
-        description="Show your linked CoC accounts.",
+        description="Show your linked CoC accounts, or another user's.",
         contexts=PERSONAL_CONTEXTS,
     )
-    async def accounts(self, inter: disnake.ApplicationCommandInteraction) -> None:
-        await inter.response.defer(ephemeral=True)
-        accounts = await get_linked_accounts(self.bot.pool, inter.author.id)
-        if not accounts:
-            await inter.edit_original_response(
-                content="You haven't linked any CoC accounts yet. Use `/link` to add one."
-            )
-            return
-
-        embed = _accounts_embed("Your linked CoC accounts", accounts)
-        await inter.edit_original_response(embed=embed)
-
-    @commands.slash_command(
-        name="whois",
-        description="Look up a user's linked CoC accounts.",
-        contexts=PERSONAL_CONTEXTS,
-    )
-    async def whois(
+    async def accounts(
         self,
         inter: disnake.ApplicationCommandInteraction,
-        discord_user: disnake.User,
+        user: disnake.User = commands.Param(
+            default=None, description="Whose accounts to show (default: yours)"
+        ),
     ) -> None:
         await inter.response.defer(ephemeral=True)
-        accounts = await get_linked_accounts(self.bot.pool, discord_user.id)
+        target = user or inter.author
+        own = target.id == inter.author.id
+        accounts = await get_linked_accounts(self.bot.pool, target.id)
         if not accounts:
+            content = (
+                "You haven't linked any CoC accounts yet. Use `/link` to add one."
+                if own
+                else f"{target.mention} has no linked CoC accounts."
+            )
             await inter.edit_original_response(
-                content=f"{discord_user.mention} has no linked CoC accounts."
+                content=content, allowed_mentions=disnake.AllowedMentions.none()
             )
             return
 
-        embed = _accounts_embed(f"{discord_user.display_name}'s linked CoC accounts", accounts)
-        await inter.edit_original_response(embed=embed)
+        title = "Your linked CoC accounts" if own else f"{target.display_name}'s linked CoC accounts"
+        await inter.edit_original_response(embed=_accounts_embed(title, accounts))
+
+    @commands.slash_command(
+        name="adminlink",
+        description="Admin: link a CoC tag to a member without their in-game token.",
+        default_member_permissions=ADMIN_PERMS,
+    )
+    async def adminlink(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        user: disnake.User = commands.Param(description="The member to link the tag to"),
+        coc_tag: str = commands.Param(description="Their player tag, e.g. #2PP0JCCL"),
+    ) -> None:
+        await inter.response.defer(ephemeral=True)
+        none = disnake.AllowedMentions.none()
+        if user.bot:
+            await inter.edit_original_response(content="⚠️ Bots can't have linked accounts.")
+            return
+        if inter.guild.get_member(user.id) is None:
+            await inter.edit_original_response(
+                content=f"⚠️ {user.mention} isn't a member of this server.", allowed_mentions=none
+            )
+            return
+
+        try:
+            result = await admin_link_account(self.bot.pool, user.id, coc_tag, inter.author.id)
+        except ValueError as e:
+            await inter.edit_original_response(content=f"⚠️ {e}")
+            return
+
+        if not result["success"]:
+            content = f"❌ {result['error']}"
+            if result.get("holder_id"):
+                content += f" (<@{result['holder_id']}>). They can `/unlink` it first."
+            await inter.edit_original_response(content=content, allowed_mentions=none)
+            return
+
+        name = result["coc_name"] or "that account"
+        tag = result["coc_tag"]
+        if result["already"]:
+            state = "verified" if result["verified"] else "unverified"
+            content = f"ℹ️ **{name}** (`{tag}`) is already linked to {user.mention} ({state})."
+        else:
+            content = (
+                f"✅ Linked **{name}** (`{tag}`) to {user.mention} — unverified (❔). "
+                "If they `/link` it themselves with their in-game token, it becomes verified."
+            )
+        await inter.edit_original_response(content=content, allowed_mentions=none)
 
 
     @commands.slash_command(

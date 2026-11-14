@@ -4,9 +4,13 @@ Verification uses the CoC `verifyToken` endpoint. The user generates a
 short-lived API token in-game (Settings -> More Settings -> API Token)
 and supplies it to /link; the bot calls
 GET /players/{tag}/verifyToken with that token in the JSON body.
+
+Admins can also link a tag without a token (/adminlink); those links are
+stored unverified and never take a tag away from another user.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from urllib.parse import quote
@@ -65,8 +69,9 @@ async def _verify_token(coc_tag: str, token: str) -> str:
             return data.get("status", "invalid")
 
 
-async def _fetch_player_name(coc_tag: str) -> str | None:
-    """Fetch the player's in-game name. Returns None on failure."""
+async def _lookup_player(coc_tag: str) -> tuple[str, str | None]:
+    """Look a player up: ('ok', name), ('notfound', None), or ('error', None)
+    when the API couldn't answer."""
     url = f"{settings.COC_API_BASE_URL}/players/{_encode_tag(coc_tag)}"
     headers = {
         "Authorization": f"Bearer {settings.COC_API_TOKEN}",
@@ -76,12 +81,20 @@ async def _fetch_player_name(coc_tag: str) -> str | None:
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, headers=headers) as resp:
+                if resp.status == 404:
+                    return "notfound", None
                 if resp.status != 200:
-                    return None
+                    return "error", None
                 data = await resp.json()
-                return data.get("name")
-    except aiohttp.ClientError:
-        return None
+                return "ok", data.get("name")
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return "error", None
+
+
+async def _fetch_player_name(coc_tag: str) -> str | None:
+    """Fetch the player's in-game name. Returns None on failure."""
+    _, name = await _lookup_player(coc_tag)
+    return name
 
 
 async def link_account(
@@ -135,6 +148,70 @@ async def link_account(
 
     logger.info("Linked discord_id=%s to coc_tag=%s (name=%s)", discord_id, coc_tag, coc_name)
     return {"success": True, "coc_name": coc_name or "", "coc_tag": coc_tag}
+
+
+async def admin_link_account(
+    pool: asyncpg.Pool,
+    discord_id: int,
+    coc_tag: str,
+    admin_id: int,
+) -> dict:
+    """Link a CoC tag to a Discord user on an admin's say-so, without a token.
+
+    Stored unverified. Links are global (every server sees them), so an admin
+    link never takes a tag from someone else and never downgrades an existing
+    verified link; a later /link by the real owner (verified) still takes the
+    tag over, as it does today.
+
+    Returns {"success": True, coc_tag, coc_name, already, verified} or
+    {"success": False, error, holder_id}. holder_id is set only when the tag
+    belongs to another Discord user.
+    """
+    coc_tag = _normalize_tag(coc_tag)
+
+    status, coc_name = await _lookup_player(coc_tag)
+    if status == "notfound":
+        return {"success": False, "error": f"No player found with tag {coc_tag}. Double-check the tag.", "holder_id": None}
+    if status != "ok":
+        return {"success": False, "error": "CoC API is unavailable right now. Try again in a moment.", "holder_id": None}
+
+    async with pool.acquire() as conn:
+        holder = await conn.fetchrow(
+            "SELECT discord_id, verified FROM users WHERE coc_tag = $1;", coc_tag
+        )
+        if holder is not None:
+            if holder["discord_id"] != discord_id:
+                return {
+                    "success": False,
+                    "error": f"{coc_tag} is already linked to another Discord user.",
+                    "holder_id": holder["discord_id"],
+                }
+            return {
+                "success": True,
+                "coc_tag": coc_tag,
+                "coc_name": coc_name or "",
+                "already": True,
+                "verified": bool(holder["verified"]),
+            }
+        result = await conn.execute(
+            """
+            INSERT INTO users (discord_id, coc_tag, coc_name, verified)
+            VALUES ($1, $2, $3, FALSE)
+            ON CONFLICT (coc_tag) DO NOTHING;
+            """,
+            discord_id,
+            coc_tag,
+            coc_name,
+        )
+    if not result.endswith(" 1"):
+        # Someone linked it between the check and the insert.
+        return {"success": False, "error": f"{coc_tag} was just linked by someone else. Try again.", "holder_id": None}
+
+    logger.info(
+        "Admin %s linked discord_id=%s to coc_tag=%s (name=%s, unverified)",
+        admin_id, discord_id, coc_tag, coc_name,
+    )
+    return {"success": True, "coc_tag": coc_tag, "coc_name": coc_name or "", "already": False, "verified": False}
 
 
 async def unlink_account(pool: asyncpg.Pool, discord_id: int, coc_tag: str) -> bool:

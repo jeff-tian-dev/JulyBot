@@ -143,3 +143,85 @@ async def test_get_all_accounts_with_no_members_skips_the_query() -> None:
 
     assert await linker.get_all_accounts(_fake_pool(conn), []) == []
     conn.fetch.assert_not_awaited()
+
+
+def _admin_conn(holder=None, insert_result="INSERT 0 1") -> MagicMock:
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=holder)
+    conn.execute = AsyncMock(return_value=insert_result)
+    return conn
+
+
+@pytest.mark.asyncio
+async def test_admin_link_stores_an_unverified_link(monkeypatch) -> None:
+    conn = _admin_conn()
+    monkeypatch.setattr(linker, "_lookup_player", AsyncMock(return_value=("ok", "Chief")))
+
+    result = await linker.admin_link_account(_fake_pool(conn), 42, "2pp0jccl", admin_id=9)
+
+    assert result == {
+        "success": True, "coc_tag": "#2PP0JCCL", "coc_name": "Chief",
+        "already": False, "verified": False,
+    }
+    sql, *args = conn.execute.await_args.args
+    assert "FALSE" in sql and "ON CONFLICT (coc_tag) DO NOTHING" in sql
+    assert args == [42, "#2PP0JCCL", "Chief"]
+
+
+@pytest.mark.asyncio
+async def test_admin_link_never_takes_a_tag_from_another_user(monkeypatch) -> None:
+    """Links are global, so an admin in one server must not reassign someone's tag."""
+    conn = _admin_conn(holder={"discord_id": 77, "verified": True})
+    monkeypatch.setattr(linker, "_lookup_player", AsyncMock(return_value=("ok", "Chief")))
+
+    result = await linker.admin_link_account(_fake_pool(conn), 42, "#2PP0JCCL", admin_id=9)
+
+    assert result["success"] is False
+    assert result["holder_id"] == 77
+    conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_admin_link_keeps_an_existing_verified_link_verified(monkeypatch) -> None:
+    conn = _admin_conn(holder={"discord_id": 42, "verified": True})
+    monkeypatch.setattr(linker, "_lookup_player", AsyncMock(return_value=("ok", "Chief")))
+
+    result = await linker.admin_link_account(_fake_pool(conn), 42, "#2PP0JCCL", admin_id=9)
+
+    assert result["success"] is True
+    assert result["already"] is True and result["verified"] is True
+    conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "message"), [("notfound", "No player found"), ("error", "unavailable")]
+)
+async def test_admin_link_checks_the_tag_before_touching_the_db(monkeypatch, status, message) -> None:
+    conn = _admin_conn()
+    monkeypatch.setattr(linker, "_lookup_player", AsyncMock(return_value=(status, None)))
+
+    result = await linker.admin_link_account(_fake_pool(conn), 42, "#ZZZZZ", admin_id=9)
+
+    assert result["success"] is False and message in result["error"]
+    assert result["holder_id"] is None
+    conn.fetchrow.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_admin_link_reports_losing_a_race_for_the_tag(monkeypatch) -> None:
+    conn = _admin_conn(insert_result="INSERT 0 0")
+    monkeypatch.setattr(linker, "_lookup_player", AsyncMock(return_value=("ok", "Chief")))
+
+    result = await linker.admin_link_account(_fake_pool(conn), 42, "#2PP0JCCL", admin_id=9)
+
+    assert result["success"] is False
+    assert "just linked" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_player_name_uses_the_lookup(monkeypatch) -> None:
+    monkeypatch.setattr(linker, "_lookup_player", AsyncMock(return_value=("ok", "Chief")))
+    assert await linker._fetch_player_name("#2PP0JCCL") == "Chief"
+    monkeypatch.setattr(linker, "_lookup_player", AsyncMock(return_value=("error", None)))
+    assert await linker._fetch_player_name("#2PP0JCCL") is None

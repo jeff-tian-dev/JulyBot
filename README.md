@@ -280,8 +280,8 @@ The Cogs listed in `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py) are
 | -------------------------------- | ------------------ | ------------ |
 | `/link <coc_tag> <token>`        | account_linker     | live         |
 | `/unlink <coc_tag>`              | account_linker     | live         |
-| `/accounts`                      | account_linker     | live         |
-| `/whois <discord_user>`          | account_linker     | live         |
+| `/accounts [user]`               | account_linker     | live         |
+| `/adminlink <user> <coc_tag>`    | account_linker (admin) | live     |
 | `/dumpaccounts`                  | account_linker (admin) | live     |
 | `/x setchannel <channel>`        | x_monitor (admin)  | live         |
 | `/x add <username>`              | x_monitor (admin)  | live         |
