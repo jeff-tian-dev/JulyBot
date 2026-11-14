@@ -164,7 +164,8 @@ async def get_all_watched_channels(pool: asyncpg.Pool) -> list[dict]:
         rows = await conn.fetch(
             """
             SELECT w.id, w.guild_id, w.channel_id, w.channel_name, w.last_seen_video_id, w.added_at,
-                   g.youtube_channel_id, g.youtube_enabled, g.youtube_ping_role_id
+                   g.youtube_channel_id, g.youtube_enabled, g.youtube_mode,
+                   g.test_channel_id, g.youtube_ping_role_id
             FROM youtube_watched_channels w
             LEFT JOIN guild_settings g ON g.guild_id = w.guild_id
             ORDER BY w.guild_id, w.channel_id;
@@ -174,11 +175,11 @@ async def get_all_watched_channels(pool: asyncpg.Pool) -> list[dict]:
 
 
 async def get_youtube_settings(pool: asyncpg.Pool, guild_id: int) -> dict | None:
-    """Return YouTube output channel + enabled flag for a guild."""
+    """Return YouTube output channel + mode for a guild."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT guild_id, youtube_channel_id, youtube_enabled
+            SELECT guild_id, youtube_channel_id, youtube_mode
             FROM guild_settings
             WHERE guild_id = $1;
             """,
@@ -189,7 +190,7 @@ async def get_youtube_settings(pool: asyncpg.Pool, guild_id: int) -> dict | None
     return {
         "guild_id": row["guild_id"],
         "youtube_channel_id": row["youtube_channel_id"],
-        "youtube_enabled": row["youtube_enabled"],
+        "youtube_mode": row["youtube_mode"],
     }
 
 
@@ -208,25 +209,6 @@ async def set_youtube_channel(pool: asyncpg.Pool, guild_id: int, channel_id: int
             channel_id,
         )
     logger.info("youtube_channel_id=%s for guild_id=%s", channel_id, guild_id)
-
-
-async def toggle_youtube(pool: asyncpg.Pool, guild_id: int) -> bool:
-    """Flip youtube_enabled for a guild. Returns the new state."""
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO guild_settings (guild_id, youtube_enabled, updated_at)
-            VALUES ($1, TRUE, NOW())
-            ON CONFLICT (guild_id) DO UPDATE
-                SET youtube_enabled = NOT COALESCE(guild_settings.youtube_enabled, TRUE),
-                    updated_at = NOW()
-            RETURNING youtube_enabled;
-            """,
-            guild_id,
-        )
-    enabled = bool(row["youtube_enabled"])
-    logger.info("youtube_enabled=%s for guild_id=%s", enabled, guild_id)
-    return enabled
 
 
 async def claim_ping_slot(pool: asyncpg.Pool, guild_id: int, cooldown_hours: int) -> bool:

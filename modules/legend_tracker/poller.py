@@ -77,7 +77,7 @@ async def get_clan(clan_tag: str) -> dict | None:
     """Fetch full clan data from GET /clans/{tag}.
 
     The response carries both the clan's own display `name` and its `memberList`,
-    so one call gives the clan-watch poller everything it needs to name the clan
+    so one call gives the watchdog poller everything it needs to name the clan
     a member is in (used for the "from → to" movement in alerts). Returns the raw
     clan dict, or None on failure.
     """
@@ -102,7 +102,7 @@ async def get_clan_members(clan_tag: str) -> list[dict] | None:
     """Fetch a clan's current member list from GET /clans/{tag}/members.
 
     Returns the list of member dicts (each has 'tag', 'name', ...) or None on
-    failure. One call covers the whole clan, so the clan-watch poller uses this
+    failure. One call covers the whole clan, so the watchdog poller uses this
     instead of hitting /players per roster member.
     """
     url = f"{settings.COC_API_BASE_URL}/clans/{_encode_tag(clan_tag)}/members"

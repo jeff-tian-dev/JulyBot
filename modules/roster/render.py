@@ -1,6 +1,6 @@
 """Shared rendering for the roster list.
 
-Both the ephemeral `/roster view` command and the auto-posted clan-watch board
+Both the ephemeral `/roster view` command and the auto-posted watchdog board
 render the same numbered inline-code bubbles, so the formatting lives here (a
 module) rather than in the Discord cog — the cog and the watcher both import it.
 """
@@ -188,7 +188,7 @@ def leaderboard_embeds(name: str, raw_rows: list[dict]) -> list[disnake.Embed]:
 def inout_cell(m: dict) -> str:
     """The daily-board mark and today's time out, as one cell.
 
-    Same text the 1am leaderboard shows in its check and out columns:
+    Same text the daily leaderboard shows in its check and out columns:
     ✅/❌ for in a family clan right now, then today's accumulated time out.
     """
     if m.get("in_main_clan") is None:

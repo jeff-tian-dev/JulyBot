@@ -101,8 +101,11 @@ class Settings:
     COC_FAMILY_CLAN_TAGS: list[str] = field(default_factory=list)
     CLAN_WATCH_CHANNEL_ID: int = 0
     CLAN_WATCH_POLL_INTERVAL_MINUTES: int = 10
-    CLAN_WATCH_DAILY_HOUR: int = 1
-    CLAN_WATCH_TIMEZONE: str = "America/New_York"
+    # The daily watchdog board lines up with the CoC legend-day reset, which is
+    # 05:00 UTC all year. UTC has no DST, so it lands at midnight Eastern in
+    # winter and 1am in summer, tracking the game instead of a wall clock.
+    CLAN_WATCH_DAILY_HOUR: int = 5
+    CLAN_WATCH_TIMEZONE: str = "UTC"
     RANKED_TRACKING_POLL_INTERVAL_MINUTES: int = 20
     # Read-only use: mapping product pages' Payment Links, listing a server's
     # checkouts when an admin confirms a payment, and re-checking status on a
@@ -149,8 +152,8 @@ def _load() -> Settings:
         COC_FAMILY_CLAN_TAGS=_csv("COC_FAMILY_CLAN_TAGS"),
         CLAN_WATCH_CHANNEL_ID=_int("CLAN_WATCH_CHANNEL_ID", 0),
         CLAN_WATCH_POLL_INTERVAL_MINUTES=_int("CLAN_WATCH_POLL_INTERVAL_MINUTES", 10),
-        CLAN_WATCH_DAILY_HOUR=_int("CLAN_WATCH_DAILY_HOUR", 1),
-        CLAN_WATCH_TIMEZONE=_optional("CLAN_WATCH_TIMEZONE", "America/New_York"),
+        CLAN_WATCH_DAILY_HOUR=_int("CLAN_WATCH_DAILY_HOUR", 5),
+        CLAN_WATCH_TIMEZONE=_optional("CLAN_WATCH_TIMEZONE", "UTC"),
         RANKED_TRACKING_POLL_INTERVAL_MINUTES=_int("RANKED_TRACKING_POLL_INTERVAL_MINUTES", 20),
         STRIPE_SECRET_KEY=_optional("STRIPE_SECRET_KEY", ""),
         SUBSCRIBER_REFRESH_INTERVAL_MINUTES=_int("SUBSCRIBER_REFRESH_INTERVAL_MINUTES", 60),

@@ -1,4 +1,7 @@
-"""/setup — per-server configuration, plus the welcome message when the bot joins.
+"""/setup and /toggle — per-server configuration, plus the welcome message on join.
+
+/toggle sets a posting feature (roll call, watchdog, X, YouTube) to on, testing
+or off; see modules/guild_config/modes.py for what each mode does.
 
 Thin Cog layer: parse args, call modules.guild_config, format the reply. Every
 value set here is scoped to the server it was run in; nothing falls back to
@@ -12,7 +15,7 @@ import disnake
 from disnake.ext import commands
 
 from config.settings import settings
-from modules.guild_config import storage
+from modules.guild_config import modes, storage
 from modules.guild_config.setup import SetupError, add_family_clan
 from modules.subscriptions import products
 
@@ -23,6 +26,15 @@ NO_PINGS = disnake.AllowedMentions.none()
 SETUP_COLOUR = 0x5865F2
 FEED_CHOICES = {"X": "x", "YouTube": "youtube"}
 FEED_LABELS = {"x": "X", "youtube": "YouTube"}
+FEATURE_CHOICES = {f.label: key for key, f in modes.FEATURES.items()}
+MODE_CHOICES = {"On": modes.ON, "Testing": modes.TESTING, "Off": modes.OFF}
+# The command that sets each feature's own channel (used in hints).
+SET_CHANNEL_COMMANDS = {
+    "rollcall": "/setup rollcall",
+    "watchdog": "/setup watchdog",
+    "x": "/x setchannel",
+    "youtube": "/yt setchannel",
+}
 # What the bot needs in any channel it posts embeds to.
 POSTING_PERMS = ("view_channel", "send_messages", "embed_links")
 
@@ -61,6 +73,56 @@ def _role_line(guild: disnake.Guild, role_id: int | None, feed: str) -> str:
     return f"Pings {role.mention}"
 
 
+def _mode_line(config: dict, feature: str) -> str:
+    """One feature's /toggle mode for /setup status."""
+    mode = modes.mode_of(config, feature)
+    label = modes.FEATURES[feature].label
+    if mode == modes.ON:
+        return "Mode: 🟢 On"
+    if mode == modes.OFF:
+        return f"Mode: ⚪ Off — `/toggle feature:{label} mode:On` to turn it on"
+    test_channel_id = config.get(modes.TEST_CHANNEL_COLUMN)
+    if not test_channel_id:
+        return "Mode: 🧪 Testing — ⚠️ no test channel, so nothing posts — `/setup testchannel`"
+    return f"Mode: 🧪 Testing — posts go to <#{test_channel_id}> instead, without pings"
+
+
+def _test_channel_line(guild: disnake.Guild, config: dict) -> str:
+    if config.get(modes.TEST_CHANNEL_COLUMN):
+        return _channel_line(guild, config.get(modes.TEST_CHANNEL_COLUMN), "/setup testchannel")
+    testing = [
+        f.label for key, f in modes.FEATURES.items() if modes.mode_of(config, key) == modes.TESTING
+    ]
+    if testing:
+        return f"⚠️ Not set, but {', '.join(testing)} is in testing mode — `/setup testchannel`"
+    return "Not set — `/setup testchannel` before using testing mode"
+
+
+def toggle_reply(config: dict, feature: str, mode: str) -> str:
+    """What /toggle says after changing a feature's mode, including anything missing."""
+    label = modes.FEATURES[feature].label
+    if mode == modes.OFF:
+        return f"**{label}** is now **off** — it won't post anything."
+    if mode == modes.TESTING:
+        test_channel_id = config.get(modes.TEST_CHANNEL_COLUMN)
+        if not test_channel_id:
+            return (
+                f"**{label}** is now **testing**, but there's no test channel, so nothing will "
+                "post until you run `/setup testchannel`."
+            )
+        return (
+            f"**{label}** is now **testing** — it posts in <#{test_channel_id}>, "
+            "without pinging anyone."
+        )
+    channel_id = config.get(modes.FEATURES[feature].channel_column)
+    if not channel_id:
+        return (
+            f"**{label}** is now **on**, but it has no channel yet — "
+            f"`{SET_CHANNEL_COMMANDS[feature]}`."
+        )
+    return f"**{label}** is now **on** — it posts in <#{channel_id}>."
+
+
 def build_status_embed(
     guild: disnake.Guild, config: dict, clans: list[dict], product_count: int = 0
 ) -> disnake.Embed:
@@ -76,6 +138,7 @@ def build_status_embed(
         value=_channel_line(guild, config.get("mod_log_channel_id"), "/setup modlog"),
         inline=False,
     )
+    embed.add_field(name="Test channel", value=_test_channel_line(guild, config), inline=False)
 
     if clans:
         clan_text = ", ".join(
@@ -85,25 +148,34 @@ def build_status_embed(
     else:
         clan_line = "⚠️ No clans — `/setup clan add`"
     embed.add_field(
-        name="Clan watch",
+        name="Watchdog",
         value=(
             f"Clans: {clan_line}\n"
-            f"Alerts: {_channel_line(guild, config.get('clan_watch_channel_id'), '/setup clanwatch')}\n"
+            f"Alerts: {_channel_line(guild, config.get('clan_watch_channel_id'), '/setup watchdog')}\n"
+            f"{_mode_line(config, 'watchdog')}\n"
             "Pick rosters to watch with `/roster watch`."
         ),
         inline=False,
     )
+    embed.add_field(
+        name="Roll call",
+        value=(
+            f"Reports: {_channel_line(guild, config.get('rollcall_channel_id'), '/setup rollcall')}\n"
+            f"{_mode_line(config, 'rollcall')}\n"
+            "Daily at the legend reset, for the watchdog's clans and watched rosters."
+        ),
+        inline=False,
+    )
 
-    for feed, label, channel_key, enabled_key, role_key, fix in (
-        ("x", "X posts", "twitter_channel_id", "twitter_enabled", "twitter_ping_role_id", "/x setchannel"),
-        ("youtube", "YouTube videos", "youtube_channel_id", "youtube_enabled", "youtube_ping_role_id", "/yt setchannel"),
+    for feed, label, channel_key, role_key, fix in (
+        ("x", "X posts", "twitter_channel_id", "twitter_ping_role_id", "/x setchannel"),
+        ("youtube", "YouTube videos", "youtube_channel_id", "youtube_ping_role_id", "/yt setchannel"),
     ):
         if feed == "x" and not settings.X_COOKIES:
             embed.add_field(name=label, value="Not available on this bot right now.", inline=False)
             continue
         lines = [_channel_line(guild, config.get(channel_key), fix)]
-        if config.get(enabled_key) is False:
-            lines.append(f"⏸️ Paused — `/{'x' if feed == 'x' else 'yt'} toggle` to resume")
+        lines.append(_mode_line(config, feed))
         lines.append(_role_line(guild, config.get(role_key), feed))
         embed.add_field(name=label, value="\n".join(lines), inline=False)
 
@@ -126,7 +198,7 @@ def welcome_embed() -> disnake.Embed:
         title="Thanks for adding me!",
         description=(
             "Admins: run `/setup status` to see what to set up here — mod log, "
-            "clan watch, X/YouTube post channels and `/subscribe` buttons. "
+            "watchdog, roll call, X/YouTube post channels and `/subscribe` buttons. "
             "Everything is per server.\n\n"
             "Everyone: run `/help` to see what I can do."
         ),
@@ -215,21 +287,45 @@ class SetupCommands(commands.Cog):
     ) -> None:
         await self._set_channel(inter, "mod_log_channel_id", channel, "The mod log")
 
-    @setup_group.sub_command(name="clanwatch", description="Set where clan leave/rejoin alerts and daily boards post.")
-    async def clanwatch(
+    @setup_group.sub_command(name="watchdog", description="Set where clan leave/rejoin alerts and daily boards post.")
+    async def watchdog(
         self,
         inter: disnake.ApplicationCommandInteraction,
         channel: disnake.TextChannel = commands.Param(
-            default=None, description="Leave empty to turn clan-watch alerts off."
+            default=None, description="Leave empty to turn watchdog alerts off."
         ),
     ) -> None:
-        await self._set_channel(inter, "clan_watch_channel_id", channel, "Clan watch")
+        await self._set_channel(inter, "clan_watch_channel_id", channel, "Watchdog")
+
+    @setup_group.sub_command(
+        name="rollcall", description="Set where the daily roll call (who missed the reset) posts."
+    )
+    async def rollcall(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        channel: disnake.TextChannel = commands.Param(
+            default=None, description="Leave empty to clear it."
+        ),
+    ) -> None:
+        await self._set_channel(inter, "rollcall_channel_id", channel, "Roll call")
+
+    @setup_group.sub_command(
+        name="testchannel", description="Set where features in testing mode post (no pings)."
+    )
+    async def testchannel(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        channel: disnake.TextChannel = commands.Param(
+            default=None, description="Leave empty to clear it."
+        ),
+    ) -> None:
+        await self._set_channel(inter, "test_channel_id", channel, "Testing mode")
 
     @setup_group.sub_command_group(name="clan")
     async def clan(self, inter: disnake.ApplicationCommandInteraction) -> None:
         """Subcommand group; disnake never invokes this directly."""
 
-    @clan.sub_command(name="add", description="Add a clan to this server's family for clan watch.")
+    @clan.sub_command(name="add", description="Add a clan to this server's family for the watchdog.")
     async def clan_add(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -292,6 +388,24 @@ class SetupCommands(commands.Cog):
                 "so the ping won't notify anyone until one of those changes."
             )
         await inter.response.send_message(message, ephemeral=True, allowed_mentions=NO_PINGS)
+
+    @commands.slash_command(
+        name="toggle",
+        description="Admin: set a feature to on, testing (test channel, no pings) or off.",
+        default_member_permissions=ADMIN_PERMS,
+    )
+    async def toggle(
+        self,
+        inter: disnake.ApplicationCommandInteraction,
+        feature: str = commands.Param(choices=FEATURE_CHOICES, description="Which feature."),
+        mode: str = commands.Param(choices=MODE_CHOICES, description="On, testing or off."),
+    ) -> None:
+        await modes.set_mode(self.bot.pool, inter.guild.id, feature, mode)
+        config = await storage.get_guild_config(self.bot.pool, inter.guild.id)
+        reply = toggle_reply(config, feature, mode)
+        if feature == "x" and not settings.X_COOKIES:
+            reply += "\nNote: X isn't available on this bot right now, so nothing posts either way."
+        await inter.response.send_message(reply, ephemeral=True, allowed_mentions=NO_PINGS)
 
 
 def setup(bot: commands.InteractionBot) -> None:

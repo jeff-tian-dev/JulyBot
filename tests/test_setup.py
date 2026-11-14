@@ -54,7 +54,7 @@ def test_status_flags_everything_missing_on_a_fresh_server() -> None:
 
     fields = _fields(embed)
     assert "Not set" in fields["Mod log"] and "/setup modlog" in fields["Mod log"]
-    assert "No clans" in fields["Clan watch"] and "/setup clanwatch" in fields["Clan watch"]
+    assert "No clans" in fields["Watchdog"] and "/setup watchdog" in fields["Watchdog"]
     assert "/x setchannel" in fields["X posts"]
     assert "/yt setchannel" in fields["YouTube videos"]
     assert "/product add" in fields["Purchases"]
@@ -79,8 +79,8 @@ def test_status_shows_configured_values_and_missing_permissions() -> None:
         fields = _fields(setup_commands.build_status_embed(guild, config, clans))
 
     assert fields["Mod log"] == "✅ <#1>"
-    assert "July" in fields["Clan watch"] and "#2PP" in fields["Clan watch"]
-    assert "missing: Embed Links" in fields["Clan watch"]
+    assert "July" in fields["Watchdog"] and "#2PP" in fields["Watchdog"]
+    assert "missing: Embed Links" in fields["Watchdog"]
     # X needs operator cookies; without them it's unavailable on every server.
     assert "Not available" in fields["X posts"]
 
@@ -141,12 +141,12 @@ async def test_modlog_saves_the_channel_for_this_server_only() -> None:
 
 
 @pytest.mark.asyncio
-async def test_clanwatch_with_no_channel_turns_it_off() -> None:
+async def test_watchdog_with_no_channel_turns_it_off() -> None:
     inter = _interaction()
     cog = _cog()
 
     with patch.object(setup_commands.storage, "set_channel", AsyncMock()) as set_channel:
-        await cog.clanwatch.callback(cog, inter, channel=None)
+        await cog.watchdog.callback(cog, inter, channel=None)
 
     assert set_channel.await_args.args[1:] == (7, "clan_watch_channel_id", None)
     assert "turned off" in inter.response.send_message.await_args.args[0]

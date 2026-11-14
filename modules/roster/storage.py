@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 MAX_NAME_LEN = 100
 # /roster view reuses cached CoC data (name + clan) this fresh instead of
 # calling the API again. Keyed per tag, shared across every roster.
-# Clan watch rewrites this cache every poll (default 10 min) for anyone in a
+# Watchdog rewrites this cache every poll (default 10 min) for anyone in a
 # family clan. The TTL is longer than that gap so a roster view between polls
 # does not refetch those players one API call at a time.
 PLAYER_CACHE_TTL_SECONDS = 15 * 60
@@ -141,7 +141,7 @@ async def list_rosters(pool: asyncpg.Pool, guild_id: int) -> list[dict]:
 
 
 async def set_watched(pool: asyncpg.Pool, guild_id: int, name: str, watched: bool) -> str:
-    """Toggle clan-watch on a roster. Returns the stored name. Raises if missing."""
+    """Toggle watchdog on a roster. Returns the stored name. Raises if missing."""
     roster = await _require_roster(pool, guild_id, name)
     async with pool.acquire() as conn:
         await conn.execute("UPDATE rosters SET watched = $1 WHERE id = $2;", watched, roster["id"])
@@ -152,7 +152,7 @@ async def set_watched(pool: asyncpg.Pool, guild_id: int, name: str, watched: boo
 async def get_watched_rosters(pool: asyncpg.Pool) -> list[dict]:
     """Every watched roster (id, guild_id, name, watch_message_id) across all guilds.
 
-    Used by the clan-watch poller to refresh each one's live watchlist board.
+    Used by the watchdog poller to refresh each one's live watchlist board.
     """
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -172,7 +172,7 @@ async def set_watch_message_id(pool: asyncpg.Pool, roster_id: int, message_id: i
 async def warm_player_cache(pool: asyncpg.Pool, entries) -> None:
     """Bulk-refresh the CoC player cache from already-fetched (tag, name, clan, trophies).
 
-    The clan-watch poll fetches every family clan's member list; handing that data
+    The watchdog poll fetches every family clan's member list; handing that data
     to the cache lets /roster view and the watchlist board skip per-player API
     calls for anyone in the family (their cache row is fresh).
     """
@@ -237,6 +237,40 @@ async def get_roster_tags(pool: asyncpg.Pool, roster_id: int) -> list[str]:
         if r["coc_tag"] and r["coc_tag"] not in tags:
             tags.append(r["coc_tag"])
     return tags
+
+
+async def get_rollcall_members(pool: asyncpg.Pool, roster_id: int) -> list[dict]:
+    """[{coc_tag, discord_id}] for one roster, for the daily roll call.
+
+    Tags resolve exactly as the watchdog's do (a Discord member checks their
+    oldest linked account). discord_id is the Discord user to name or ping: the
+    member themself, or whoever linked a tag-only member's tag; None if nobody did.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT COALESCE(
+                       m.coc_tag,
+                       (SELECT coc_tag FROM users WHERE discord_id = m.discord_id
+                        ORDER BY linked_at ASC LIMIT 1)
+                   ) AS coc_tag,
+                   COALESCE(
+                       m.discord_id,
+                       (SELECT discord_id FROM users WHERE coc_tag = m.coc_tag)
+                   ) AS discord_id
+            FROM roster_members m
+            WHERE m.roster_id = $1
+            ORDER BY m.id;
+            """,
+            roster_id,
+        )
+    members: list[dict] = []
+    seen: set[str] = set()
+    for r in rows:
+        if r["coc_tag"] and r["coc_tag"] not in seen:
+            seen.add(r["coc_tag"])
+            members.append({"coc_tag": r["coc_tag"], "discord_id": r["discord_id"]})
+    return members
 
 
 async def get_daily_board_state(pool: asyncpg.Pool, guild_id: int, tags: list[str]) -> dict[str, dict]:
@@ -443,7 +477,7 @@ async def _membership_for_view(pool: asyncpg.Pool, guild_id: int, tags: list[str
     return {r["coc_tag"]: dict(r) for r in rows}
 
 
-# --- clan-watch membership state (maintained by modules/roster/watcher.py) --
+# --- watchdog membership state (maintained by modules/roster/watcher.py) --
 
 async def get_watched_tags(pool: asyncpg.Pool) -> list[dict]:
     """Every (guild_id, roster_name, coc_tag) across all watched rosters.

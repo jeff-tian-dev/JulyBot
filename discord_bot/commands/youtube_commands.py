@@ -1,10 +1,11 @@
-"""/yt setchannel, /yt toggle, /yt add, /yt remove, /yt list."""
+"""/yt setchannel, /yt add, /yt remove, /yt list. On/testing/off is /toggle feature:YouTube."""
 from __future__ import annotations
 
 import disnake
 from disnake.ext import commands
 
 from discord_bot.time_format import discord_relative_timestamp
+from modules.guild_config import modes
 from modules.youtube_feed import fetcher, storage
 
 ADMIN_PERMS = disnake.Permissions(administrator=True)
@@ -49,15 +50,6 @@ class YoutubeCommands(commands.Cog):
             f"New YouTube videos will be posted in {channel.mention}.",
             ephemeral=True,
         )
-
-    @yt.sub_command(
-        name="toggle",
-        description="Enable or disable YouTube feed monitoring for this server.",
-    )
-    async def toggle(self, inter: disnake.ApplicationCommandInteraction) -> None:
-        enabled = await storage.toggle_youtube(self.bot.pool, inter.guild.id)
-        state = "enabled" if enabled else "disabled"
-        await inter.response.send_message(f"YouTube feed monitoring is now **{state}**.", ephemeral=True)
 
     @yt.sub_command(
         name="add",
@@ -114,12 +106,8 @@ class YoutubeCommands(commands.Cog):
         channels = await storage.list_watched_channels(self.bot.pool, inter.guild.id)
         settings_row = await storage.get_youtube_settings(self.bot.pool, inter.guild.id)
 
-        enabled = True
-        if settings_row is not None:
-            enabled = bool(settings_row.get("youtube_enabled", True))
-
-        status = "enabled" if enabled else "disabled"
-        lines = [f"**YouTube monitoring:** {status}"]
+        mode = modes.normalize((settings_row or {}).get("youtube_mode"), modes.ON)
+        lines = [f"**YouTube monitoring:** {mode} (change with `/toggle feature:YouTube`)"]
 
         channel_id = settings_row.get("youtube_channel_id") if settings_row else None
         if channel_id:

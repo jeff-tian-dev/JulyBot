@@ -8,6 +8,7 @@ import asyncpg
 import disnake
 
 from config.settings import settings
+from modules.guild_config import modes
 from modules.youtube_feed import embeds as embeds_mod
 from modules.youtube_feed import fetcher
 from modules.youtube_feed import storage
@@ -52,10 +53,16 @@ async def poll_youtube_channels(pool: asyncpg.Pool, bot: disnake.Client) -> dict
     for watched in channels:
         guild_id = watched["guild_id"]
         channel_id = watched["channel_id"]
-        discord_channel_id = watched.get("youtube_channel_id")
-        enabled = watched.get("youtube_enabled")
+        # Rows written before /toggle existed only carry the on/off flag.
+        mode = modes.normalize(
+            watched.get("youtube_mode"),
+            modes.OFF if watched.get("youtube_enabled") is False else modes.ON,
+        )
+        discord_channel_id = modes.target_channel_id(
+            mode, watched.get("youtube_channel_id"), watched.get("test_channel_id")
+        )
 
-        if not discord_channel_id or enabled is False:
+        if not discord_channel_id:
             continue
 
         discord_channel = bot.get_channel(discord_channel_id)
@@ -101,16 +108,24 @@ async def poll_youtube_channels(pool: asyncpg.Pool, bot: disnake.Client) -> dict
         # either way — just without the mention when muted.
         ping_role_id = watched.get("youtube_ping_role_id")
         mention = _role_ping_content(ping_role_id)
-        ping = bool(mention) and await storage.claim_ping_slot(
-            pool, guild_id, settings.YOUTUBE_PING_COOLDOWN_HOURS
-        )
+        if mode == modes.TESTING:
+            # Testing never pings: show the role's name where the mention would be,
+            # and leave the cooldown alone so it can't mute a real ping later.
+            content = modes.role_preview(bot, guild_id, ping_role_id) if mention else None
+            allowed = disnake.AllowedMentions.none()
+        else:
+            ping = bool(mention) and await storage.claim_ping_slot(
+                pool, guild_id, settings.YOUTUBE_PING_COOLDOWN_HOURS
+            )
+            content = mention if ping else None
+            allowed = _role_ping_allowed_mentions(ping_role_id) if ping else None
 
         try:
             embed = embeds_mod.build_video_embed(latest)
             await discord_channel.send(
-                content=mention if ping else None,
+                content=content,
                 embed=embed,
-                allowed_mentions=_role_ping_allowed_mentions(ping_role_id) if ping else None,
+                allowed_mentions=allowed,
             )
             summary["videos_posted"] += 1
         except Exception:

@@ -16,7 +16,8 @@ from modules.base_finder.pipeline import run_pipeline
 from modules.legend_tracker.poller import poll_all_legend_players
 from modules.legend_tracker.snapshots import save_snapshot
 from modules.ranked_tracker.tracking import poll_ranked_tracking
-from modules.roster.watcher import poll_clan_watch, run_daily_watchlist
+from modules.roster.rollcall import run_rollcall
+from modules.roster.watcher import poll_watchdog, run_daily_watchlist
 from modules.subscriptions.refresh import refresh_subscribers
 from modules.x_monitor.poller import poll_website_accounts, poll_x_accounts
 from modules.youtube_feed.poller import poll_youtube_channels
@@ -24,7 +25,7 @@ from modules.youtube_feed.poller import poll_youtube_channels
 logger = logging.getLogger(__name__)
 
 # Cap wall-clock time so a hung HTTP/Discord/yt-dlp call cannot hold max_instances=1
-# forever and stall every later run (see logs 2026-10-24: poll_clan_watch never finished).
+# forever and stall every later run (see logs 2026-10-24: poll_clan_watch, now poll_watchdog, never finished).
 _JOB_TIMEOUT_BUFFER_SECONDS = 60
 _REFRESH_BASE_CACHE_MAX_SECONDS = 2 * 3600
 _STUCK_SESSION_CHECK_INTERVAL_MINUTES = 10
@@ -207,23 +208,23 @@ async def poll_youtube(pool: asyncpg.Pool, bot: disnake.Client) -> None:
     await _run_with_timeout(_body(), job_id="poll_youtube_feed", timeout_seconds=timeout)
 
 
-async def poll_clan_watch_job(pool: asyncpg.Pool, bot: disnake.Client) -> None:
+async def poll_watchdog_job(pool: asyncpg.Pool, bot: disnake.Client) -> None:
     """Scheduled job: alert on watched-roster members leaving/rejoining the family."""
     timeout = _interval_job_timeout(settings.CLAN_WATCH_POLL_INTERVAL_MINUTES)
 
     async def _body() -> None:
         try:
-            summary = await poll_clan_watch(pool, bot)
+            summary = await poll_watchdog(pool, bot)
             if summary.get("alerts") or summary.get("error"):
-                logger.info("Clan watch summary: %s", summary)
+                logger.info("Watchdog summary: %s", summary)
         except Exception:
-            logger.exception("poll_clan_watch raised")
+            logger.exception("poll_watchdog raised")
 
-    await _run_with_timeout(_body(), job_id="poll_clan_watch", timeout_seconds=timeout)
+    await _run_with_timeout(_body(), job_id="poll_watchdog", timeout_seconds=timeout)
 
 
 async def daily_watchlist_job(pool: asyncpg.Pool, bot: disnake.Client) -> None:
-    """Scheduled job (1am): post each watched roster's daily leaderboard, then reset."""
+    """Scheduled job (05:00 UTC, the CoC legend-day reset): post each watched roster's daily leaderboard, then reset."""
 
     async def _body() -> None:
         try:
@@ -233,6 +234,19 @@ async def daily_watchlist_job(pool: asyncpg.Pool, bot: disnake.Client) -> None:
             logger.exception("run_daily_watchlist raised")
 
     await _run_with_timeout(_body(), job_id="daily_watchlist", timeout_seconds=1800)
+
+
+async def daily_rollcall_job(pool: asyncpg.Pool, bot: disnake.Client) -> None:
+    """Scheduled job (05:00 UTC): report watched members who weren't in the family at reset."""
+
+    async def _body() -> None:
+        try:
+            summary = await run_rollcall(pool, bot)
+            logger.info("Roll call summary: %s", summary)
+        except Exception:
+            logger.exception("run_rollcall raised")
+
+    await _run_with_timeout(_body(), job_id="daily_rollcall", timeout_seconds=1800)
 
 
 async def ranked_tracking_job(pool: asyncpg.Pool, bot: disnake.Client) -> None:
@@ -333,10 +347,10 @@ def create_scheduler(pool: asyncpg.Pool, bot: disnake.Client) -> AsyncIOSchedule
     # there's no single config value to gate on. Servers with no clans are skipped
     # inside the poll.
     scheduler.add_job(
-        poll_clan_watch_job,
+        poll_watchdog_job,
         trigger=IntervalTrigger(minutes=settings.CLAN_WATCH_POLL_INTERVAL_MINUTES),
         kwargs={"pool": pool, "bot": bot},
-        id="poll_clan_watch",
+        id="poll_watchdog",
         replace_existing=True,
     )
     scheduler.add_job(
@@ -348,6 +362,19 @@ def create_scheduler(pool: asyncpg.Pool, bot: disnake.Client) -> AsyncIOSchedule
         ),
         kwargs={"pool": pool, "bot": bot},
         id="daily_watchlist",
+        replace_existing=True,
+    )
+    # Same moment as the daily board: the legend reset. Always registered; each
+    # server's /toggle mode (default off) decides whether it posts.
+    scheduler.add_job(
+        daily_rollcall_job,
+        trigger=CronTrigger(
+            hour=settings.CLAN_WATCH_DAILY_HOUR,
+            minute=0,
+            timezone=settings.CLAN_WATCH_TIMEZONE,
+        ),
+        kwargs={"pool": pool, "bot": bot},
+        id="daily_rollcall",
         replace_existing=True,
     )
 

@@ -107,7 +107,29 @@ ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS youtube_ping_role_id BIGINT;
 ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS legacy_config_imported BOOLEAN NOT NULL DEFAULT FALSE;
 """
 
-# A server's clan "family" for clan watch: a watched member is "in" when they're
+# On/testing/off per posting feature (set with /toggle, see
+# modules/guild_config/modes.py), the server's test channel that "testing" posts
+# to, and roll call's own channel. Existing rows get each feature's default:
+# 'on' for X/YouTube/watchdog (what they did before), 'off' for roll call (new).
+# The UPDATEs carry a paused X/YouTube feed (enabled = FALSE) over as 'off'.
+# They're safe to re-run on every start: modes.set_mode keeps *_enabled in step
+# with the mode, so after the first run they match no rows.
+ALTER_GUILD_SETTINGS_MODES = """
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS test_channel_id BIGINT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS rollcall_channel_id BIGINT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS rollcall_mode VARCHAR(10) NOT NULL DEFAULT 'off'
+    CHECK (rollcall_mode IN ('on', 'testing', 'off'));
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS watchdog_mode VARCHAR(10) NOT NULL DEFAULT 'on'
+    CHECK (watchdog_mode IN ('on', 'testing', 'off'));
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS twitter_mode VARCHAR(10) NOT NULL DEFAULT 'on'
+    CHECK (twitter_mode IN ('on', 'testing', 'off'));
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS youtube_mode VARCHAR(10) NOT NULL DEFAULT 'on'
+    CHECK (youtube_mode IN ('on', 'testing', 'off'));
+UPDATE guild_settings SET twitter_mode = 'off' WHERE twitter_enabled IS FALSE AND twitter_mode = 'on';
+UPDATE guild_settings SET youtube_mode = 'off' WHERE youtube_enabled IS FALSE AND youtube_mode = 'on';
+"""
+
+# A server's clan "family" for the watchdog: a watched member is "in" when they're
 # in ANY of their server's clans. Replaces the global COC_CLAN_TAG /
 # COC_FAMILY_CLAN_TAGS settings. clan_name is cached for display only.
 CREATE_GUILD_CLANS = """
@@ -216,14 +238,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_roster_members_tag
 """
 
 # A watched roster gets clan leave/rejoin alerts and absence tracking.
-# watch_message_id is the id of the auto-refreshed watchlist board the clan-watch
+# watch_message_id is the id of the auto-refreshed watchlist board the watchdog
 # poller keeps in the alert channel (deleted + reposted each poll).
 ALTER_ROSTERS_WATCHED = """
 ALTER TABLE rosters ADD COLUMN IF NOT EXISTS watched BOOLEAN DEFAULT FALSE;
 ALTER TABLE rosters ADD COLUMN IF NOT EXISTS watch_message_id BIGINT;
 """
 
-# Per-tag main-clan membership state, maintained by the clan-watch poller.
+# Per-tag main-clan membership state, maintained by the watchdog poller.
 # `left_at` is when the current absence began (NULL when in clan, or unknown if
 # the tag was already out when first seen). `total_absent_seconds` accumulates
 # completed absences; the current open stint is added on the fly when displayed.
@@ -275,7 +297,7 @@ ALTER_CLAN_MEMBERSHIP_CLAN_NAME = """
 ALTER TABLE clan_membership ADD COLUMN IF NOT EXISTS clan_name VARCHAR(100);
 """
 
-# Out-of-family time accumulated during the current day; the daily 1am board
+# Out-of-family time accumulated during the current day; the daily board (05:00 UTC)
 # reports it and then resets it to 0.
 ALTER_CLAN_MEMBERSHIP_DAILY = """
 ALTER TABLE clan_membership ADD COLUMN IF NOT EXISTS daily_absent_seconds BIGINT NOT NULL DEFAULT 0;
@@ -746,6 +768,8 @@ async def create_tables(pool: asyncpg.Pool, home_guild_id: int = 0) -> None:
 
         logger.info("Applying guild_settings multi-server columns if needed")
         await conn.execute(ALTER_GUILD_SETTINGS_MULTI_SERVER)
+        logger.info("Applying guild_settings feature-mode columns if needed")
+        await conn.execute(ALTER_GUILD_SETTINGS_MODES)
         logger.info("Creating table guild_clans if not exists")
         await conn.execute(CREATE_GUILD_CLANS)
 

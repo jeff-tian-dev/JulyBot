@@ -19,18 +19,30 @@ logger = logging.getLogger(__name__)
 
 # Columns /setup may write. The column name is interpolated into SQL, so it must
 # come from this whitelist and never from user input.
-CHANNEL_COLUMNS = ("mod_log_channel_id", "clan_watch_channel_id")
+CHANNEL_COLUMNS = (
+    "mod_log_channel_id",
+    "clan_watch_channel_id",
+    "rollcall_channel_id",
+    "test_channel_id",
+)
 PING_ROLE_COLUMNS = {"x": "twitter_ping_role_id", "youtube": "youtube_ping_role_id"}
 
 _CONFIG_FIELDS = (
     "mod_log_channel_id",
     "clan_watch_channel_id",
+    "rollcall_channel_id",
+    "test_channel_id",
     "twitter_ping_role_id",
     "youtube_ping_role_id",
     "twitter_channel_id",
     "twitter_enabled",
     "youtube_channel_id",
     "youtube_enabled",
+    # On/testing/off per feature; see modules/guild_config/modes.py.
+    "rollcall_mode",
+    "watchdog_mode",
+    "twitter_mode",
+    "youtube_mode",
 )
 
 
@@ -125,7 +137,7 @@ async def list_clans(pool: asyncpg.Pool, guild_id: int) -> list[dict]:
 
 
 async def clans_by_guild(pool: asyncpg.Pool) -> dict[int, list[str]]:
-    """{guild_id: [clan_tag, ...]} for every server with a clan family (for clan watch)."""
+    """{guild_id: [clan_tag, ...]} for every server with a clan family (for the watchdog)."""
     async with pool.acquire() as conn:
         rows = await conn.fetch("SELECT guild_id, clan_tag FROM guild_clans ORDER BY added_at;")
     out: dict[int, list[str]] = {}

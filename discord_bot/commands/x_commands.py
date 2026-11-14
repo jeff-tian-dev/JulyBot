@@ -1,4 +1,4 @@
-"""/x setchannel, /x toggle, /x add, /x remove, /x list."""
+"""/x setchannel, /x add, /x remove, /x list. On/testing/off is /toggle feature:X."""
 from __future__ import annotations
 
 import disnake
@@ -6,6 +6,7 @@ from disnake.ext import commands
 
 from config.settings import settings
 from discord_bot.time_format import discord_relative_timestamp
+from modules.guild_config import modes
 from modules.x_monitor import storage
 from modules.x_monitor.snowflake import tweet_id_to_datetime
 
@@ -53,19 +54,6 @@ class XCommands(commands.Cog):
             f"New X posts will be published in {channel.mention}.",
             ephemeral=True,
         )
-
-    @x.sub_command(
-        name="toggle",
-        description="Enable or disable X monitoring for this server.",
-    )
-    async def toggle(self, inter: disnake.ApplicationCommandInteraction) -> None:
-        if not settings.X_COOKIES:
-            await inter.response.send_message(NOT_CONFIGURED_MSG, ephemeral=True)
-            return
-
-        enabled = await storage.toggle_x(self.bot.pool, inter.guild.id)
-        state = "enabled" if enabled else "disabled"
-        await inter.response.send_message(f"X monitoring is now **{state}**.", ephemeral=True)
 
     @x.sub_command(
         name="add",
@@ -127,12 +115,8 @@ class XCommands(commands.Cog):
         accounts = await storage.list_watched_accounts(self.bot.pool, inter.guild.id)
         settings_row = await storage.get_x_settings(self.bot.pool, inter.guild.id)
 
-        enabled = True
-        if settings_row is not None:
-            enabled = bool(settings_row.get("x_enabled", True))
-
-        status = "enabled" if enabled else "disabled"
-        lines = [f"**X monitoring:** {status}"]
+        mode = modes.normalize((settings_row or {}).get("x_mode"), modes.ON)
+        lines = [f"**X monitoring:** {mode} (change with `/toggle feature:X`)"]
 
         channel_id = settings_row.get("x_channel_id") if settings_row else None
         if channel_id:

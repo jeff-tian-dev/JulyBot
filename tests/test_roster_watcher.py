@@ -119,7 +119,7 @@ async def test_poll_detects_leave_and_rejoin(monkeypatch) -> None:
     monkeypatch.setattr(watcher.storage, "touch_name", AsyncMock())
 
     channel = _channel()
-    result = await watcher.poll_clan_watch(MagicMock(), _fake_bot(channel))
+    result = await watcher.poll_watchdog(MagicMock(), _fake_bot(channel))
 
     assert result["watched_tags"] == 2 and result["alerts"] == 2
     watcher.storage.mark_left.assert_awaited_once()
@@ -152,7 +152,7 @@ async def test_poll_seeds_first_sight_silently(monkeypatch) -> None:
     monkeypatch.setattr(watcher.storage, "seed_membership", seed)
 
     channel = _channel()
-    result = await watcher.poll_clan_watch(MagicMock(), _fake_bot(channel))
+    result = await watcher.poll_watchdog(MagicMock(), _fake_bot(channel))
     assert result["watched_tags"] == 1 and result["alerts"] == 0
     seed.assert_awaited_once()
     assert seed.await_args.args[1] == 1  # seeded for its own server
@@ -187,7 +187,7 @@ async def test_in_family_if_in_any_clan(monkeypatch) -> None:
     monkeypatch.setattr(watcher.storage, "mark_joined", AsyncMock(return_value=600))
     monkeypatch.setattr(watcher.storage, "mark_left", AsyncMock())
 
-    result = await watcher.poll_clan_watch(MagicMock(), _fake_bot(_channel()))
+    result = await watcher.poll_watchdog(MagicMock(), _fake_bot(_channel()))
     assert result["alerts"] == 1
     watcher.storage.mark_joined.assert_awaited_once()  # rejoined via clan B
     watcher.storage.mark_left.assert_not_awaited()
@@ -215,7 +215,7 @@ async def test_poll_skips_server_on_any_clan_fetch_failure(monkeypatch) -> None:
     monkeypatch.setattr(watcher.storage, "get_membership_map", AsyncMock())
     channel = _channel()
 
-    result = await watcher.poll_clan_watch(MagicMock(), _fake_bot(channel))
+    result = await watcher.poll_watchdog(MagicMock(), _fake_bot(channel))
     assert result["failed_guilds"] == 1 and result["alerts"] == 0
     mark_left.assert_not_awaited()  # no false "left" alerts when a clan is unreachable
     channel.send.assert_not_awaited()
@@ -243,7 +243,7 @@ async def test_one_servers_clan_failure_does_not_skip_another(monkeypatch) -> No
     mark_left = AsyncMock()
     monkeypatch.setattr(watcher.storage, "mark_left", mark_left)
 
-    result = await watcher.poll_clan_watch(MagicMock(), _fake_bot(_channel(1), _channel(2)))
+    result = await watcher.poll_watchdog(MagicMock(), _fake_bot(_channel(1), _channel(2)))
 
     assert result["failed_guilds"] == 1
     mark_left.assert_awaited_once()
@@ -280,7 +280,7 @@ async def test_same_player_is_tracked_separately_per_server(monkeypatch) -> None
     monkeypatch.setattr(watcher.storage, "touch_name", AsyncMock())
     july, ug = _channel(1), _channel(2)
 
-    result = await watcher.poll_clan_watch(MagicMock(), _fake_bot(july, ug))
+    result = await watcher.poll_watchdog(MagicMock(), _fake_bot(july, ug))
 
     assert result["alerts"] == 1
     mark_left.assert_awaited_once()
@@ -308,7 +308,7 @@ async def test_shared_clan_is_fetched_once_per_poll(monkeypatch) -> None:
         AsyncMock(return_value=_membership(**{"#X": ("Xx", True, "S")})),
     )
 
-    result = await watcher.poll_clan_watch(MagicMock(), _fake_bot(_channel(1), _channel(2)))
+    result = await watcher.poll_watchdog(MagicMock(), _fake_bot(_channel(1), _channel(2)))
     assert result["guilds"] == 2
     get_clan.assert_awaited_once()
 
@@ -324,7 +324,7 @@ async def test_server_without_clans_is_skipped(monkeypatch) -> None:
     get_clan = AsyncMock()
     monkeypatch.setattr(watcher, "get_clan", get_clan)
 
-    result = await watcher.poll_clan_watch(MagicMock(), _fake_bot(_channel()))
+    result = await watcher.poll_watchdog(MagicMock(), _fake_bot(_channel()))
     assert result["guilds"] == 0
     get_clan.assert_not_awaited()
 
@@ -475,7 +475,7 @@ async def test_poll_warms_cache_from_clan_data(monkeypatch) -> None:
     warm = AsyncMock()
     monkeypatch.setattr(watcher.storage, "warm_player_cache", warm)
 
-    await watcher.poll_clan_watch(MagicMock(), _fake_bot(_channel()))
+    await watcher.poll_watchdog(MagicMock(), _fake_bot(_channel()))
     warm.assert_awaited_once()
     entries = list(warm.await_args.args[1])
     assert ("#X", "Xx", "July", None) in entries  # (tag, name, clan, trophies)
@@ -499,7 +499,7 @@ async def test_poll_retries_a_failed_clan_fetch(monkeypatch) -> None:
         AsyncMock(return_value=_membership(**{"#X": ("Xx", True, "July")})),
     )
 
-    result = await watcher.poll_clan_watch(MagicMock(), _fake_bot(_channel()))
+    result = await watcher.poll_watchdog(MagicMock(), _fake_bot(_channel()))
     assert result["failed_guilds"] == 0
     assert get_clan.await_count == 2
 

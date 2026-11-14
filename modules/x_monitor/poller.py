@@ -9,6 +9,7 @@ import disnake
 from tweety.exceptions import RateLimitReached
 
 from config.settings import settings
+from modules.guild_config import modes
 from modules.x_monitor import client as x_client
 from modules.x_monitor import embeds as embeds_mod
 from modules.x_monitor import storage
@@ -170,10 +171,15 @@ async def poll_x_accounts(pool: asyncpg.Pool, bot: disnake.Client) -> dict:
     for account in accounts:
         guild_id = account["guild_id"]
         username = account["username"]
-        channel_id = account.get("x_channel_id")
-        enabled = account.get("x_enabled")
+        # Rows written before /toggle existed only carry the on/off flag.
+        mode = modes.normalize(
+            account.get("x_mode"), modes.OFF if account.get("x_enabled") is False else modes.ON
+        )
+        channel_id = modes.target_channel_id(
+            mode, account.get("x_channel_id"), account.get("test_channel_id")
+        )
 
-        if not channel_id or enabled is False:
+        if not channel_id:
             continue
 
         channel = bot.get_channel(channel_id)
@@ -239,17 +245,25 @@ async def poll_x_accounts(pool: asyncpg.Pool, bot: disnake.Client) -> dict:
             # either way — just without the mention when muted.
             ping_role_id = account.get("x_ping_role_id")
             mention = _role_ping_content(ping_role_id)
-            ping = bool(mention) and await storage.claim_ping_slot(
-                pool, guild_id, settings.X_PING_COOLDOWN_HOURS
-            )
+            if mode == modes.TESTING:
+                # Testing never pings: show the role's name where the mention would
+                # be, and leave the cooldown alone so it can't mute a real ping later.
+                content = modes.role_preview(bot, guild_id, ping_role_id) if mention else None
+                allowed = disnake.AllowedMentions.none()
+            else:
+                ping = bool(mention) and await storage.claim_ping_slot(
+                    pool, guild_id, settings.X_PING_COOLDOWN_HOURS
+                )
+                content = mention if ping else None
+                allowed = _role_ping_allowed_mentions(ping_role_id) if ping else None
 
             try:
                 tweet_embeds, components = embeds_mod.build_tweet_message(tweet)
                 await channel.send(
-                    content=mention if ping else None,
+                    content=content,
                     embeds=tweet_embeds,
                     components=components,
-                    allowed_mentions=_role_ping_allowed_mentions(ping_role_id) if ping else None,
+                    allowed_mentions=allowed,
                 )
             except Exception:
                 logger.exception(

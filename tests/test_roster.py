@@ -168,7 +168,7 @@ async def test_resolve_players_stale_fallback_on_api_fail(monkeypatch) -> None:
     assert result["#ABC"] == {"coc_name": "Old", "clan_name": "July", "trophies": 3200, "coc_api_ok": True}
 
 
-# --- clan-watch ------------------------------------------------------------
+# --- watchdog --------------------------------------------------------------
 
 def test_format_duration() -> None:
     assert storage.format_duration(None) is None

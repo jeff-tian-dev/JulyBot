@@ -96,6 +96,8 @@ async def get_all_watched_accounts(pool: asyncpg.Pool) -> list[dict]:
             SELECT w.id, w.guild_id, w.username, w.last_seen_tweet_id, w.added_at,
                    g.twitter_channel_id AS x_channel_id,
                    g.twitter_enabled AS x_enabled,
+                   g.twitter_mode AS x_mode,
+                   g.test_channel_id,
                    g.twitter_ping_role_id AS x_ping_role_id
             FROM twitter_watched_accounts w
             LEFT JOIN guild_settings g ON g.guild_id = w.guild_id
@@ -106,13 +108,13 @@ async def get_all_watched_accounts(pool: asyncpg.Pool) -> list[dict]:
 
 
 async def get_x_settings(pool: asyncpg.Pool, guild_id: int) -> dict | None:
-    """Return X output channel + enabled flag for a guild."""
+    """Return X output channel + mode for a guild."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT guild_id,
                    twitter_channel_id AS x_channel_id,
-                   twitter_enabled AS x_enabled
+                   twitter_mode AS x_mode
             FROM guild_settings
             WHERE guild_id = $1;
             """,
@@ -138,25 +140,6 @@ async def set_x_channel(pool: asyncpg.Pool, guild_id: int, channel_id: int) -> N
             channel_id,
         )
     logger.info("x_channel_id=%s for guild_id=%s", channel_id, guild_id)
-
-
-async def toggle_x(pool: asyncpg.Pool, guild_id: int) -> bool:
-    """Flip X monitoring for a guild. Returns the new state."""
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO guild_settings (guild_id, twitter_enabled, updated_at)
-            VALUES ($1, TRUE, NOW())
-            ON CONFLICT (guild_id) DO UPDATE
-                SET twitter_enabled = NOT COALESCE(guild_settings.twitter_enabled, TRUE),
-                    updated_at = NOW()
-            RETURNING twitter_enabled AS x_enabled;
-            """,
-            guild_id,
-        )
-    enabled = bool(row["x_enabled"])
-    logger.info("x_enabled=%s for guild_id=%s", enabled, guild_id)
-    return enabled
 
 
 async def claim_ping_slot(pool: asyncpg.Pool, guild_id: int, cooldown_hours: int) -> bool:

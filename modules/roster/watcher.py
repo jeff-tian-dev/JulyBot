@@ -1,7 +1,7 @@
-"""Clan-watch poller: alert when watched-roster members leave/rejoin their server's family.
+"""Watchdog poller: alert when watched-roster members leave/rejoin their server's family.
 
 Each server sets up its own "family" — one or more clans (guild_clans, added with
-/setup clan add) — and its own alert channel (/setup clanwatch). A watched tag is
+/setup clan add) — and its own alert channel (/setup watchdog). A watched tag is
 "in" if it's in ANY of its server's family clans, "out" if in none, so members
 hopping between family clans never trigger an alert. Membership state
 (clan_membership) is kept per server: the same player can be in one server's
@@ -23,6 +23,7 @@ import asyncpg
 import disnake
 
 from config.settings import settings
+from modules.guild_config import modes
 from modules.guild_config import storage as guild_config
 from modules.legend_tracker.poller import get_clan, get_player
 from modules.roster import render, storage
@@ -54,7 +55,7 @@ async def _fetch_clan(clan_tag: str) -> dict | None:
         if clan is not None or attempt == CLAN_FETCH_ATTEMPTS:
             return clan
         logger.info(
-            "Clan watch: fetch failed for %s (attempt %d/%d); retrying",
+            "Watchdog: fetch failed for %s (attempt %d/%d); retrying",
             clan_tag, attempt, CLAN_FETCH_ATTEMPTS,
         )
         await asyncio.sleep(CLAN_FETCH_RETRY_DELAY_SECONDS)
@@ -93,35 +94,11 @@ async def _destination_clan(coc_tag: str) -> str | None:
 
 
 async def _watch_channel(bot: disnake.Client, pool: asyncpg.Pool, guild_id: int):
-    """The server's clan-watch channel, or None when unset/unreachable.
+    """Where the server's watchdog posts right now (its channel, the test channel or None).
 
-    A channel that resolves to a different server is refused, so one server's
-    alerts can never land in another's.
+    Follows the watchdog's /toggle mode; see modules/guild_config/modes.py.
     """
-    config = await guild_config.get_guild_config(pool, guild_id)
-    channel_id = config.get("clan_watch_channel_id")
-    if not channel_id:
-        logger.debug("Clan watch: no channel set for guild=%s", guild_id)
-        return None
-    channel = bot.get_channel(channel_id)
-    if channel is None:
-        try:
-            channel = await asyncio.wait_for(
-                bot.fetch_channel(channel_id),
-                timeout=_DISCORD_OP_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("Clan watch: timed out fetching channel %s", channel_id)
-            return None
-        except disnake.HTTPException:
-            logger.warning("Clan watch: channel %s not found", channel_id)
-            return None
-    channel_guild = getattr(channel, "guild", None)
-    if channel_guild is None or channel_guild.id != guild_id:
-        logger.warning(
-            "Clan watch: channel %s is not in guild=%s; not posting", channel_id, guild_id
-        )
-        return None
+    _mode, channel = await modes.feature_channel(bot, pool, guild_id, "watchdog")
     return channel
 
 
@@ -138,9 +115,9 @@ async def _post_alerts(bot: disnake.Client, pool: asyncpg.Pool, guild_id: int, a
                 timeout=_DISCORD_OP_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
-            logger.warning("Clan watch: timed out sending alert for %s", alert["tag"])
+            logger.warning("Watchdog: timed out sending alert for %s", alert["tag"])
         except disnake.HTTPException:
-            logger.exception("Clan watch: failed to send alert for %s", alert["tag"])
+            logger.exception("Watchdog: failed to send alert for %s", alert["tag"])
 
 
 async def build_daily_rows(
@@ -195,7 +172,11 @@ async def _post_guild_boards(
     pool: asyncpg.Pool, bot: disnake.Client, guild_id: int, rosters: list[dict], family: set[str]
 ) -> dict:
     """Post the daily boards for one server's watched rosters."""
-    channel = await _watch_channel(bot, pool, guild_id)
+    mode, channel = await modes.feature_channel(bot, pool, guild_id, "watchdog")
+    if mode == modes.OFF:
+        # Off means no posts, not no tracking: the day still ends, so the caller
+        # resets the counters instead of letting them pile up until it's back on.
+        return {"off": True, "rosters": 0}
     if channel is None:
         # Can't reach the channel to post the board *or* a failure notice.
         return {"error": "no channel", "failed": len(rosters)}
@@ -285,7 +266,7 @@ async def _poll_guild(
         clan = clans[clan_tag]
         if clan is None:
             logger.warning(
-                "Clan watch: fetch failed for %s; skipping guild=%s to avoid false alerts",
+                "Watchdog: fetch failed for %s; skipping guild=%s to avoid false alerts",
                 clan_tag,
                 guild_id,
             )
@@ -358,7 +339,7 @@ async def _poll_guild(
     return alerts
 
 
-async def poll_clan_watch(pool: asyncpg.Pool, bot: disnake.Client) -> dict:
+async def poll_watchdog(pool: asyncpg.Pool, bot: disnake.Client) -> dict:
     """Compare every server's watched-roster members against that server's family."""
     watched = await storage.get_watched_tags(pool)
     if not watched:
@@ -383,7 +364,7 @@ async def poll_clan_watch(pool: asyncpg.Pool, bot: disnake.Client) -> dict:
         try:
             alerts = await _poll_guild(pool, guild_id, tags, family, clans)
         except Exception:
-            logger.exception("Clan watch failed for guild=%s", guild_id)
+            logger.exception("Watchdog failed for guild=%s", guild_id)
             summary["failed_guilds"] += 1
             continue
         if alerts is None:

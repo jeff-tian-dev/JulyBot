@@ -12,7 +12,7 @@ from modules.legend_tracker.poller import get_clan
 
 logger = logging.getLogger(__name__)
 
-# Every family clan is fetched from the CoC API on each clan-watch poll, and anyone
+# Every family clan is fetched from the CoC API on each watchdog poll, and anyone
 # can add the bot, so cap how many one server can register.
 MAX_CLANS_PER_GUILD = 10
 
