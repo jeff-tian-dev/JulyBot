@@ -17,7 +17,6 @@ to the modal's callback, which defers first.
 """
 from __future__ import annotations
 
-import io
 import logging
 
 import disnake
@@ -144,9 +143,10 @@ class ContentModal(disnake.ui.Modal):
 
 async def _send_preview(inter: disnake.Interaction, record: dict) -> None:
     """Show the admin what a ticket of this type will open with."""
-    data = await images.load(inter.guild.id, record.get("image"))
-    filename = record.get("image") if data else None
-    kwargs = {"file": disnake.File(io.BytesIO(data), filename=filename)} if data else {}
+    banner = await service.load_media(inter.guild.id, record.get("image"))
+    thumbnail = await service.load_media(inter.guild.id, record.get("thumbnail"))
+    files = service.media_files(banner, thumbnail)
+    kwargs = {"files": files} if files else {}
     try:
         await inter.followup.send(
             components=render.build_ticket_components(
@@ -154,7 +154,8 @@ async def _send_preview(inter: disnake.Interaction, record: dict) -> None:
                 ticket_id=0,
                 opener_id=None,
                 staff_role_ids=[],
-                image_filename=filename,
+                image_filename=banner[0],
+                thumbnail_filename=thumbnail[0],
                 preview=True,
             ),
             ephemeral=True,
@@ -349,6 +350,12 @@ class TicketCommands(commands.Cog):
             default=None, description="A banner shown full width under the text."
         ),
         remove_image: bool = commands.Param(default=False, description="Take the current banner off."),
+        thumbnail: disnake.Attachment = commands.Param(
+            default=None, description="A small picture top-right, beside the text."
+        ),
+        remove_thumbnail: bool = commands.Param(
+            default=False, description="Take the current thumbnail off."
+        ),
     ) -> None:
         config = await storage.get_config(self.bot.pool, inter.guild.id)
         if config is None:
@@ -356,6 +363,7 @@ class TicketCommands(commands.Cog):
             return
         try:
             check_image(image)
+            check_image(thumbnail)
         except TicketError as exc:
             await inter.response.send_message(f"⚠️ {exc}", ephemeral=True)
             return
@@ -366,8 +374,15 @@ class TicketCommands(commands.Cog):
             filename = await apply_image(
                 guild.id, images.PANEL_STEM, config.get("panel_image"), image, remove_image
             )
+            thumb = await apply_image(
+                guild.id,
+                images.PANEL_THUMBNAIL_STEM,
+                config.get("panel_thumbnail"),
+                thumbnail,
+                remove_thumbnail,
+            )
             await storage.set_panel_content(
-                self.bot.pool, guild.id, title=title, body=body, image=filename
+                self.bot.pool, guild.id, title=title, body=body, image=filename, thumbnail=thumb
             )
             message = await service.publish_panel(self.bot.pool, guild)
             await modal_inter.edit_original_response(content=f"The panel is up: {message.jump_url}")
@@ -402,12 +417,16 @@ class TicketCommands(commands.Cog):
         image: disnake.Attachment = commands.Param(
             default=None, description="A banner shown at the top of every ticket of this type."
         ),
+        thumbnail: disnake.Attachment = commands.Param(
+            default=None, description="A small picture top-right, beside the ticket's text."
+        ),
     ) -> None:
         pool = self.bot.pool
         try:
             name = render.validate_name(name)
             emoji = render.resolve_emoji(emoji, usable_emojis(self.bot, inter.guild))
             check_image(image)
+            check_image(thumbnail)
             types = await storage.list_types(pool, inter.guild.id)
             if len(types) >= render.MAX_TICKET_TYPES:
                 raise TicketError(
@@ -437,17 +456,32 @@ class TicketCommands(commands.Cog):
                 raise TicketError(f"There's already a ticket type called **{name}**.") from exc
 
             notes: list[str] = []
-            if image is not None:
-                # The file is named after the type's id, so it's saved second.
+            if image is not None or thumbnail is not None:
+                # Files are named after the type's id, so they're saved second.
+                filename = thumb = None
                 try:
                     filename = await apply_image(
                         guild.id, images.type_stem(record["id"]), None, image, False
                     )
-                    record = await storage.update_type(
-                        pool, record["id"], name=name, emoji=emoji, title=title, body=body, image=filename
-                    ) or record
                 except TicketError as exc:
-                    notes.append(f"⚠️ Saved without the image: {exc}")
+                    notes.append(f"⚠️ Saved without the banner: {exc}")
+                try:
+                    thumb = await apply_image(
+                        guild.id, images.type_thumbnail_stem(record["id"]), None, thumbnail, False
+                    )
+                except TicketError as exc:
+                    notes.append(f"⚠️ Saved without the thumbnail: {exc}")
+                if filename or thumb:
+                    record = await storage.update_type(
+                        pool,
+                        record["id"],
+                        name=name,
+                        emoji=emoji,
+                        title=title,
+                        body=body,
+                        image=filename,
+                        thumbnail=thumb,
+                    ) or record
             note = await service.refresh_panel(pool, guild)
             if note:
                 notes.append(note)
@@ -466,7 +500,7 @@ class TicketCommands(commands.Cog):
             )
         )
 
-    @type_group.sub_command(name="edit", description="Change a ticket type's name, emoji, banner or opening message.")
+    @type_group.sub_command(name="edit", description="Change a ticket type's name, emoji, pictures or opening message.")
     async def type_edit(
         self,
         inter: disnake.ApplicationCommandInteraction,
@@ -481,6 +515,12 @@ class TicketCommands(commands.Cog):
         remove_emoji: bool = commands.Param(default=False, description="Take the emoji off the button."),
         image: disnake.Attachment = commands.Param(default=None, description="A new banner."),
         remove_image: bool = commands.Param(default=False, description="Take the current banner off."),
+        thumbnail: disnake.Attachment = commands.Param(
+            default=None, description="A new small picture top-right, beside the text."
+        ),
+        remove_thumbnail: bool = commands.Param(
+            default=False, description="Take the current thumbnail off."
+        ),
     ) -> None:
         pool = self.bot.pool
         record = await storage.get_type_by_name(pool, inter.guild.id, name)
@@ -493,6 +533,7 @@ class TicketCommands(commands.Cog):
             final_name = render.validate_name(new_name) if new_name else record["name"]
             new_emoji = render.resolve_emoji(emoji, usable_emojis(self.bot, inter.guild))
             check_image(image)
+            check_image(thumbnail)
         except TicketError as exc:
             await inter.response.send_message(f"⚠️ {exc}", ephemeral=True)
             return
@@ -504,6 +545,13 @@ class TicketCommands(commands.Cog):
             filename = await apply_image(
                 guild.id, images.type_stem(record["id"]), record.get("image"), image, remove_image
             )
+            thumb = await apply_image(
+                guild.id,
+                images.type_thumbnail_stem(record["id"]),
+                record.get("thumbnail"),
+                thumbnail,
+                remove_thumbnail,
+            )
             try:
                 updated = await storage.update_type(
                     pool,
@@ -513,6 +561,7 @@ class TicketCommands(commands.Cog):
                     title=title,
                     body=body,
                     image=filename,
+                    thumbnail=thumb,
                 )
             except storage.DuplicateTypeError as exc:
                 raise TicketError(f"There's already a ticket type called **{final_name}**.") from exc
@@ -553,6 +602,7 @@ class TicketCommands(commands.Cog):
             )
             return
         await images.delete(inter.guild.id, record.get("image"))
+        await images.delete(inter.guild.id, record.get("thumbnail"))
         lines = [
             f"Removed **{record['name']}**. Tickets of that type that are already open stay "
             "open and can still be closed."
@@ -576,6 +626,8 @@ class TicketCommands(commands.Cog):
             extras = [t["title"]] if t.get("title") else []
             if t.get("image"):
                 extras.append("has a banner")
+            if t.get("thumbnail"):
+                extras.append("has a thumbnail")
             lines.append(f"- {label}**{t['name']}**" + (f" — {', '.join(extras)}" if extras else ""))
         await inter.response.send_message("\n".join(lines), ephemeral=True, allowed_mentions=NO_PINGS)
 

@@ -692,6 +692,7 @@ CREATE TABLE IF NOT EXISTS ticket_config (
     panel_title VARCHAR(256),
     panel_body TEXT,
     panel_image VARCHAR(100),
+    panel_thumbnail VARCHAR(100),
     updated_at TIMESTAMP DEFAULT NOW()
 );
 """
@@ -709,12 +710,35 @@ CREATE TABLE IF NOT EXISTS ticket_types (
     title VARCHAR(256),
     body TEXT,
     image VARCHAR(100),
+    thumbnail VARCHAR(100),
     created_by BIGINT NOT NULL,
     created_at TIMESTAMP DEFAULT NOW(),
     removed_at TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ticket_types_guild_name
     ON ticket_types (guild_id, lower(name)) WHERE removed_at IS NULL;
+"""
+
+# The small top-right picture (a components-v2 section thumbnail), added after
+# the ticket tables shipped. Each ALTER is guarded by an information_schema check,
+# so once the column exists startup never takes the table lock again (an
+# unguarded ADD COLUMN IF NOT EXISTS still locks — the 2026-10-29 hang).
+MIGRATE_TICKET_THUMBNAILS = """
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'ticket_config' AND column_name = 'panel_thumbnail'
+    ) THEN
+        ALTER TABLE ticket_config ADD COLUMN panel_thumbnail VARCHAR(100);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'ticket_types' AND column_name = 'thumbnail'
+    ) THEN
+        ALTER TABLE ticket_types ADD COLUMN thumbnail VARCHAR(100);
+    END IF;
+END $$;
 """
 
 # Roles that can see every ticket and close them (admins always can).
@@ -903,6 +927,7 @@ async def create_tables(pool: asyncpg.Pool, home_guild_id: int = 0) -> None:
         logger.info("Creating ticket tables if not exist")
         await conn.execute(CREATE_TICKET_CONFIG)
         await conn.execute(CREATE_TICKET_TYPES)
+        await conn.execute(MIGRATE_TICKET_THUMBNAILS)
         await conn.execute(CREATE_TICKET_STAFF_ROLES)
         # After ticket_types: it references them.
         await conn.execute(CREATE_TICKETS)

@@ -5,7 +5,8 @@ Pure — no pool and no Discord calls — so it is unit-testable on its own.
 
 **Layout is components v2**, the same as /postbase: one accent-coloured
 container holding a heading, a separator, the body, the banner as a full-width
-media gallery, and the buttons. disnake sets the IS_COMPONENTS_V2 flag itself
+media gallery, and the buttons. An optional thumbnail puts the heading and body
+in a section with the small picture top-right instead. disnake sets the IS_COMPONENTS_V2 flag itself
 and refuses `content` or `embeds` alongside these, so a v2 message never
 carries either. Text displays render Discord markdown (bold, italics, bullet
 lists, `#` headings), which is all the formatting the admin-written text needs.
@@ -174,14 +175,35 @@ def parse_custom_id(value: str | None) -> tuple[str, int] | None:
 
 # --- components ---------------------------------------------------------------
 
-def _content_children(title: str | None, body: str | None, image_filename: str | None) -> list:
+def _content_children(
+    title: str | None,
+    body: str | None,
+    image_filename: str | None,
+    thumbnail_filename: str | None = None,
+) -> list:
+    """Heading, body and banner. With a thumbnail, the heading and body sit in a
+    section with the small picture top-right (a section can't hold a separator,
+    so that layout has none). A section needs text beside it, so a thumbnail on
+    a message with no text is left out."""
     children: list = []
+    texts: list = []
     if title:
-        children.append(disnake.ui.TextDisplay(f"## {title}"))
-        if body:
-            children.append(disnake.ui.Separator())
+        texts.append(disnake.ui.TextDisplay(f"## {title}"))
     if body:
-        children.append(disnake.ui.TextDisplay(body))
+        texts.append(disnake.ui.TextDisplay(body))
+    if thumbnail_filename and texts:
+        children.append(
+            disnake.ui.Section(
+                *texts, accessory=disnake.ui.Thumbnail(f"attachment://{thumbnail_filename}")
+            )
+        )
+    else:
+        if title:
+            children.append(texts[0])
+            if body:
+                children.append(disnake.ui.Separator())
+        if body:
+            children.append(texts[-1])
     if image_filename:
         children.append(
             disnake.ui.MediaGallery(disnake.MediaGalleryItem(f"attachment://{image_filename}"))
@@ -203,10 +225,16 @@ def type_button(ticket_type: dict) -> disnake.ui.Button:
 
 
 def build_panel_components(
-    config: dict, types: list[dict], *, image_filename: str | None
+    config: dict,
+    types: list[dict],
+    *,
+    image_filename: str | None,
+    thumbnail_filename: str | None = None,
 ) -> list[disnake.ui.Container]:
     """The panel: the admin's message, then one button per ticket type."""
-    children = _content_children(config.get("panel_title"), config.get("panel_body"), image_filename)
+    children = _content_children(
+        config.get("panel_title"), config.get("panel_body"), image_filename, thumbnail_filename
+    )
     buttons = [type_button(t) for t in types[:MAX_TICKET_TYPES]]
     for start in range(0, len(buttons), BUTTONS_PER_ROW):
         children.append(disnake.ui.ActionRow(*buttons[start : start + BUTTONS_PER_ROW]))
@@ -228,6 +256,7 @@ def build_ticket_components(
     opener_id: int | None,
     staff_role_ids: list[int],
     image_filename: str | None,
+    thumbnail_filename: str | None = None,
     preview: bool = False,
 ) -> list:
     """The message at the top of a ticket: the type's content and a Close button.
@@ -237,7 +266,9 @@ def build_ticket_components(
     mentions). `preview=True` drops it and disables the button, for showing an
     admin what the type will look like.
     """
-    children = _content_children(ticket_type.get("title"), ticket_type.get("body"), image_filename)
+    children = _content_children(
+        ticket_type.get("title"), ticket_type.get("body"), image_filename, thumbnail_filename
+    )
     children.append(
         disnake.ui.ActionRow(
             disnake.ui.Button(

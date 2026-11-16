@@ -113,6 +113,18 @@ def _file(data: bytes | None, filename: str | None) -> disnake.File | None:
     return disnake.File(io.BytesIO(data), filename=filename)
 
 
+async def load_media(guild_id: int, stored: str | None) -> tuple[str | None, bytes | None]:
+    """(filename to reference, bytes) — both None when there's no image or its file is gone."""
+    data = await images.load(guild_id, stored)
+    return (stored if data else None), data
+
+
+def media_files(*media: tuple[str | None, bytes | None]) -> list[disnake.File]:
+    """Fresh File objects for each loaded image (a File can only be sent once)."""
+    files = [_file(data, filename) for filename, data in media]
+    return [f for f in files if f is not None]
+
+
 # --- panel --------------------------------------------------------------------
 
 async def publish_panel(pool: asyncpg.Pool, guild: disnake.Guild) -> disnake.Message:
@@ -132,25 +144,26 @@ async def publish_panel(pool: asyncpg.Pool, guild: disnake.Guild) -> disnake.Mes
         raise TicketError("The open-ticket channel was deleted — run `/ticket setup` again.")
 
     types = await storage.list_types(pool, guild.id)
-    data = await images.load(guild.id, config.get("panel_image"))
-    filename = config.get("panel_image") if data else None
-    components = render.build_panel_components(config, types, image_filename=filename)
+    banner = await load_media(guild.id, config.get("panel_image"))
+    thumbnail = await load_media(guild.id, config.get("panel_thumbnail"))
+    components = render.build_panel_components(
+        config, types, image_filename=banner[0], thumbnail_filename=thumbnail[0]
+    )
 
     message_id = config.get("panel_message_id")
     if message_id:
-        file = _file(data, filename)
         try:
             return await channel.get_partial_message(message_id).edit(
                 components=components,
-                files=[file] if file else [],
+                files=media_files(banner, thumbnail),
                 attachments=[],
                 allowed_mentions=NO_PINGS,
             )
         except disnake.NotFound:
             logger.info("Ticket panel message %s is gone in guild=%s; reposting", message_id, guild.id)
 
-    file = _file(data, filename)
-    kwargs = {"file": file} if file else {}
+    files = media_files(banner, thumbnail)
+    kwargs = {"files": files} if files else {}
     message = await channel.send(components=components, allowed_mentions=NO_PINGS, **kwargs)
     await storage.set_panel_message(pool, guild.id, message.id)
     return message
@@ -263,17 +276,18 @@ async def open_ticket(
 
     try:
         await storage.attach_channel(pool, ticket["id"], channel.id)
-        data = await images.load(guild.id, ticket_type.get("image"))
-        filename = ticket_type.get("image") if data else None
-        file = _file(data, filename)
-        kwargs = {"file": file} if file else {}
+        banner = await load_media(guild.id, ticket_type.get("image"))
+        thumbnail = await load_media(guild.id, ticket_type.get("thumbnail"))
+        files = media_files(banner, thumbnail)
+        kwargs = {"files": files} if files else {}
         await channel.send(
             components=render.build_ticket_components(
                 ticket_type,
                 ticket_id=ticket["id"],
                 opener_id=member.id,
                 staff_role_ids=[role.id for role in roles],
-                image_filename=filename,
+                image_filename=banner[0],
+                thumbnail_filename=thumbnail[0],
             ),
             allowed_mentions=disnake.AllowedMentions(
                 everyone=False, users=[member], roles=roles[: render.MAX_STAFF_ROLES]

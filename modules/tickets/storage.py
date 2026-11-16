@@ -80,19 +80,22 @@ async def set_panel_content(
     title: str | None,
     body: str | None,
     image: str | None,
+    thumbnail: str | None,
 ) -> None:
-    """Overwrite what the panel says. All three values are the final ones."""
+    """Overwrite what the panel says. Every value is the final one."""
     async with pool.acquire() as conn:
         await conn.execute(
             """
             UPDATE ticket_config
-            SET panel_title = $2, panel_body = $3, panel_image = $4, updated_at = NOW()
+            SET panel_title = $2, panel_body = $3, panel_image = $4, panel_thumbnail = $5,
+                updated_at = NOW()
             WHERE guild_id = $1;
             """,
             guild_id,
             title,
             body,
             image,
+            thumbnail,
         )
 
 
@@ -179,6 +182,7 @@ async def update_type(
     title: str | None,
     body: str | None,
     image: str | None,
+    thumbnail: str | None,
 ) -> dict | None:
     """Overwrite a live ticket type. Every value is the final one.
 
@@ -189,7 +193,7 @@ async def update_type(
             row = await conn.fetchrow(
                 """
                 UPDATE ticket_types
-                SET name = $2, emoji = $3, title = $4, body = $5, image = $6
+                SET name = $2, emoji = $3, title = $4, body = $5, image = $6, thumbnail = $7
                 WHERE id = $1 AND removed_at IS NULL
                 RETURNING *;
                 """,
@@ -199,6 +203,7 @@ async def update_type(
                 title,
                 body,
                 image,
+                thumbnail,
             )
         except asyncpg.UniqueViolationError as exc:
             raise DuplicateTypeError(name) from exc

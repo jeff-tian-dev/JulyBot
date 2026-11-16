@@ -328,7 +328,7 @@ async def test_panel_needs_setup_first() -> None:
     inter = _interaction()
     cog = _cog()
     with patch.object(storage, "get_config", AsyncMock(return_value=None)):
-        await cog.panel.callback(cog, inter, image=None, remove_image=False)
+        await cog.panel.callback(cog, inter, image=None, remove_image=False, thumbnail=None, remove_thumbnail=False)
     inter.response.send_modal.assert_not_awaited()
     assert "/ticket setup" in _sent_text(inter)
 
@@ -339,7 +339,7 @@ async def test_panel_opens_a_pre_filled_form_then_saves_and_publishes() -> None:
     cog = _cog()
     config = {"panel_title": "Old title", "panel_body": "Old body", "panel_image": None}
     with patch.object(storage, "get_config", AsyncMock(return_value=config)):
-        await cog.panel.callback(cog, inter, image=None, remove_image=False)
+        await cog.panel.callback(cog, inter, image=None, remove_image=False, thumbnail=None, remove_thumbnail=False)
 
     # The form is the first response; nothing slow may come before it.
     inter.response.defer.assert_not_awaited()
@@ -357,7 +357,9 @@ async def test_panel_opens_a_pre_filled_form_then_saves_and_publishes() -> None:
         await modal.callback(submit)
 
     submit.response.defer.assert_awaited_once_with(ephemeral=True)
-    assert save.await_args.kwargs == {"title": "Open a ticket", "body": "- one\n- two", "image": None}
+    assert save.await_args.kwargs == {
+        "title": "Open a ticket", "body": "- one\n- two", "image": None, "thumbnail": None,
+    }
     publish.assert_awaited_once_with("pool", submit.guild)
     assert "https://discord.com/x" in _edited_text(submit)
 
@@ -367,7 +369,7 @@ async def test_panel_form_reports_bad_input_instead_of_timing_out() -> None:
     inter = _interaction()
     cog = _cog()
     with patch.object(storage, "get_config", AsyncMock(return_value={})):
-        await cog.panel.callback(cog, inter, image=None, remove_image=False)
+        await cog.panel.callback(cog, inter, image=None, remove_image=False, thumbnail=None, remove_thumbnail=False)
     modal = inter.response.send_modal.await_args.args[0]
 
     submit = _interaction()
@@ -384,7 +386,8 @@ async def test_panel_rejects_a_bad_image_before_the_admin_writes_anything() -> N
     cog = _cog()
     with patch.object(storage, "get_config", AsyncMock(return_value={})):
         await cog.panel.callback(
-            cog, inter, image=_attachment("a.pdf", content_type="application/pdf"), remove_image=False
+            cog, inter, image=_attachment("a.pdf", content_type="application/pdf"), remove_image=False,
+            thumbnail=None, remove_thumbnail=False,
         )
     inter.response.send_modal.assert_not_awaited()
     assert "supported image" in _sent_text(inter)
@@ -398,7 +401,7 @@ async def test_type_add_refuses_a_duplicate_name_before_opening_the_form() -> No
     inter = _interaction()
     cog = _cog()
     with patch.object(storage, "list_types", AsyncMock(return_value=[_type()])):
-        await cog.type_add.callback(cog, inter, name="support", emoji=None, image=None)
+        await cog.type_add.callback(cog, inter, name="support", emoji=None, image=None, thumbnail=None)
     inter.response.send_modal.assert_not_awaited()
     assert "already a ticket type" in _sent_text(inter)
 
@@ -409,7 +412,7 @@ async def test_type_add_refuses_past_the_button_limit() -> None:
     cog = _cog()
     full = [_type(id=i, name=f"T{i}") for i in range(render.MAX_TICKET_TYPES)]
     with patch.object(storage, "list_types", AsyncMock(return_value=full)):
-        await cog.type_add.callback(cog, inter, name="One more", emoji=None, image=None)
+        await cog.type_add.callback(cog, inter, name="One more", emoji=None, image=None, thumbnail=None)
     inter.response.send_modal.assert_not_awaited()
     assert str(render.MAX_TICKET_TYPES) in _sent_text(inter)
 
@@ -419,7 +422,7 @@ async def test_type_add_refuses_a_word_as_the_emoji() -> None:
     inter = _interaction()
     cog = _cog()
     with patch.object(storage, "list_types", AsyncMock(return_value=[])):
-        await cog.type_add.callback(cog, inter, name="Support", emoji="ticket", image=None)
+        await cog.type_add.callback(cog, inter, name="Support", emoji="ticket", image=None, thumbnail=None)
     inter.response.send_modal.assert_not_awaited()
     assert "emoji" in _sent_text(inter)
 
@@ -435,7 +438,7 @@ async def test_type_add_resolves_an_emoji_from_another_server_by_name() -> None:
     ]
     with patch.object(storage, "list_types", AsyncMock(return_value=[])), \
             patch.object(tc, "ContentModal") as modal:
-        await cog.type_add.callback(cog, inter, name="Support", emoji=":spin:", image=None)
+        await cog.type_add.callback(cog, inter, name="Support", emoji=":spin:", image=None, thumbnail=None)
     inter.response.send_modal.assert_awaited_once()
     submit = modal.call_args.kwargs["on_submit"]
     modal_inter = MagicMock()
@@ -454,7 +457,7 @@ async def test_type_add_creates_the_type_updates_the_panel_and_previews_it() -> 
     inter = _interaction()
     cog = _cog()
     with patch.object(storage, "list_types", AsyncMock(return_value=[])):
-        await cog.type_add.callback(cog, inter, name=" Support ", emoji="🎫", image=_attachment())
+        await cog.type_add.callback(cog, inter, name=" Support ", emoji="🎫", image=_attachment(), thumbnail=None)
     modal = inter.response.send_modal.await_args.args[0]
 
     submit = _interaction()
@@ -479,7 +482,7 @@ async def test_type_add_creates_the_type_updates_the_panel_and_previews_it() -> 
     assert "Added **Support**" in _edited_text(submit)
     preview = submit.followup.send.await_args.kwargs
     assert preview["ephemeral"] is True
-    assert preview["file"].filename == "type-3.png"
+    assert [f.filename for f in preview["files"]] == ["type-3.png"]
     assert preview["components"][0].children[-1].children[0].disabled is True
 
 
@@ -488,7 +491,7 @@ async def test_type_add_passes_on_why_the_panel_was_not_updated() -> None:
     inter = _interaction()
     cog = _cog()
     with patch.object(storage, "list_types", AsyncMock(return_value=[])):
-        await cog.type_add.callback(cog, inter, name="Support", emoji=None, image=None)
+        await cog.type_add.callback(cog, inter, name="Support", emoji=None, image=None, thumbnail=None)
     modal = inter.response.send_modal.await_args.args[0]
 
     submit = _interaction()
@@ -508,7 +511,7 @@ async def test_type_edit_keeps_what_was_not_changed() -> None:
     with patch.object(storage, "get_type_by_name", AsyncMock(return_value=record)):
         await cog.type_edit.callback(
             cog, inter, name="Support", new_name=None, emoji=None,
-            remove_emoji=False, image=None, remove_image=False,
+            remove_emoji=False, image=None, remove_image=False, thumbnail=None, remove_thumbnail=False,
         )
     modal = inter.response.send_modal.await_args.args[0]
     assert modal.components[0].children[0].value == "Hi"
@@ -525,6 +528,7 @@ async def test_type_edit_keeps_what_was_not_changed() -> None:
     assert update.await_args.args == ("pool", 3)
     assert update.await_args.kwargs == {
         "name": "Support", "emoji": "🎫", "title": "Hello", "body": "New text", "image": "type-3.png",
+        "thumbnail": None,
     }
     delete.assert_not_awaited()
 
@@ -536,7 +540,7 @@ async def test_type_edit_can_rename_and_strip_the_emoji_and_banner() -> None:
     with patch.object(storage, "get_type_by_name", AsyncMock(return_value=_type(image="type-3.png"))):
         await cog.type_edit.callback(
             cog, inter, name="Support", new_name="Help", emoji=None,
-            remove_emoji=True, image=None, remove_image=True,
+            remove_emoji=True, image=None, remove_image=True, thumbnail=None, remove_thumbnail=False,
         )
     modal = inter.response.send_modal.await_args.args[0]
 
@@ -562,7 +566,7 @@ async def test_type_edit_unknown_name() -> None:
     with patch.object(storage, "get_type_by_name", AsyncMock(return_value=None)):
         await cog.type_edit.callback(
             cog, inter, name="Nope", new_name=None, emoji=None,
-            remove_emoji=False, image=None, remove_image=False,
+            remove_emoji=False, image=None, remove_image=False, thumbnail=None, remove_thumbnail=False,
         )
     inter.response.send_modal.assert_not_awaited()
     assert "no ticket type" in _sent_text(inter)
@@ -580,7 +584,7 @@ async def test_type_remove_takes_the_button_off_and_deletes_the_banner() -> None
         await cog.type_remove.callback(cog, inter, name="Support")
 
     remove.assert_awaited_once_with("pool", GUILD_ID, 3)
-    delete.assert_awaited_once_with(GUILD_ID, "type-3.png")
+    delete.assert_any_await(GUILD_ID, "type-3.png")
     refresh.assert_awaited_once()
     assert "already open stay" in _edited_text(inter)
 
@@ -750,3 +754,109 @@ def test_status_notices_a_deleted_ticket_channel() -> None:
     }
     line = setup_commands.tickets_line(_status_guild([channel, category]), tickets)
     assert "was deleted" in line
+
+
+# --- thumbnails ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_panel_saves_a_thumbnail_next_to_the_banner() -> None:
+    inter = _interaction()
+    cog = _cog()
+    config = {"panel_title": "T", "panel_body": "B", "panel_image": "panel.png", "panel_thumbnail": None}
+    with patch.object(storage, "get_config", AsyncMock(return_value=config)):
+        await cog.panel.callback(
+            cog, inter, image=None, remove_image=False, thumbnail=_attachment(), remove_thumbnail=False
+        )
+    modal = inter.response.send_modal.await_args.args[0]
+
+    submit = _interaction()
+    submit.text_values = {"title": "T", "body": "B"}
+    with patch.object(images, "save", AsyncMock(return_value="panel-thumb.png")) as save, patch.object(
+        images, "delete", AsyncMock()
+    ), patch.object(storage, "set_panel_content", AsyncMock()) as store, patch.object(
+        service, "publish_panel", AsyncMock(return_value=MagicMock(jump_url="u"))
+    ):
+        await modal.callback(submit)
+
+    save.assert_awaited_once_with(GUILD_ID, "panel-thumb", ".png", b"png")
+    assert store.await_args.kwargs["image"] == "panel.png"  # the banner is kept
+    assert store.await_args.kwargs["thumbnail"] == "panel-thumb.png"
+
+
+@pytest.mark.asyncio
+async def test_panel_rejects_a_bad_thumbnail_before_the_form() -> None:
+    inter = _interaction()
+    cog = _cog()
+    with patch.object(storage, "get_config", AsyncMock(return_value={})):
+        await cog.panel.callback(
+            cog, inter, image=None, remove_image=False,
+            thumbnail=_attachment("a.pdf", content_type="application/pdf"), remove_thumbnail=False,
+        )
+    inter.response.send_modal.assert_not_awaited()
+    assert "supported image" in _sent_text(inter)
+
+
+@pytest.mark.asyncio
+async def test_type_edit_can_remove_a_thumbnail_and_keep_the_banner() -> None:
+    inter = _interaction()
+    cog = _cog()
+    record = _type(image="type-3.png", thumbnail="type-3-thumb.png")
+    with patch.object(storage, "get_type_by_name", AsyncMock(return_value=record)):
+        await cog.type_edit.callback(
+            cog, inter, name="Support", new_name=None, emoji=None,
+            remove_emoji=False, image=None, remove_image=False, thumbnail=None, remove_thumbnail=True,
+        )
+    modal = inter.response.send_modal.await_args.args[0]
+
+    submit = _interaction()
+    submit.text_values = {"title": "Hi", "body": "Tell us"}
+    with patch.object(storage, "update_type", AsyncMock(return_value=record)) as update, patch.object(
+        service, "refresh_panel", AsyncMock(return_value=None)
+    ), patch.object(images, "load", AsyncMock(return_value=None)), patch.object(
+        images, "delete", AsyncMock()
+    ) as delete:
+        await modal.callback(submit)
+
+    assert update.await_args.kwargs["image"] == "type-3.png"
+    assert update.await_args.kwargs["thumbnail"] is None
+    delete.assert_awaited_once_with(GUILD_ID, "type-3-thumb.png")
+
+
+@pytest.mark.asyncio
+async def test_type_add_saves_a_thumbnail_named_after_the_type() -> None:
+    inter = _interaction()
+    cog = _cog()
+    with patch.object(storage, "list_types", AsyncMock(return_value=[])):
+        await cog.type_add.callback(cog, inter, name="Support", emoji=None, image=None, thumbnail=_attachment())
+    modal = inter.response.send_modal.await_args.args[0]
+
+    submit = _interaction()
+    submit.text_values = {"title": "Hi", "body": "Tell us"}
+    with patch.object(storage, "create_type", AsyncMock(return_value=_type())), patch.object(
+        images, "save", AsyncMock(return_value="type-3-thumb.png")
+    ) as save, patch.object(images, "delete", AsyncMock()), patch.object(
+        storage, "update_type", AsyncMock(return_value=_type(thumbnail="type-3-thumb.png"))
+    ) as update, patch.object(service, "refresh_panel", AsyncMock(return_value=None)), patch.object(
+        images, "load", AsyncMock(return_value=b"png")
+    ):
+        await modal.callback(submit)
+
+    save.assert_awaited_once_with(GUILD_ID, "type-3-thumb", ".png", b"png")
+    assert update.await_args.kwargs["image"] is None
+    assert update.await_args.kwargs["thumbnail"] == "type-3-thumb.png"
+
+
+@pytest.mark.asyncio
+async def test_type_remove_deletes_the_thumbnail_too() -> None:
+    inter = _interaction()
+    cog = _cog()
+    record = _type(image="type-3.png", thumbnail="type-3-thumb.png")
+    with patch.object(storage, "get_type_by_name", AsyncMock(return_value=record)), patch.object(
+        storage, "remove_type", AsyncMock(return_value=True)
+    ), patch.object(images, "delete", AsyncMock()) as delete, patch.object(
+        service, "refresh_panel", AsyncMock(return_value=None)
+    ):
+        await cog.type_remove.callback(cog, inter, name="Support")
+    delete.assert_any_await(GUILD_ID, "type-3.png")
+    delete.assert_any_await(GUILD_ID, "type-3-thumb.png")

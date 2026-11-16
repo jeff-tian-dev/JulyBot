@@ -90,6 +90,8 @@ def _walk(components):
     for c in components:
         yield c
         yield from _walk(getattr(c, "children", None) or [])
+        if getattr(c, "accessory", None) is not None:  # a section's thumbnail
+            yield c.accessory
 
 
 # --- validation ---------------------------------------------------------------
@@ -524,7 +526,7 @@ async def test_open_attaches_the_types_banner() -> None:
             p.stop()
 
     kwargs = env.channel.send.await_args.kwargs
-    assert kwargs["file"].filename == "type-3.png"
+    assert [f.filename for f in kwargs["files"]] == ["type-3.png"]
     gallery = [c for c in _walk(kwargs["components"]) if isinstance(c, disnake.ui.MediaGallery)][0]
     assert gallery.items[0].media.url == "attachment://type-3.png"
 
@@ -932,3 +934,120 @@ def test_only_formats_discord_shows_inline_are_allowed() -> None:
     assert images.extension_of("Banner.PNG") == ".png"
     assert images.extension_of("photo.heic") is None
     assert images.extension_of(None) is None
+
+
+# --- thumbnails ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_thumbnail_sits_beside_the_text_in_a_section() -> None:
+    components = render.build_ticket_components(
+        _type(),
+        ticket_id=11,
+        opener_id=OPENER_ID,
+        staff_role_ids=[],
+        image_filename="type-3.png",
+        thumbnail_filename="type-3-thumb.png",
+    )
+    container = components[0]
+    # A section can't hold a separator, so the heading and body sit together.
+    assert [type(c).__name__ for c in container.children] == ["Section", "MediaGallery", "ActionRow"]
+    section = container.children[0]
+    assert [c.content for c in section.children] == [
+        "## How can we help?", "**Tell us**\n- what happened\n- when",
+    ]
+    assert isinstance(section.accessory, disnake.ui.Thumbnail)
+    assert section.accessory.media.url == "attachment://type-3-thumb.png"
+    assert normalize_components_to_dict(components)[1] is True
+
+
+@pytest.mark.asyncio
+async def test_the_panel_takes_a_thumbnail_too() -> None:
+    container = render.build_panel_components(
+        _config(), [_type()], image_filename=None, thumbnail_filename="panel-thumb.png"
+    )[0]
+    assert [type(c).__name__ for c in container.children] == ["Section", "ActionRow"]
+    assert container.children[0].accessory.media.url == "attachment://panel-thumb.png"
+
+
+@pytest.mark.asyncio
+async def test_a_thumbnail_with_no_text_beside_it_is_left_out() -> None:
+    """A section needs text; Discord would reject one without it."""
+    components = render.build_ticket_components(
+        _type(title=None, body=None),
+        ticket_id=11,
+        opener_id=None,
+        staff_role_ids=[],
+        image_filename=None,
+        thumbnail_filename="type-3-thumb.png",
+        preview=True,
+    )
+    assert [type(c).__name__ for c in components[0].children] == ["ActionRow"]
+
+
+@pytest.mark.asyncio
+async def test_open_attaches_the_banner_and_the_thumbnail() -> None:
+    env = _Open()
+    env.storage["get_type"] = AsyncMock(
+        return_value=_type(image="type-3.png", thumbnail="type-3-thumb.png")
+    )
+    patches = [patch.object(storage, name, mock) for name, mock in env.storage.items()]
+    patches.append(patch.object(images, "load", AsyncMock(return_value=b"png-bytes")))
+    for p in patches:
+        p.start()
+    try:
+        await service.open_ticket("pool", env.guild, env.member, 3)
+    finally:
+        for p in patches:
+            p.stop()
+
+    kwargs = env.channel.send.await_args.kwargs
+    assert [f.filename for f in kwargs["files"]] == ["type-3.png", "type-3-thumb.png"]
+    thumb = [c for c in _walk(kwargs["components"]) if isinstance(c, disnake.ui.Thumbnail)][0]
+    assert thumb.media.url == "attachment://type-3-thumb.png"
+
+
+@pytest.mark.asyncio
+async def test_a_missing_thumbnail_file_renders_without_it() -> None:
+    env = _Open()
+    env.storage["get_type"] = AsyncMock(return_value=_type(thumbnail="type-3-thumb.png"))
+    patches = [patch.object(storage, name, mock) for name, mock in env.storage.items()]
+    patches.append(patch.object(images, "load", AsyncMock(return_value=None)))
+    for p in patches:
+        p.start()
+    try:
+        await service.open_ticket("pool", env.guild, env.member, 3)
+    finally:
+        for p in patches:
+            p.stop()
+
+    kwargs = env.channel.send.await_args.kwargs
+    assert "files" not in kwargs
+    assert not [c for c in _walk(kwargs["components"]) if isinstance(c, disnake.ui.Thumbnail)]
+
+
+@pytest.mark.asyncio
+async def test_republish_re_uploads_the_panel_thumbnail() -> None:
+    guild, channel, partial, patches = _panel_env(
+        _config(panel_message_id=555, panel_image="panel.png", panel_thumbnail="panel-thumb.png"),
+        image=b"png",
+    )
+    with patches[0], patches[1], patches[2], patches[3]:
+        await service.publish_panel("pool", guild)
+    files = partial.edit.await_args.kwargs["files"]
+    assert [f.filename for f in files] == ["panel.png", "panel-thumb.png"]
+
+
+def test_thumbnail_migration_is_guarded_and_stays_off_guild_settings() -> None:
+    """Every ALTER sits behind an information_schema check, so once the column
+    exists startup never takes the table lock again (the 2026-10-29 hang)."""
+    ddl = models.MIGRATE_TICKET_THUMBNAILS
+    assert "guild_settings" not in ddl
+    assert ddl.count("ALTER TABLE") == ddl.count("IF NOT EXISTS (") == 2
+    assert "panel_thumbnail VARCHAR(100)" in models.CREATE_TICKET_CONFIG
+    assert "thumbnail VARCHAR(100)" in models.CREATE_TICKET_TYPES
+
+
+def test_thumbnail_files_never_collide_with_banners() -> None:
+    assert images.type_thumbnail_stem(3) != images.type_stem(3)
+    assert images.PANEL_THUMBNAIL_STEM != images.PANEL_STEM

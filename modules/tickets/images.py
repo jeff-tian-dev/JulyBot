@@ -1,4 +1,4 @@
-"""Banner images for the ticket panel and ticket types, kept on local disk.
+"""Banner and thumbnail images for the ticket panel and ticket types, kept on local disk.
 
 A type's banner is re-uploaded into every new ticket, and the panel's on every
 re-render, so the bytes have to live somewhere the bot can read them again.
@@ -24,12 +24,17 @@ ALLOWED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 # Discord's upload limit for a bot on an unboosted server is 10 MB; stay under it.
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 PANEL_STEM = "panel"
+PANEL_THUMBNAIL_STEM = "panel-thumb"
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def type_stem(type_id: int) -> str:
     return f"type-{type_id}"
+
+
+def type_thumbnail_stem(type_id: int) -> str:
+    return f"type-{type_id}-thumb"
 
 
 def extension_of(filename: str | None) -> str | None:
