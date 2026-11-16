@@ -33,6 +33,7 @@ COG_MODULES = (
     "discord_bot.commands.purchase_commands",
     "discord_bot.commands.product_commands",
     "discord_bot.commands.setup_commands",
+    "discord_bot.commands.ticket_commands",
     "discord_bot.commands.help_commands",
 )
 
@@ -83,7 +84,8 @@ def create_bot(pool: asyncpg.Pool) -> commands.InteractionBot:
 
     # on_ready fires again on every reconnect; this startup work only needs to
     # run once per process. (Base post buttons need no restoring — they are
-    # routed by a stateless listener in base_post_commands.)
+    # routed by a stateless listener in base_post_commands; ticket buttons
+    # likewise, in ticket_commands.)
     startup_done = False
 
     @bot.event

@@ -18,6 +18,8 @@ from config.settings import settings
 from modules.guild_config import modes, storage
 from modules.guild_config.setup import SetupError, add_family_clan
 from modules.subscriptions import products
+from modules.tickets import service as ticket_service
+from modules.tickets import storage as ticket_storage
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,8 @@ SET_CHANNEL_COMMANDS = {
     "x": "/x setchannel",
     "youtube": "/yt setchannel",
 }
+# How many ticket staff roles /setup status names before summarising the rest.
+MAX_STATUS_STAFF_ROLES = 5
 # What the bot needs in any channel it posts embeds to.
 POSTING_PERMS = ("view_channel", "send_messages", "embed_links")
 
@@ -123,8 +127,66 @@ def toggle_reply(config: dict, feature: str, mode: str) -> str:
     return f"**{label}** is now **on** — it posts in <#{channel_id}>."
 
 
+def tickets_line(guild: disnake.Guild, tickets: dict | None) -> str:
+    """The Tickets field of /setup status.
+
+    `tickets` is {"config", "staff_role_ids", "type_count", "open_count"}, or
+    None when /ticket setup was never run.
+    """
+    config = (tickets or {}).get("config")
+    if not config:
+        return "Not set up — `/ticket setup`"
+    panel = guild.get_channel(config.get("panel_channel_id") or 0)
+    category = guild.get_channel(config.get("category_id") or 0)
+    log = guild.get_channel(config.get("log_channel_id") or 0)
+    lines = []
+    if panel is None or category is None or log is None:
+        lines.append("⚠️ A ticket channel or the category was deleted — `/ticket setup`")
+    else:
+        problems = ticket_service.setup_problems(guild, panel, category, log)
+        lines.append(
+            f"✅ Buttons in {panel.mention}, tickets under **{category.name}**, "
+            f"transcripts to {log.mention}"
+        )
+        lines.extend(f"⚠️ {problem}" for problem in problems)
+    if not config.get("panel_message_id"):
+        lines.append("⚠️ The panel isn't posted — `/ticket panel`")
+    type_count = tickets.get("type_count", 0)
+    if type_count:
+        lines.append(f"{type_count} ticket type{'s' if type_count != 1 else ''} — `/ticket type list`")
+    else:
+        lines.append("⚠️ No ticket types, so the panel has no buttons — `/ticket type add`")
+    role_ids = tickets.get("staff_role_ids") or []
+    if role_ids:
+        # An embed field holds 1024 characters; a long role list would overflow it.
+        shown = ", ".join(f"<@&{rid}>" for rid in role_ids[:MAX_STATUS_STAFF_ROLES])
+        extra = len(role_ids) - MAX_STATUS_STAFF_ROLES
+        lines.append(f"Staff: {shown}" + (f" and {extra} more — `/ticket role list`" if extra > 0 else ""))
+    else:
+        lines.append("No staff roles (only admins see tickets) — `/ticket role add`")
+    lines.append(
+        f"Open tickets: {tickets.get('open_count', 0)} "
+        f"(at most {ticket_service.CATEGORY_CHANNEL_LIMIT} channels fit in the category)"
+    )
+    return "\n".join(lines)
+
+
+async def ticket_status(pool, guild_id: int) -> dict:
+    """What tickets_line needs, for one server."""
+    return {
+        "config": await ticket_storage.get_config(pool, guild_id),
+        "staff_role_ids": await ticket_storage.list_staff_roles(pool, guild_id),
+        "type_count": len(await ticket_storage.list_types(pool, guild_id)),
+        "open_count": await ticket_storage.count_open(pool, guild_id),
+    }
+
+
 def build_status_embed(
-    guild: disnake.Guild, config: dict, clans: list[dict], product_count: int = 0
+    guild: disnake.Guild,
+    config: dict,
+    clans: list[dict],
+    product_count: int = 0,
+    tickets: dict | None = None,
 ) -> disnake.Embed:
     """The /setup status checklist: what's set on this server and what's missing."""
     embed = disnake.Embed(
@@ -187,6 +249,7 @@ def build_status_embed(
     else:
         purchases = "Not set up — `/product add` the buttons `/subscribe` should show"
     embed.add_field(name="Purchases", value=purchases, inline=False)
+    embed.add_field(name="Tickets", value=tickets_line(guild, tickets), inline=False)
 
     embed.set_footer(text="Run /help to see every command.")
     return embed
@@ -198,7 +261,7 @@ def welcome_embed() -> disnake.Embed:
         title="Thanks for adding me!",
         description=(
             "Admins: run `/setup status` to see what to set up here — mod log, "
-            "watchdog, roll call, X/YouTube post channels and `/subscribe` buttons. "
+            "watchdog, roll call, X/YouTube post channels, tickets and `/subscribe` buttons. "
             "Everything is per server.\n\n"
             "Everyone: run `/help` to see what I can do."
         ),
@@ -255,8 +318,9 @@ class SetupCommands(commands.Cog):
         config = await storage.get_guild_config(self.bot.pool, inter.guild.id)
         clans = await storage.list_clans(self.bot.pool, inter.guild.id)
         rows = await products.list_products(self.bot.pool, inter.guild.id)
+        tickets = await ticket_status(self.bot.pool, inter.guild.id)
         await inter.edit_original_response(
-            embed=build_status_embed(inter.guild, config, clans, len(rows))
+            embed=build_status_embed(inter.guild, config, clans, len(rows), tickets)
         )
 
     async def _set_channel(

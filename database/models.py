@@ -674,8 +674,88 @@ CREATE TABLE IF NOT EXISTS stripe_payment_links (
 CREATE INDEX IF NOT EXISTS idx_stripe_payment_links_guild ON stripe_payment_links (guild_id);
 """
 
+# --- tickets ------------------------------------------------------------------
+# Per-server ticket system (modules/tickets). These are their own tables rather
+# than more guild_settings columns on purpose: every poller reads guild_settings,
+# and an ALTER TABLE on it at startup waits on any session holding it (the
+# 2026-10-29 `ALTER TABLE rosters` hang). CREATE TABLE IF NOT EXISTS never does.
+
+# Where the panel sits, where ticket channels are created, where transcripts go,
+# and what the panel says. panel_image is a filename under TICKET_IMAGE_DIR.
+CREATE_TICKET_CONFIG = """
+CREATE TABLE IF NOT EXISTS ticket_config (
+    guild_id BIGINT PRIMARY KEY,
+    panel_channel_id BIGINT,
+    category_id BIGINT,
+    log_channel_id BIGINT,
+    panel_message_id BIGINT,
+    panel_title VARCHAR(256),
+    panel_body TEXT,
+    panel_image VARCHAR(100),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+"""
+
+# One row per ticket type = one button on the panel, plus the message posted at
+# the top of every ticket of that type. Removal is a SOFT delete so open tickets
+# of a removed type can still be closed; the unique name index is partial on
+# `removed_at IS NULL`, so a removed type's name can be reused.
+CREATE_TICKET_TYPES = """
+CREATE TABLE IF NOT EXISTS ticket_types (
+    id SERIAL PRIMARY KEY,
+    guild_id BIGINT NOT NULL,
+    name VARCHAR(80) NOT NULL,
+    emoji VARCHAR(100),
+    title VARCHAR(256),
+    body TEXT,
+    image VARCHAR(100),
+    created_by BIGINT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    removed_at TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ticket_types_guild_name
+    ON ticket_types (guild_id, lower(name)) WHERE removed_at IS NULL;
+"""
+
+# Roles that can see every ticket and close them (admins always can).
+CREATE_TICKET_STAFF_ROLES = """
+CREATE TABLE IF NOT EXISTS ticket_staff_roles (
+    guild_id BIGINT NOT NULL,
+    role_id BIGINT NOT NULL,
+    added_by BIGINT,
+    added_at TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (guild_id, role_id)
+);
+"""
+
+# One row per ticket ever opened. The row is inserted BEFORE the channel exists
+# (the Close button's custom_id needs the id), so channel_id is NULL for a
+# moment. The partial unique index is what enforces "one open ticket per member
+# per type" and makes a double-click lose the insert. type_name is a snapshot
+# for the transcript, since the type can be renamed or removed later.
+CREATE_TICKETS = """
+CREATE TABLE IF NOT EXISTS tickets (
+    id SERIAL PRIMARY KEY,
+    guild_id BIGINT NOT NULL,
+    type_id INTEGER REFERENCES ticket_types(id) ON DELETE SET NULL,
+    type_name VARCHAR(80) NOT NULL,
+    channel_id BIGINT,
+    opener_id BIGINT NOT NULL,
+    opened_at TIMESTAMP DEFAULT NOW(),
+    closed_at TIMESTAMP,
+    closed_by BIGINT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tickets_one_open
+    ON tickets (guild_id, opener_id, type_id) WHERE closed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_tickets_channel ON tickets (channel_id);
+"""
+
 ALL_TABLES = (
     "stripe_payment_links",
+    "tickets",
+    "ticket_staff_roles",
+    "ticket_types",
+    "ticket_config",
     "subscribers",
     "ranked_tracking",
     "agreements",
@@ -819,6 +899,13 @@ async def create_tables(pool: asyncpg.Pool, home_guild_id: int = 0) -> None:
         # After products: it references them.
         logger.info("Creating table stripe_payment_links if not exists")
         await conn.execute(CREATE_STRIPE_PAYMENT_LINKS)
+
+        logger.info("Creating ticket tables if not exist")
+        await conn.execute(CREATE_TICKET_CONFIG)
+        await conn.execute(CREATE_TICKET_TYPES)
+        await conn.execute(CREATE_TICKET_STAFF_ROLES)
+        # After ticket_types: it references them.
+        await conn.execute(CREATE_TICKETS)
 
 
 async def drop_tables(pool: asyncpg.Pool) -> None:

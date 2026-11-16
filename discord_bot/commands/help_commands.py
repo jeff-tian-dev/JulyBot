@@ -30,6 +30,7 @@ CATEGORIES = {
     "XCommands": "X feed",
     "YoutubeCommands": "YouTube feed",
     "ModerationCommands": "Moderation",
+    "TicketCommands": "Tickets",
     "SubscribeCommands": "Purchases",
     "PurchaseCommands": "Purchases",
     "AgreementCommands": "Purchases",

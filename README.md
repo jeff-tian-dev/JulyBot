@@ -15,6 +15,7 @@ A Discord bot for Clash of Clans clans, built around nine independent modules:
 - **Products** — each server's `/subscribe` buttons, managed with `/product add <label> <link>|remove|list`. Adding one scans its page for Stripe Payment Links and claims them for the server (the first server to add a link owns it); that's what scopes Confirm's list and records which product a confirmed payment was for.
 - **Roll call** — every day at the legend reset (05:00 UTC), lists the members of watched rosters who weren't in one of the server's clans at that moment, with the clan they were in instead. Posts to its own channel (`/setup rollcall`) and pings each listed Discord user.
 - **On / testing / off** — `/toggle feature:<Roll call|Watchdog|X|YouTube> mode:<On|Testing|Off>`. Testing posts the same messages to the server's test channel (`/setup testchannel`) with every ping replaced by a plain name, so nobody is notified. Off posts nothing, but tracking keeps running.
+- **Tickets** — `/ticket setup|panel|type add|type edit|type remove|type list|role add|role remove|role list`. An admin posts a panel with one button per ticket type; pressing one opens a private channel under the tickets category with that type's own message at the top. Ticket staff roles (and admins) see every ticket and close it, which saves a transcript to the log channel and deletes the channel. Per server.
 - **Setup and help** — `/setup status|modlog|watchdog|rollcall|testchannel|clan add|clan remove|pingrole` configures a server (everything is per server); `/help` lists the commands the viewer can use. The bot posts a welcome pointing at both when it joins a server.
 
 The Discord layer (`disnake` Cogs) is a thin shim. Each module is a plain Python package, callable and testable without a running bot.
@@ -190,6 +191,7 @@ cp .env.example .env   # only if setup.sh didn't already create it
 | `RANKED_TRACKING_POLL_INTERVAL_MINUTES` | no | `20`                              | How often tracked players' likely-to-be-hit status is checked for `/trackingon` DM alerts |
 | `STRIPE_SECRET_KEY`              | no       | empty                                   | Secret key used read-only to match product pages' Payment Links, list a server's checkouts when confirming a payment, and refresh subscriber status. Empty disables all three; the bot still runs |
 | `SUBSCRIBER_REFRESH_INTERVAL_MINUTES` | no  | `60`                                    | How often stored subscriptions are re-checked against Stripe |
+| `TICKET_IMAGE_DIR`              | no       | `./data/tickets`                       | Where ticket panel and ticket type banner images are stored (relative paths resolve against the repo root) |
 
 Missing any required variable raises a clear `ValueError` at startup.
 
@@ -316,6 +318,10 @@ The Cogs listed in `COG_MODULES` in [discord_bot/bot.py](discord_bot/bot.py) are
 | `/setup status\|modlog\|watchdog\|rollcall\|testchannel\|pingrole` | guild_config (admin) | live |
 | `/toggle <feature> <mode>`       | guild_config (admin) | live      |
 | `/setup clan add\|remove <tag>`  | guild_config (admin) | live      |
+| `/ticket setup <channel> <category> <log_channel>` | tickets (admin) | live |
+| `/ticket panel [image] [remove_image]` | tickets (admin) | live |
+| `/ticket type add\|edit\|remove\|list` | tickets (admin) | live |
+| `/ticket role add\|remove\|list <role>` | tickets (admin) | live |
 | `/help`                          | help               | live         |
 | `/agreement record <member> <method> <payer_name> <amount>` | agreements (admin) | live |
 | `/agreement lookup <member>`     | agreements (admin) | live         |

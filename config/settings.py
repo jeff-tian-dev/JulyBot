@@ -113,6 +113,9 @@ class Settings:
     # a missing key must never stop the Discord bot, only disable these lookups.
     STRIPE_SECRET_KEY: str = ""
     SUBSCRIBER_REFRESH_INTERVAL_MINUTES: int = 60
+    # Where ticket panel / ticket type banner images are kept (modules/tickets/images.py).
+    # A relative path is resolved against the repo root, not the working directory.
+    TICKET_IMAGE_DIR: str = "./data/tickets"
 
 
 def _load() -> Settings:
@@ -157,6 +160,7 @@ def _load() -> Settings:
         RANKED_TRACKING_POLL_INTERVAL_MINUTES=_int("RANKED_TRACKING_POLL_INTERVAL_MINUTES", 20),
         STRIPE_SECRET_KEY=_optional("STRIPE_SECRET_KEY", ""),
         SUBSCRIBER_REFRESH_INTERVAL_MINUTES=_int("SUBSCRIBER_REFRESH_INTERVAL_MINUTES", 60),
+        TICKET_IMAGE_DIR=_optional("TICKET_IMAGE_DIR", "./data/tickets"),
     )
 
 
