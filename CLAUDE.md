@@ -20,7 +20,7 @@ The bot runs locally on the Mac Studio at `/Users/jefftian/JulyBot`. All command
 
 **Stop the background service:**
 ```bash
-./deploy/stop.sh           # boots out the launchd agent com.julybot
+./deploy/stop.sh           # boots out the launchd agent com.blossom
 ```
 
 **Restart the background service after a code change:**
@@ -30,13 +30,13 @@ The bot runs locally on the Mac Studio at `/Users/jefftian/JulyBot`. All command
 
 **Remove the launchd agent entirely:** `./deploy/uninstall-service.sh`
 
-**Auto-deploy on push:** `./deploy/install-autoupdate.sh` installs `com.julybot.autoupdate`, which checks GitHub every 60s and redeploys when `origin/main` moves (log: `logs/auto-update.log`). `./deploy/uninstall-autoupdate.sh` turns it off. It **skips** while the checkout has uncommitted edits to tracked files, so local work in progress blocks auto-deploys until it's committed or stashed. See the 2026-10-30 entry.
+**Auto-deploy on push:** `./deploy/install-autoupdate.sh` installs `com.blossom.autoupdate`, which checks GitHub every 60s and redeploys when `origin/main` moves (log: `logs/auto-update.log`). `./deploy/uninstall-autoupdate.sh` turns it off. It **skips** while the checkout has uncommitted edits to tracked files, so local work in progress blocks auto-deploys until it's committed or stashed. See the 2026-10-30 entry.
 
-**Network evidence:** `./deploy/install-netwatch.sh` installs `com.julybot.netwatch`, which logs the Mac's TCP connection state every 60s to `logs/netwatch/` (`./deploy/uninstall-netwatch.sh` turns it off). See the 2026-11-13 entry.
+**Network evidence:** `./deploy/install-netwatch.sh` installs `com.blossom.netwatch`, which logs the Mac's TCP connection state every 60s to `logs/netwatch/` (`./deploy/uninstall-netwatch.sh` turns it off). See the 2026-11-13 entry.
 
 - Foreground vs. background are mutually exclusive — if the launchd service is running, stop it before `start.sh` or you'll get two bots double-posting.
-- Background logs: `logs/julybot.stdout.log` and `logs/julybot.stderr.log`.
-- launchd label is `com.julybot`; inspect with `launchctl print gui/$(id -u)/com.julybot`.
+- Background logs: `logs/blossom.stdout.log` and `logs/blossom.stderr.log`.
+- launchd label is `com.blossom`; inspect with `launchctl print gui/$(id -u)/com.blossom`.
 - First-time only: `./deploy/setup.sh` (venv + `.env`), then `.venv/bin/python scripts/init_db.py` (creates tables). `init_db.py` and `create_tables` are idempotent — safe to re-run after adding tables/columns.
 
 ---
@@ -622,3 +622,10 @@ When you discover a non-obvious convention, an architectural decision, or a work
 - No audit column: who made an admin link is only in the log (`Admin <id> linked discord_id=…`). There's no admin unlink. A wrong admin link is removed by that user's `/unlink`, or in Supabase.
 - Why: roll call pings only linked players, and the July roster's 93 tag-only members had none.
 - Tests: `tests/test_account_commands.py` (new), 7 cases added to `tests/test_account_linker.py`.
+
+## 2026-11-15 — JulyBot renamed to Blossom
+
+- **The bot is now Blossom.** The launchd agents are `com.blossom`, `com.blossom.autoupdate` and `com.blossom.netwatch` (templates `deploy/com.blossom*.plist.template`). Logs are `logs/blossom.{stdout,stderr}.log`. Entries above that say `com.julybot*` or `logs/julybot.*` mean these.
+- **Deliberately NOT renamed:** the repo directory `/Users/jefftian/JulyBot`, which `.env` (`BASE_IMAGE_DIR`), the plists (`__APP_DIR__` is wherever the repo is) and the Claude project memory path all point at; and `.env`'s `TWITTER_SESSION_NAME=julybot_twitter`, which names the live X session file under `data/x/` (renaming it forces a fresh X login from cookies). Only the *default* `X_SESSION_NAME` changed (`julybot_x` → `blossom_x`), which production doesn't use. "July" elsewhere is the clan and the "July Sub" product, not the bot.
+- **The bot's Discord name isn't in code.** It comes from the Developer Portal (application name + bot username) and from per-server nicknames.
+- **Switching the live agents over is manual.** The new uninstall scripts look for `com.blossom*` and won't find the old `com.julybot*` agents. Boot those out and delete their plists from `~/Library/LaunchAgents/` by hand, then run the three `install-*.sh` scripts. Auto-update can't deploy this rename itself: it would kickstart `com.blossom`, which wouldn't exist yet. The switchover was done by hand on 2026-11-15.

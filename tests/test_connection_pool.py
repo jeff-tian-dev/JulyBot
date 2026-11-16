@@ -50,7 +50,7 @@ async def test_pool_leaves_statement_timeout_unset(fresh_pool):
     assert create_kwargs["max_size"] == connection.POOL_MAX_SIZE
     assert create_kwargs["statement_cache_size"] == 0
     assert create_kwargs["connect"] is connection._connect_with_retry
-    assert getattr(connection.asyncpg.Pool.acquire, "_julybot_limited", False)
+    assert getattr(connection.asyncpg.Pool.acquire, "_blossom_limited", False)
 
 
 @pytest.mark.asyncio

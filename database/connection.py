@@ -52,7 +52,7 @@ def _limit_acquire() -> None:
     Pool uses __slots__, so the method has to be replaced on the class.
     """
     current = asyncpg.Pool.acquire
-    if getattr(current, "_julybot_limited", False):
+    if getattr(current, "_blossom_limited", False):
         return
 
     def acquire(self, *, timeout: float | None = None):
@@ -60,7 +60,7 @@ def _limit_acquire() -> None:
             timeout = ACQUIRE_TIMEOUT_SECONDS
         return current(self, timeout=timeout)
 
-    acquire._julybot_limited = True  # type: ignore[attr-defined]
+    acquire._blossom_limited = True  # type: ignore[attr-defined]
     asyncpg.Pool.acquire = acquire  # type: ignore[method-assign]
 
 

@@ -1,6 +1,6 @@
 # Mac Studio deployment
 
-JulyBot runs locally on this Mac Studio at `/Users/jefftian/JulyBot`.
+Blossom runs locally on this Mac Studio at `/Users/jefftian/JulyBot`.
 
 ## Prerequisites
 
@@ -38,11 +38,11 @@ chmod +x deploy/*.sh                        # only if the release added new scri
 `.env` is **not** in git (it holds secrets) — when a release adds new environment variables,
 copy the new keys from `.env.example` into this machine's `.env` by hand **before** restarting.
 [config/settings.py](../config/settings.py) raises at import time if a variable in
-`REQUIRED_VARS` is unset, naming the one that's missing; check `logs/julybot.stderr.log`.
+`REQUIRED_VARS` is unset, naming the one that's missing; check `logs/blossom.stderr.log`.
 
 ## Automatic deploys on push
 
-`./deploy/install-autoupdate.sh` installs a launchd agent (`com.julybot.autoupdate`) that
+`./deploy/install-autoupdate.sh` installs a launchd agent (`com.blossom.autoupdate`) that
 checks GitHub every 60 seconds. When `main` has a new commit it runs the tests against that
 commit, pulls it, installs dependencies if `requirements.txt` changed, and restarts the bot.
 If the bot doesn't log in afterwards, it rolls back to the previous commit.
@@ -60,7 +60,7 @@ manual steps (it logs a `NOTE` when it sees either).
 
 ## Network evidence (netwatch)
 
-`./deploy/install-netwatch.sh` installs a launchd agent (`com.julybot.netwatch`) that records
+`./deploy/install-netwatch.sh` installs a launchd agent (`com.blossom.netwatch`) that records
 the Mac's TCP connections every 60 seconds, so if the Mac stops opening new connections again
 (`Can't assign requested address` in the bot's log, `ERR_ADDRESS_INVALID` in Chrome), there's a
 record of which program caused it. The record is on disk, so rebooting to fix the outage no
@@ -134,7 +134,7 @@ harmless.
 ./deploy/install-service.sh
 ```
 
-Logs go to `logs/julybot.stdout.log` and `logs/julybot.stderr.log`.
+Logs go to `logs/blossom.stdout.log` and `logs/blossom.stderr.log`.
 
 Stop the background service:
 

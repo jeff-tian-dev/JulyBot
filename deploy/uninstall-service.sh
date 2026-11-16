@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Remove the launchd user agent for JulyBot.
+# Remove the launchd user agent for Blossom.
 set -euo pipefail
 
-LABEL="com.julybot"
+LABEL="com.blossom"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
 if [[ -f "$PLIST" ]]; then

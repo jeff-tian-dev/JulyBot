@@ -2,7 +2,7 @@
 # Stop the launchd-managed bot service (if installed).
 set -euo pipefail
 
-LABEL="com.julybot"
+LABEL="com.blossom"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
 if [[ -f "$PLIST" ]]; then

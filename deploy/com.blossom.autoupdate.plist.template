@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.julybot</string>
+    <string>com.blossom.autoupdate</string>
     <key>ProgramArguments</key>
     <array>
-        <string>__APP_DIR__/.venv/bin/python</string>
-        <string>main.py</string>
+        <string>/bin/bash</string>
+        <string>__APP_DIR__/deploy/auto-update.sh</string>
     </array>
     <key>WorkingDirectory</key>
     <string>__APP_DIR__</string>
@@ -18,11 +18,11 @@
     </dict>
     <key>RunAtLoad</key>
     <true/>
-    <key>KeepAlive</key>
-    <true/>
+    <key>StartInterval</key>
+    <integer>60</integer>
     <key>StandardOutPath</key>
-    <string>__APP_DIR__/logs/julybot.stdout.log</string>
+    <string>__APP_DIR__/logs/auto-update.log</string>
     <key>StandardErrorPath</key>
-    <string>__APP_DIR__/logs/julybot.stderr.log</string>
+    <string>__APP_DIR__/logs/auto-update.log</string>
 </dict>
 </plist>

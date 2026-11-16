@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 YOUTUBE_FEED_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
 VIDEO_ID_PREFIX = "yt:video:"
-FEED_USER_AGENT = "Mozilla/5.0 (compatible; JulyBot/1.0; +https://www.youtube.com/feeds/videos.xml)"
+FEED_USER_AGENT = "Mozilla/5.0 (compatible; Blossom/1.0; +https://www.youtube.com/feeds/videos.xml)"
 FEED_TIMEOUT_SECONDS = 15
 # YouTube's RSS server answers 404 and 500 for channels that still exist.
 # A single failed read is not evidence the channel is gone, so retry before

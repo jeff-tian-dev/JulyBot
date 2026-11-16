@@ -3,26 +3,26 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.julybot.autoupdate</string>
+    <string>com.blossom.netwatch</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>__APP_DIR__/deploy/auto-update.sh</string>
+        <string>__APP_DIR__/deploy/netwatch.sh</string>
     </array>
     <key>WorkingDirectory</key>
     <string>__APP_DIR__</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>/usr/sbin:/usr/bin:/bin:/sbin</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>StartInterval</key>
     <integer>60</integer>
     <key>StandardOutPath</key>
-    <string>__APP_DIR__/logs/auto-update.log</string>
+    <string>__APP_DIR__/logs/netwatch/launchd.log</string>
     <key>StandardErrorPath</key>
-    <string>__APP_DIR__/logs/auto-update.log</string>
+    <string>__APP_DIR__/logs/netwatch/launchd.log</string>
 </dict>
 </plist>

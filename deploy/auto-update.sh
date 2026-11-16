@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pull origin/main and redeploy the bot when it has moved. Run every minute by
-# the com.julybot.autoupdate launchd agent (./deploy/install-autoupdate.sh);
+# the com.blossom.autoupdate launchd agent (./deploy/install-autoupdate.sh);
 # also safe to run by hand. Output goes to logs/auto-update.log.
 #
 # A new commit is deployed only if the checkout is on main, has no uncommitted
@@ -21,10 +21,10 @@ main() {
   ROOT="$(cd "$(dirname "$0")/.." && pwd)"
   cd "$ROOT"
 
-  local LABEL="com.julybot"
+  local LABEL="com.blossom"
   local BRANCH="main"
   local PY="$ROOT/.venv/bin/python"
-  local BOT_LOG="$ROOT/logs/julybot.stderr.log"
+  local BOT_LOG="$ROOT/logs/blossom.stderr.log"
   local PYTEST_LOG="$ROOT/logs/auto-update.pytest.log"
   local STATE_FILE="$ROOT/data/auto-update.last-attempt"
   local READY_PATTERN="Discord bot ready as"
@@ -95,7 +95,7 @@ main() {
   if ! git diff --quiet "$prev_sha" "$remote_sha" -- .env.example; then
     log "NOTE: .env.example changed; copy any new keys into .env by hand"
   fi
-  if ! git diff --quiet "$prev_sha" "$remote_sha" -- deploy/com.julybot.plist.template; then
+  if ! git diff --quiet "$prev_sha" "$remote_sha" -- deploy/com.blossom.plist.template; then
     log "NOTE: the launchd plist template changed; run ./deploy/install-service.sh by hand to apply it"
   fi
 
@@ -112,9 +112,9 @@ main() {
   log "FAIL: bot didn't log in within ${READY_TIMEOUT_SECONDS}s on $short; rolling back to $(git rev-parse --short "$prev_sha")"
   git reset --quiet --keep "$prev_sha"
   if restart_and_wait; then
-    log "Rolled back to $(git rev-parse --short "$prev_sha"); $short is not deployed. Check logs/julybot.stderr.log"
+    log "Rolled back to $(git rev-parse --short "$prev_sha"); $short is not deployed. Check logs/blossom.stderr.log"
   else
-    log "FAIL: the rollback didn't log in either. Check logs/julybot.stderr.log"
+    log "FAIL: the rollback didn't log in either. Check logs/blossom.stderr.log"
   fi
 }
 

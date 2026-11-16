@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Install JulyBot as a launchd user agent (auto-start on login).
+# Install Blossom as a launchd user agent (auto-start on login).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LABEL="com.julybot"
-PLIST_SRC="$ROOT/deploy/com.julybot.plist.template"
+LABEL="com.blossom"
+PLIST_SRC="$ROOT/deploy/com.blossom.plist.template"
 PLIST_DEST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
 if [[ ! -f "$ROOT/.env" ]]; then
@@ -30,6 +30,6 @@ launchctl enable "gui/$(id -u)/${LABEL}"
 launchctl kickstart -k "gui/$(id -u)/${LABEL}"
 
 echo "Installed and started ${LABEL}."
-echo "  Logs: $ROOT/logs/julybot.{stdout,stderr}.log"
+echo "  Logs: $ROOT/logs/blossom.{stdout,stderr}.log"
 echo "  Stop:  ./deploy/stop.sh"
 echo "  Remove: ./deploy/uninstall-service.sh"

@@ -76,7 +76,7 @@ class Settings:
     LEGEND_POLL_INTERVAL_MINUTES: int = 60
     CACHE_REFRESH_INTERVAL_HOURS: int = 24
     X_COOKIES: str = ""
-    X_SESSION_NAME: str = "julybot_x"
+    X_SESSION_NAME: str = "blossom_x"
     X_POLL_INTERVAL_MINUTES: int = 10
     X_PING_ROLE_ID: int = 0
     X_PING_COOLDOWN_HOURS: int = 3
@@ -137,7 +137,7 @@ def _load() -> Settings:
         LEGEND_POLL_INTERVAL_MINUTES=_int("LEGEND_POLL_INTERVAL_MINUTES", 60),
         CACHE_REFRESH_INTERVAL_HOURS=_int("CACHE_REFRESH_INTERVAL_HOURS", 24),
         X_COOKIES=_optional_with_legacy("X_COOKIES", "TWITTER_COOKIES", ""),
-        X_SESSION_NAME=_optional_with_legacy("X_SESSION_NAME", "TWITTER_SESSION_NAME", "julybot_x"),
+        X_SESSION_NAME=_optional_with_legacy("X_SESSION_NAME", "TWITTER_SESSION_NAME", "blossom_x"),
         X_POLL_INTERVAL_MINUTES=_int_with_legacy("X_POLL_INTERVAL_MINUTES", "TWITTER_POLL_INTERVAL_MINUTES", 10),
         X_PING_ROLE_ID=_int_with_legacy("X_PING_ROLE_ID", "TWITTER_PING_ROLE_ID", 0),
         X_PING_COOLDOWN_HOURS=_int("X_PING_COOLDOWN_HOURS", 3),

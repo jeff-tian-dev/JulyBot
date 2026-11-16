@@ -217,7 +217,7 @@ def test_stats_visible_to_moderators(perm: str) -> None:
 def test_info_modal_submit_does_not_leave_a_thinking_placeholder() -> None:
     """Submitting the popup must ack with with_message=False. The default
     (True on a modal submit) promises a follow-up message, leaving a
-    "JulyBot is thinking..." prompt hanging forever."""
+    "Blossom is thinking..." prompt hanging forever."""
     import asyncio
 
     from discord_bot.commands import base_post_commands as bp

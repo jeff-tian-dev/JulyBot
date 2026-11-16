@@ -2,7 +2,7 @@
 # Remove the netwatch launchd agent. Its logs in logs/netwatch/ are kept.
 set -euo pipefail
 
-LABEL="com.julybot.netwatch"
+LABEL="com.blossom.netwatch"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
 if [[ -f "$PLIST" ]]; then

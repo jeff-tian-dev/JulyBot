@@ -5,8 +5,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LABEL="com.julybot.netwatch"
-PLIST_SRC="$ROOT/deploy/com.julybot.netwatch.plist.template"
+LABEL="com.blossom.netwatch"
+PLIST_SRC="$ROOT/deploy/com.blossom.netwatch.plist.template"
 PLIST_DEST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
 mkdir -p "$ROOT/logs/netwatch" "$HOME/Library/LaunchAgents"

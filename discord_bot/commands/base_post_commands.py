@@ -240,7 +240,7 @@ class InfoModal(disnake.ui.Modal):
 
     async def callback(self, inter: disnake.ModalInteraction) -> None:
         # Nothing to save. `with_message` defaults to True on a modal submit,
-        # which promises a follow-up message and leaves a "JulyBot is
+        # which promises a follow-up message and leaves a "Blossom is
         # thinking..." placeholder hanging forever. False sends a bare
         # deferred_message_update instead, so the popup just closes.
         await inter.response.defer(with_message=False)

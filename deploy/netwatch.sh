@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Record the Mac's TCP connection state, so a network outage leaves evidence.
-# Run every minute by the com.julybot.netwatch launchd agent
+# Run every minute by the com.blossom.netwatch launchd agent
 # (./deploy/install-netwatch.sh); also safe to run by hand.
 #
 # On 2026-11-13 the Mac stopped opening new connections for two hours

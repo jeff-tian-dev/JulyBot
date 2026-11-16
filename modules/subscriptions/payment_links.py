@@ -56,7 +56,7 @@ MAX_LINKS_PER_PAGE = 20
 # The account's Payment Link list changes rarely; reuse it between clicks.
 LINK_INDEX_TTL_SECONDS = 600
 _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
-_USER_AGENT = "JulyBot (product page scan)"
+_USER_AGENT = "Blossom (product page scan)"
 
 # (fetched_at monotonic seconds, {url: plink_id}); reset to None in tests.
 _link_index: tuple[float, dict[str, str]] | None = None

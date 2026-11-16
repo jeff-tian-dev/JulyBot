@@ -1,4 +1,4 @@
-# JulyBot — Clash of Clans Discord Bot
+# Blossom — Clash of Clans Discord Bot
 
 A Discord bot for Clash of Clans clans, built around nine independent modules:
 
@@ -172,7 +172,7 @@ cp .env.example .env   # only if setup.sh didn't already create it
 | `LEGEND_POLL_INTERVAL_MINUTES`  | no       | `60`                                   | Legend snapshot cadence                            |
 | `CACHE_REFRESH_INTERVAL_HOURS`  | no       | `24`                                   | Base-finder ingestion cadence                      |
 | `X_COOKIES`                     | no       | empty                                  | Semicolon-delimited browser cookies; empty disables X monitor (`TWITTER_COOKIES` still accepted) |
-| `X_SESSION_NAME`                | no       | `julybot_x`                            | tweety session file basename under `data/x/` (`TWITTER_SESSION_NAME` still accepted) |
+| `X_SESSION_NAME`                | no       | `blossom_x`                            | tweety session file basename under `data/x/` (`TWITTER_SESSION_NAME` still accepted) |
 | `X_POLL_INTERVAL_MINUTES`       | no       | `10`                                   | X account poll cadence (`TWITTER_POLL_INTERVAL_MINUTES` still accepted) |
 | `X_PING_ROLE_ID`                | no       | `0`                                    | **Legacy** — per server via `/setup pingrole`; copied into the home server once (`TWITTER_PING_ROLE_ID` still accepted) |
 | `X_PING_COOLDOWN_HOURS`         | no       | `3`                                    | After a ping, new X posts within this window post silently |
@@ -213,7 +213,7 @@ The bot runs from the repo root on the Mac Studio. Foreground and background are
 | **Restart after a code change** | `./deploy/install-service.sh` (re-run; safe) |
 | **Remove the launchd agent** | `./deploy/uninstall-service.sh` |
 
-Background logs: `logs/julybot.stdout.log` and `logs/julybot.stderr.log`.
+Background logs: `logs/blossom.stdout.log` and `logs/blossom.stderr.log`.
 
 Startup sequence: load settings -> open asyncpg pool -> ensure tables -> seed unseeded YouTube channels -> start APScheduler -> connect Discord. Ctrl-C (foreground) or `./deploy/stop.sh` (background) triggers an ordered shutdown.
 

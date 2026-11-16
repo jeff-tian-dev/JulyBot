@@ -2,7 +2,7 @@
 # Remove the auto-update launchd agent. The bot itself keeps running.
 set -euo pipefail
 
-LABEL="com.julybot.autoupdate"
+LABEL="com.blossom.autoupdate"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
 if [[ -f "$PLIST" ]]; then

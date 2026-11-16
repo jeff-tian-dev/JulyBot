@@ -4,8 +4,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LABEL="com.julybot.autoupdate"
-PLIST_SRC="$ROOT/deploy/com.julybot.autoupdate.plist.template"
+LABEL="com.blossom.autoupdate"
+PLIST_SRC="$ROOT/deploy/com.blossom.autoupdate.plist.template"
 PLIST_DEST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
 if [[ ! -x "$ROOT/.venv/bin/python" ]]; then
