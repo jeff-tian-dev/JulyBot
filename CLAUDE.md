@@ -646,3 +646,7 @@ When you discover a non-obvious convention, an architectural decision, or a work
 - **A category holds 50 channels** (`CATEGORY_CHANNEL_LIMIT`). When full, opening is refused and the row rolled back. `MAX_TICKET_TYPES = 25` is Discord's button cap per message. An invalid button emoji makes Discord reject the whole panel, so `validate_emoji` refuses plain words.
 - The SQL (including six simultaneous opens, where exactly one wins) was run against a real Postgres via `pgserver` in a scratch venv. `.venv` is Python 3.9, so new code can't use 3.10+ syntax at runtime, whatever "Python 3.11+" above says.
 - Tests: `tests/test_tickets.py`, `tests/test_ticket_commands.py`.
+
+## 2026-11-16 — ticket button emojis: resolved by name (Nitro gotcha)
+
+- **Without Nitro, Discord sends an animated or other-server emoji as the plain text `:name:`**, not `<a:name:id>`, because the client only converts emojis the *typing user* can use. The bot can use any custom emoji from a server it's in, so `render.resolve_emoji(text, usable_emojis(bot, guild))` looks the name up itself (this server first, then the bot's other servers, exact case then any case). It also takes `name:id`, a bare id, or the emoji's CDN link. A custom emoji the bot can't use is refused, since one bad button emoji makes Discord reject the whole panel. `validate_emoji` is still the check for standard emojis.

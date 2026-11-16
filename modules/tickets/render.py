@@ -45,6 +45,14 @@ TRANSCRIPT_TIME_FORMAT = "%Y-%m-%d %H:%M:%S UTC"
 
 _CUSTOM_EMOJI = re.compile(r"^<a?:\w{2,32}:\d{15,22}>$")
 _ASCII_LETTER = re.compile(r"[A-Za-z]")
+# Ways to name a custom emoji by id: <a:name:id>, name:id, a bare id, or its CDN link.
+_EMOJI_ID_FORMS = re.compile(
+    r"^(?:<a?:\w{2,32}:(?P<id>\d{15,22})>"
+    r"|:?\w{2,32}:(?P<id2>\d{15,22})"
+    r"|(?P<id3>\d{15,22})"
+    r"|https://(?:cdn|media)\.discordapp\.(?:com|net)/emojis/(?P<id4>\d{15,22})\.\w+(?:\?\S*)?)$"
+)
+_EMOJI_NAME = re.compile(r"^:?(?P<name>\w{2,32}):?$")
 _NOT_SLUG = re.compile(r"[^a-z0-9]+")
 
 
@@ -80,6 +88,56 @@ def validate_emoji(emoji: str | None) -> str | None:
             "or a custom emoji from this server."
         )
     return cleaned
+
+
+def resolve_emoji(emoji: str | None, available) -> str | None:
+    """Turn what an admin typed into a button emoji, looking custom ones up by name.
+
+    `available` is every custom emoji the bot can use, this server's first.
+    Needed because Discord only converts `:name:` into `<:name:id>` for emojis
+    the *typing user* can use: without Nitro, an animated emoji or one from
+    another server arrives as the plain text `:name:`. The bot can use those
+    regardless, so it resolves the name itself. Also accepts `<a:name:id>`,
+    `name:id`, a bare id, and an emoji's image link (right-click → Copy Link).
+
+    A custom emoji the bot can't use is refused here: Discord would reject the
+    whole panel over it.
+    """
+    cleaned = (emoji or "").strip()
+    if not cleaned:
+        return None
+    usable = [e for e in available if getattr(e, "available", True)]
+
+    match = _EMOJI_ID_FORMS.match(cleaned)
+    if match:
+        emoji_id = int(next(g for g in match.groups() if g))
+        found = next((e for e in usable if e.id == emoji_id), None)
+        if found is None:
+            raise TicketError(
+                "I can't use that emoji — I can only use custom emojis from servers I'm in."
+            )
+        return _emoji_markup(found)
+
+    match = _EMOJI_NAME.match(cleaned)
+    if match:
+        name = match.group("name")
+        found = [e for e in usable if e.name == name] or [
+            e for e in usable if e.name.lower() == name.lower()
+        ]
+        if not found:
+            if cleaned.startswith(":") or not _ASCII_LETTER.search(cleaned):
+                raise TicketError(
+                    f"I can't find a custom emoji called `{name}` in any server I'm in."
+                )
+            return validate_emoji(cleaned)  # a plain word: refused with the usual message
+        # This server's emojis come first, so a local one wins a name clash.
+        return _emoji_markup(found[0])
+
+    return validate_emoji(cleaned)
+
+
+def _emoji_markup(emoji) -> str:
+    return f"<{'a' if emoji.animated else ''}:{emoji.name}:{emoji.id}>"
 
 
 def validate_content(title: str | None, body: str | None) -> tuple[str | None, str | None]:

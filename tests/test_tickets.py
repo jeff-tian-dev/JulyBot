@@ -125,6 +125,55 @@ def test_emoji_blank_is_none() -> None:
     assert render.validate_emoji("  ") is None
 
 
+LOCAL_SPIN = SimpleNamespace(name="spin", id=111111111111111111, animated=True, available=True)
+OTHER_SPIN = SimpleNamespace(name="spin", id=222222222222222222, animated=True, available=True)
+OTHER_STAR = SimpleNamespace(name="Star", id=333333333333333333, animated=False, available=True)
+LOST = SimpleNamespace(name="lost", id=444444444444444444, animated=False, available=False)
+EMOJIS = [LOCAL_SPIN, OTHER_SPIN, OTHER_STAR, LOST]
+
+
+@pytest.mark.parametrize("typed", [":spin:", "spin", " :spin: "])
+def test_resolve_finds_an_emoji_by_name_this_server_first(typed) -> None:
+    """Without Nitro, Discord sends an animated/external emoji as plain `:name:`."""
+    assert render.resolve_emoji(typed, EMOJIS) == "<a:spin:111111111111111111>"
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
+        "<a:spin:222222222222222222>",
+        "<:spin:222222222222222222>",  # wrong animated flag is corrected
+        "spin:222222222222222222",
+        "222222222222222222",
+        "https://cdn.discordapp.com/emojis/222222222222222222.gif?size=48",
+    ],
+)
+def test_resolve_accepts_every_way_of_naming_an_id(typed) -> None:
+    assert render.resolve_emoji(typed, EMOJIS) == "<a:spin:222222222222222222>"
+
+
+def test_resolve_name_match_falls_back_to_any_case() -> None:
+    assert render.resolve_emoji(":star:", EMOJIS) == "<:Star:333333333333333333>"
+
+
+@pytest.mark.parametrize("typed", [":nope:", "<:x:999999999999999999>", ":lost:"])
+def test_resolve_refuses_an_emoji_the_bot_cant_use(typed) -> None:
+    """Discord would reject the whole panel over it."""
+    with pytest.raises(TicketError):
+        render.resolve_emoji(typed, EMOJIS)
+
+
+@pytest.mark.parametrize("typed", ["🎫", "1️⃣"])
+def test_resolve_passes_standard_emojis_through(typed) -> None:
+    assert render.resolve_emoji(typed, EMOJIS) == typed
+
+
+def test_resolve_still_refuses_plain_words() -> None:
+    with pytest.raises(TicketError, match="doesn't look like an emoji"):
+        render.resolve_emoji("ticket", EMOJIS)
+    assert render.resolve_emoji("  ", EMOJIS) is None
+
+
 def test_name_is_capped_at_the_button_label_limit() -> None:
     assert render.validate_name("  Buy   a sub ") == "Buy a sub"
     with pytest.raises(TicketError):

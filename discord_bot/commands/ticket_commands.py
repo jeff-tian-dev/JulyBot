@@ -55,6 +55,16 @@ def check_image(attachment: disnake.Attachment | None) -> None:
         raise TicketError(f"That image is too big — the limit is {limit_mb} MB.")
 
 
+def usable_emojis(bot, guild) -> list:
+    """Every custom emoji the bot can put on a button, this server's first.
+
+    Bots can use custom emojis (animated too) from any server they're in, with
+    no Nitro — which is what lets an admin without Nitro pick one by name.
+    """
+    local = list(guild.emojis)
+    return local + [e for e in bot.emojis if e.guild_id != guild.id]
+
+
 async def apply_image(
     guild_id: int,
     stem: str,
@@ -385,7 +395,10 @@ class TicketCommands(commands.Cog):
         name: str = commands.Param(
             max_length=render.MAX_NAME_LENGTH, description="The button's label, e.g. Support."
         ),
-        emoji: str = commands.Param(default=None, description="An emoji for the button."),
+        emoji: str = commands.Param(
+            default=None,
+            description="An emoji for the button. Custom/animated: type its name, e.g. :spin:",
+        ),
         image: disnake.Attachment = commands.Param(
             default=None, description="A banner shown at the top of every ticket of this type."
         ),
@@ -393,7 +406,7 @@ class TicketCommands(commands.Cog):
         pool = self.bot.pool
         try:
             name = render.validate_name(name)
-            emoji = render.validate_emoji(emoji)
+            emoji = render.resolve_emoji(emoji, usable_emojis(self.bot, inter.guild))
             check_image(image)
             types = await storage.list_types(pool, inter.guild.id)
             if len(types) >= render.MAX_TICKET_TYPES:
@@ -461,7 +474,10 @@ class TicketCommands(commands.Cog):
         new_name: str = commands.Param(
             default=None, max_length=render.MAX_NAME_LENGTH, description="Rename the button."
         ),
-        emoji: str = commands.Param(default=None, description="A new emoji for the button."),
+        emoji: str = commands.Param(
+            default=None,
+            description="A new emoji for the button. Custom/animated: type its name, e.g. :spin:",
+        ),
         remove_emoji: bool = commands.Param(default=False, description="Take the emoji off the button."),
         image: disnake.Attachment = commands.Param(default=None, description="A new banner."),
         remove_image: bool = commands.Param(default=False, description="Take the current banner off."),
@@ -475,7 +491,7 @@ class TicketCommands(commands.Cog):
             return
         try:
             final_name = render.validate_name(new_name) if new_name else record["name"]
-            new_emoji = render.validate_emoji(emoji)
+            new_emoji = render.resolve_emoji(emoji, usable_emojis(self.bot, inter.guild))
             check_image(image)
         except TicketError as exc:
             await inter.response.send_message(f"⚠️ {exc}", ephemeral=True)

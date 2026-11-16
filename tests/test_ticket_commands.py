@@ -425,6 +425,31 @@ async def test_type_add_refuses_a_word_as_the_emoji() -> None:
 
 
 @pytest.mark.asyncio
+async def test_type_add_resolves_an_emoji_from_another_server_by_name() -> None:
+    """An admin without Nitro types `:spin:` and gets the animated emoji."""
+    inter = _interaction()
+    inter.guild.emojis = []
+    cog = _cog()
+    cog.bot.emojis = [
+        SimpleNamespace(name="spin", id=222222222222222222, animated=True, available=True, guild_id=99)
+    ]
+    with patch.object(storage, "list_types", AsyncMock(return_value=[])), \
+            patch.object(tc, "ContentModal") as modal:
+        await cog.type_add.callback(cog, inter, name="Support", emoji=":spin:", image=None)
+    inter.response.send_modal.assert_awaited_once()
+    submit = modal.call_args.kwargs["on_submit"]
+    modal_inter = MagicMock()
+    modal_inter.guild.id = GUILD_ID
+    modal_inter.author.id = 555
+    modal_inter.edit_original_response = AsyncMock()
+    with patch.object(storage, "create_type", AsyncMock(return_value=_type())) as create, \
+            patch.object(service, "refresh_panel", AsyncMock(return_value=None)), \
+            patch.object(tc, "_send_preview", AsyncMock()):
+        await submit(modal_inter, "Hi", "Tell us")
+    assert create.await_args.kwargs["emoji"] == "<a:spin:222222222222222222>"
+
+
+@pytest.mark.asyncio
 async def test_type_add_creates_the_type_updates_the_panel_and_previews_it() -> None:
     inter = _interaction()
     cog = _cog()
