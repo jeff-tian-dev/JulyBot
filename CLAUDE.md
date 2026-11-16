@@ -657,3 +657,9 @@ When you discover a non-obvious convention, an architectural decision, or a work
 - Stored as `ticket_config.panel_thumbnail` / `ticket_types.thumbnail`, files `panel-thumb.<ext>` / `type-<id>-thumb.<ext>` next to the banners (distinct stems so a thumbnail never overwrites a banner). Both files are re-uploaded together via `service.load_media` / `media_files`; sends now pass `files=[...]`, never `file=`.
 - **Migration `MIGRATE_TICKET_THUMBNAILS` checks `information_schema` before each `ALTER`.** An unguarded `ADD COLUMN IF NOT EXISTS` still takes the table lock on every start (the 2026-10-29 hang); guarded, it only locks once, on the first deploy. Keep that pattern for future ticket-table columns.
 - **Unverified live:** that `attachment://` resolves inside a section `Thumbnail` (Discord documents it; same open question as the `/postbase` media gallery). If the thumbnail shows as broken, suspect that first.
+
+## 2026-11-16 — custom emojis in ticket titles and messages
+
+- **A modal is a plain text box: Discord's client never converts `:name:` typed there**, so custom emojis in the panel/type title and message showed as literal text. `render.expand_custom_emojis` swaps `:name:` for `<:name:id>` / `<a:name:id>` using the same lookup as button emojis (`usable_emojis`, this server first). `clean_content` in the Cog expands *before* `validate_content`, so length limits apply to what's actually sent. Unknown names are left as typed, and so are `<:name:id>`, times like `10:30:45` and `<t:…:R>` timestamps.
+- **Standard emojis are not converted** (`:fire:` stays text): there's no shortcode table without adding a dependency (the `emoji` package was considered). Pasting the character works (Win + . opens the picker in the form).
+- Other-server emojis need **Use External Emojis** for the bot in that channel, same as button emojis.

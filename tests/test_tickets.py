@@ -1051,3 +1051,39 @@ def test_thumbnail_migration_is_guarded_and_stays_off_guild_settings() -> None:
 def test_thumbnail_files_never_collide_with_banners() -> None:
     assert images.type_thumbnail_stem(3) != images.type_stem(3)
     assert images.PANEL_THUMBNAIL_STEM != images.PANEL_STEM
+
+
+# --- custom emojis in the title and message -----------------------------------
+
+
+def test_custom_emoji_names_in_text_become_the_emoji() -> None:
+    """A modal never converts `:name:`, so the bot does it (this server's first)."""
+    text = "Welcome :spin: to tickets :star:!"
+    assert render.expand_custom_emojis(text, EMOJIS) == (
+        "Welcome <a:spin:111111111111111111> to tickets <:Star:333333333333333333>!"
+    )
+
+
+def test_adjacent_custom_emojis_both_convert() -> None:
+    assert render.expand_custom_emojis(":spin::spin:", EMOJIS) == (
+        "<a:spin:111111111111111111><a:spin:111111111111111111>"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        ":fire: is a standard emoji with no table here",  # left for the character to be pasted
+        ":lost: is unavailable to the bot",
+        "already <:spin:111111111111111111> and <a:spin:111111111111111111>",
+        "doors open 10:30:45",
+        "<t:1700000000:R>",
+    ],
+)
+def test_text_that_is_not_a_usable_custom_emoji_is_left_alone(text) -> None:
+    assert render.expand_custom_emojis(text, EMOJIS) == text
+
+
+def test_no_text_or_no_emojis_is_a_no_op() -> None:
+    assert render.expand_custom_emojis(None, EMOJIS) is None
+    assert render.expand_custom_emojis(":spin:", []) == ":spin:"

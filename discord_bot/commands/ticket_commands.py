@@ -35,7 +35,7 @@ MODAL_TIMEOUT_SECONDS = 1800
 # Discord truncates modal titles past 45 characters.
 MAX_MODAL_TITLE_LENGTH = 45
 MAX_AUTOCOMPLETE_CHOICES = 25
-FORMATTING_HINT = "**bold**  *italics*  - bullet point  # Heading"
+FORMATTING_HINT = "**bold**  *italics*  - bullet point  # Heading  :custom_emoji:"
 NEXT_STEPS = (
     "Next: `/ticket role add` for staff, `/ticket type add` for each kind of ticket, "
     "then `/ticket panel` to post the message with the buttons."
@@ -62,6 +62,18 @@ def usable_emojis(bot, guild) -> list:
     """
     local = list(guild.emojis)
     return local + [e for e in bot.emojis if e.guild_id != guild.id]
+
+
+def clean_content(bot, guild, title: str | None, body: str | None) -> tuple[str | None, str | None]:
+    """Validate a form's title and message after turning `:name:` into custom emojis.
+
+    Expanded first, so the length limits apply to what is actually sent.
+    """
+    available = usable_emojis(bot, guild)
+    return render.validate_content(
+        render.expand_custom_emojis(title, available),
+        render.expand_custom_emojis(body, available),
+    )
 
 
 async def apply_image(
@@ -369,8 +381,8 @@ class TicketCommands(commands.Cog):
             return
 
         async def submit(modal_inter: disnake.ModalInteraction, title, body) -> None:
-            title, body = render.validate_content(title, body)
             guild = modal_inter.guild
+            title, body = clean_content(self.bot, guild, title, body)
             filename = await apply_image(
                 guild.id, images.PANEL_STEM, config.get("panel_image"), image, remove_image
             )
@@ -440,8 +452,8 @@ class TicketCommands(commands.Cog):
             return
 
         async def submit(modal_inter: disnake.ModalInteraction, title, body) -> None:
-            title, body = render.validate_content(title, body)
             guild = modal_inter.guild
+            title, body = clean_content(self.bot, guild, title, body)
             try:
                 record = await storage.create_type(
                     pool,
@@ -540,8 +552,8 @@ class TicketCommands(commands.Cog):
         final_emoji = None if remove_emoji else (new_emoji or record.get("emoji"))
 
         async def submit(modal_inter: disnake.ModalInteraction, title, body) -> None:
-            title, body = render.validate_content(title, body)
             guild = modal_inter.guild
+            title, body = clean_content(self.bot, guild, title, body)
             filename = await apply_image(
                 guild.id, images.type_stem(record["id"]), record.get("image"), image, remove_image
             )

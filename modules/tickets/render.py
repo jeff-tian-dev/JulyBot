@@ -54,6 +54,9 @@ _EMOJI_ID_FORMS = re.compile(
     r"|https://(?:cdn|media)\.discordapp\.(?:com|net)/emojis/(?P<id4>\d{15,22})\.\w+(?:\?\S*)?)$"
 )
 _EMOJI_NAME = re.compile(r"^:?(?P<name>\w{2,32}):?$")
+# `:name:` inside running text. Not preceded by `<` or a word character, so the
+# name inside `<:name:id>` / `<a:name:id>` and times like 10:30:45 are left alone.
+_EMOJI_SHORTCODE = re.compile(r"(?<![<\w]):(?P<name>\w{2,32}):")
 _NOT_SLUG = re.compile(r"[^a-z0-9]+")
 
 
@@ -139,6 +142,32 @@ def resolve_emoji(emoji: str | None, available) -> str | None:
 
 def _emoji_markup(emoji) -> str:
     return f"<{'a' if emoji.animated else ''}:{emoji.name}:{emoji.id}>"
+
+
+def expand_custom_emojis(text: str | None, available) -> str | None:
+    """Turn `:name:` in an admin's title or message into the custom emoji.
+
+    The title and message are typed into a modal, which is a plain text box:
+    Discord's client never converts `:name:` there, so without this a custom
+    emoji shows as literal text. `available` is every custom emoji the bot can
+    use, this server's first (the same lookup as `resolve_emoji`). A name that
+    isn't a custom emoji the bot can use is left as typed. Standard emojis have
+    no table here; they work when the character itself is pasted in.
+    """
+    if not text:
+        return text
+    usable = [e for e in available if getattr(e, "available", True)]
+    if not usable:
+        return text
+
+    def swap(match: re.Match) -> str:
+        name = match.group("name")
+        found = [e for e in usable if e.name == name] or [
+            e for e in usable if e.name.lower() == name.lower()
+        ]
+        return _emoji_markup(found[0]) if found else match.group(0)
+
+    return _EMOJI_SHORTCODE.sub(swap, text)
 
 
 def validate_content(title: str | None, body: str | None) -> tuple[str | None, str | None]:

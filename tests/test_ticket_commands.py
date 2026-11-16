@@ -860,3 +860,31 @@ async def test_type_remove_deletes_the_thumbnail_too() -> None:
         await cog.type_remove.callback(cog, inter, name="Support")
     delete.assert_any_await(GUILD_ID, "type-3.png")
     delete.assert_any_await(GUILD_ID, "type-3-thumb.png")
+
+
+# --- custom emojis in the form text -------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_panel_form_turns_custom_emoji_names_into_emojis() -> None:
+    inter = _interaction()
+    cog = _cog()
+    cog.bot.emojis = [
+        SimpleNamespace(name="spin", id=222222222222222222, animated=True, available=True, guild_id=99)
+    ]
+    with patch.object(storage, "get_config", AsyncMock(return_value={})):
+        await cog.panel.callback(
+            cog, inter, image=None, remove_image=False, thumbnail=None, remove_thumbnail=False
+        )
+    modal = inter.response.send_modal.await_args.args[0]
+
+    submit = _interaction()
+    submit.guild.emojis = []
+    submit.text_values = {"title": ":spin: Tickets", "body": "Open one :spin: :nope:"}
+    with patch.object(storage, "set_panel_content", AsyncMock()) as save, patch.object(
+        service, "publish_panel", AsyncMock(return_value=MagicMock(jump_url="u"))
+    ):
+        await modal.callback(submit)
+
+    assert save.await_args.kwargs["title"] == "<a:spin:222222222222222222> Tickets"
+    assert save.await_args.kwargs["body"] == "Open one <a:spin:222222222222222222> :nope:"
