@@ -39,8 +39,8 @@ MAX_EMOJI_LENGTH = 64
 # Discord allows 25 buttons on a message, five per row.
 MAX_TICKET_TYPES = 25
 BUTTONS_PER_ROW = 5
-# Discord's channel name limit is 100.
-MAX_CHANNEL_NAME_LENGTH = 90
+# Channel names are ticket-<first letters of the type>-<number>.
+TYPE_PREFIX_LENGTH = 3
 # Discord's embed description limit is 4096; the transcript preview stays short.
 TRANSCRIPT_TIME_FORMAT = "%Y-%m-%d %H:%M:%S UTC"
 
@@ -327,15 +327,19 @@ def confirm_close_row(ticket_id: int) -> disnake.ui.ActionRow:
 
 # --- channel name -------------------------------------------------------------
 
-def _slug(text: str) -> str:
-    return _NOT_SLUG.sub("-", (text or "").lower()).strip("-")
+def ticket_number(ticket: dict) -> int:
+    """The number people see. Tickets opened before numbers existed show their id."""
+    return ticket.get("number") or ticket["id"]
 
 
-def channel_name(type_name: str, username: str) -> str:
-    """`<type>-<username>`, in the lowercase-and-dashes form Discord allows."""
-    parts = [p for p in (_slug(type_name), _slug(username)) if p]
-    name = "-".join(parts) or "ticket"
-    return name[:MAX_CHANNEL_NAME_LENGTH].strip("-") or "ticket"
+def channel_name(type_name: str, number: int) -> str:
+    """`ticket-<first 3 letters of the type>-<number>`, e.g. `ticket-sup-1000`.
+
+    Only three letters of the type, and never the member's name, so a Community
+    server's channel-name word filter has almost nothing to object to.
+    """
+    prefix = _NOT_SLUG.sub("", (type_name or "").lower())[:TYPE_PREFIX_LENGTH]
+    return "-".join(p for p in ("ticket", prefix, str(number)) if p)
 
 
 # --- transcript + log ---------------------------------------------------------
@@ -359,7 +363,7 @@ def format_transcript(ticket: dict, messages: list, *, closed_by: str, truncated
     transcript names them rather than linking URLs that are about to die.
     """
     lines = [
-        f"Ticket #{ticket['id']} — {ticket['type_name']}",
+        f"Ticket #{ticket_number(ticket)} — {ticket['type_name']}",
         f"Opened by: {ticket['opener_id']}",
         f"Opened at: {_stamp(ticket.get('opened_at'))}",
         f"Closed by: {closed_by}",
@@ -399,5 +403,5 @@ def log_embed(ticket: dict, *, closed_by_id: int, message_count: int) -> disnake
     opened = _utc(ticket.get("opened_at"))
     if opened:
         embed.add_field(name="Opened", value=f"<t:{int(opened.timestamp())}:f>")
-    embed.set_footer(text=f"Ticket #{ticket['id']}")
+    embed.set_footer(text=f"Ticket #{ticket_number(ticket)}")
     return embed

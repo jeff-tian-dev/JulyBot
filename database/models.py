@@ -756,7 +756,9 @@ CREATE TABLE IF NOT EXISTS ticket_staff_roles (
 # (the Close button's custom_id needs the id), so channel_id is NULL for a
 # moment. The partial unique index is what enforces "one open ticket per member
 # per type" and makes a double-click lose the insert. type_name is a snapshot
-# for the transcript, since the type can be renamed or removed later.
+# for the transcript, since the type can be renamed or removed later. number is
+# the per-server ticket number shown to people (channel `ticket-sup-1000`),
+# assigned by storage.create_ticket; it's NULL on tickets opened before it existed.
 CREATE_TICKETS = """
 CREATE TABLE IF NOT EXISTS tickets (
     id SERIAL PRIMARY KEY,
@@ -767,11 +769,31 @@ CREATE TABLE IF NOT EXISTS tickets (
     opener_id BIGINT NOT NULL,
     opened_at TIMESTAMP DEFAULT NOW(),
     closed_at TIMESTAMP,
-    closed_by BIGINT
+    closed_by BIGINT,
+    number INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tickets_one_open
     ON tickets (guild_id, opener_id, type_id) WHERE closed_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_tickets_channel ON tickets (channel_id);
+"""
+
+# Per-server ticket numbers, added after the tickets table shipped. Guarded like
+# MIGRATE_TICKET_THUMBNAILS so startup never takes the table lock once it's done.
+MIGRATE_TICKET_NUMBERS = """
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'tickets' AND column_name = 'number'
+    ) THEN
+        ALTER TABLE tickets ADD COLUMN number INTEGER;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes WHERE indexname = 'idx_tickets_guild_number'
+    ) THEN
+        CREATE UNIQUE INDEX idx_tickets_guild_number ON tickets (guild_id, number);
+    END IF;
+END $$;
 """
 
 ALL_TABLES = (
@@ -931,6 +953,7 @@ async def create_tables(pool: asyncpg.Pool, home_guild_id: int = 0) -> None:
         await conn.execute(CREATE_TICKET_STAFF_ROLES)
         # After ticket_types: it references them.
         await conn.execute(CREATE_TICKETS)
+        await conn.execute(MIGRATE_TICKET_NUMBERS)
 
 
 async def drop_tables(pool: asyncpg.Pool) -> None:

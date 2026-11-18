@@ -258,11 +258,11 @@ async def open_ticket(
 
     try:
         channel = await guild.create_text_channel(
-            render.channel_name(ticket_type["name"], member.name),
+            render.channel_name(ticket_type["name"], render.ticket_number(ticket)),
             category=category,
             overwrites=overwrites,
-            topic=f"{ticket_type['name']} ticket #{ticket['id']} — opened by {member} ({member.id})",
-            reason=f"Ticket #{ticket['id']} opened by {member} ({member.id})",
+            topic=f"{ticket_type['name']} ticket #{render.ticket_number(ticket)} — opened by {member} ({member.id})",
+            reason=f"Ticket #{render.ticket_number(ticket)} opened by {member} ({member.id})",
         )
     except disnake.HTTPException as exc:
         await storage.delete_ticket(pool, ticket["id"])
@@ -353,7 +353,7 @@ async def close_ticket(
         )
         await log_channel.send(
             embed=render.log_embed(claimed, closed_by_id=closed_by.id, message_count=len(messages)),
-            file=disnake.File(io.BytesIO(text.encode("utf-8")), filename=f"ticket-{ticket_id}.txt"),
+            file=disnake.File(io.BytesIO(text.encode("utf-8")), filename=f"ticket-{render.ticket_number(claimed)}.txt"),
             allowed_mentions=NO_PINGS,
         )
     except Exception as exc:  # noqa: BLE001 — any failure here must leave the ticket open
@@ -368,7 +368,7 @@ async def close_ticket(
     if channel is None:
         return
     try:
-        await channel.delete(reason=f"Ticket #{ticket_id} closed by {closed_by} ({closed_by.id})")
+        await channel.delete(reason=f"Ticket #{render.ticket_number(claimed)} closed by {closed_by} ({closed_by.id})")
     except disnake.NotFound:
         pass
     except disnake.HTTPException as exc:

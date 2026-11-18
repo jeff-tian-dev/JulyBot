@@ -15,6 +15,9 @@ import asyncpg
 
 logger = logging.getLogger(__name__)
 
+# A server's first ticket is #1000, then 1001, 1002, ...
+FIRST_TICKET_NUMBER = 1000
+
 
 class DuplicateTypeError(ValueError):
     """A live ticket type in this server already has that name."""
@@ -271,20 +274,33 @@ async def create_ticket(
     """Claim a new open ticket, or None if this member already has one of this type.
 
     The partial unique index decides, so two simultaneous clicks can't both win.
+
+    The ticket also gets the server's next ticket number, from FIRST_TICKET_NUMBER
+    up. Locking the server's ticket_config row makes simultaneous opens take
+    turns, so two members can't be handed the same number. A ticket whose open
+    fails is deleted, so its number is reused rather than leaving a gap.
     """
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO tickets (guild_id, type_id, type_name, opener_id)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (guild_id, opener_id, type_id) WHERE closed_at IS NULL DO NOTHING
-            RETURNING *;
-            """,
-            guild_id,
-            type_id,
-            type_name,
-            opener_id,
-        )
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT 1 FROM ticket_config WHERE guild_id = $1 FOR UPDATE;", guild_id
+            )
+            row = await conn.fetchrow(
+                """
+                INSERT INTO tickets (guild_id, type_id, type_name, opener_id, number)
+                VALUES (
+                    $1, $2, $3, $4,
+                    (SELECT COALESCE(MAX(number) + 1, $5) FROM tickets WHERE guild_id = $1)
+                )
+                ON CONFLICT (guild_id, opener_id, type_id) WHERE closed_at IS NULL DO NOTHING
+                RETURNING *;
+                """,
+                guild_id,
+                type_id,
+                type_name,
+                opener_id,
+                FIRST_TICKET_NUMBER,
+            )
     return _dict(row)
 
 

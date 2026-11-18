@@ -23,6 +23,14 @@ OPENER_ID = 4242
 STAFF_ROLE_ID = 900
 
 
+class _FakeTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
 class _FakePoolAcquireCtx:
     def __init__(self, conn) -> None:
         self._conn = conn
@@ -276,21 +284,38 @@ def test_a_full_ticket_message_fits_discords_text_limit() -> None:
 
 
 @pytest.mark.parametrize(
-    ("type_name", "username", "expected"),
+    "type_name, number, expected",
     [
-        ("Support", "Jeff.T 23", "support-jeff-t-23"),
-        ("Buy a Sub!", "july", "buy-a-sub-july"),
-        ("Support", "عبدالله", "support"),  # nothing Discord-safe left of the name
-        ("🎫", "🎫", "ticket"),
+        ("Support", 1000, "ticket-sup-1000"),
+        ("Buy a Sub!", 1001, "ticket-buy-1001"),
+        ("bullshit #1", 1002, "ticket-bul-1002"),
+        ("CWL", 1003, "ticket-cwl-1003"),
+        ("Q&A", 1004, "ticket-qa-1004"),
+        ("🎫", 1005, "ticket-1005"),  # nothing Discord-safe in the type's name
     ],
 )
-def test_channel_name(type_name, username, expected) -> None:
-    assert render.channel_name(type_name, username) == expected
+def test_channel_name(type_name, number, expected) -> None:
+    assert render.channel_name(type_name, number) == expected
 
 
-def test_channel_name_stays_under_discords_limit() -> None:
-    name = render.channel_name("x" * 80, "y" * 80)
-    assert len(name) <= render.MAX_CHANNEL_NAME_LENGTH
+def test_ticket_number_falls_back_to_the_id_for_old_tickets() -> None:
+    assert render.ticket_number(_ticket(number=1000)) == 1000
+    assert render.ticket_number(_ticket(number=None)) == 11
+
+
+def test_create_ticket_numbers_from_1000_under_a_lock() -> None:
+    """Two members opening at once must never share a number."""
+    import inspect
+    source = inspect.getsource(storage.create_ticket)
+    assert "FOR UPDATE" in source
+    assert "COALESCE(MAX(number) + 1, $5)" in source
+    assert storage.FIRST_TICKET_NUMBER == 1000
+
+
+def test_ticket_numbers_migration_is_guarded_and_wired() -> None:
+    sql = models.MIGRATE_TICKET_NUMBERS
+    assert "information_schema.columns" in sql and "pg_indexes" in sql
+    assert "idx_tickets_guild_number" in sql
 
 
 # --- transcript ---------------------------------------------------------------
@@ -481,7 +506,7 @@ async def test_open_claims_the_row_then_makes_a_private_channel() -> None:
     # The row exists before the channel: the Close button's id comes from it.
     assert env.calls == ["create_ticket", "create_channel", "send"]
     args, kwargs = env.guild.create_text_channel.await_args
-    assert args == ("support-jeff",)
+    assert args == ("ticket-sup-11",)  # the row has no number in this fixture, so its id
     assert kwargs["category"] is env.category
     overwrites = kwargs["overwrites"]
     assert overwrites[env.guild.default_role].view_channel is False
@@ -861,6 +886,8 @@ async def test_refresh_never_raises_and_skips_a_server_with_no_panel() -> None:
 async def test_create_ticket_lets_the_database_decide_who_wins() -> None:
     conn = MagicMock()
     conn.fetchrow = AsyncMock(return_value=None)  # the insert lost the conflict
+    conn.execute = AsyncMock()
+    conn.transaction = MagicMock(return_value=_FakeTransaction())
     result = await storage.create_ticket(
         _fake_pool(conn), GUILD_ID, type_id=3, type_name="Support", opener_id=OPENER_ID
     )
